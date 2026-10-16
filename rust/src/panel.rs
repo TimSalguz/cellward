@@ -21,8 +21,6 @@
 //! setting⇥<default|default-profile|mode|wayland-sandbox>⇥<value>⇥<nix|local|default>
 //! pin⇥<program's key>⇥<its name>⇥<the container it goes to, or empty>
 //! dns⇥<zone>⇥<vpn|public|->⇥<where its names go, for a person>
-//! iface⇥<name>⇥<ethernet|wifi|loopback|virtual>⇥<up: 0|1>⇥<addresses, by commas>
-//! endpoint⇥<zone>⇥<amneziawg|wireguard|openconnect|host|system>⇥<server as written>⇥<address or ->⇥<name: 0|1>⇥<host's interface to it or ->⇥<gateway or ->
 //! task⇥<instance id>⇥<launch>⇥<its program, for a person, or empty>⇥<paused: 0|1>⇥<resident KiB>⇥<CPU ticks>⇥<ticks a second>
 //! tproc⇥<instance id>⇥<launch>⇥<pid>⇥<comm>⇥<resident KiB>⇥<CPU ticks>
 //! ```
@@ -166,39 +164,6 @@ pub fn data(tools: &Tools) -> String {
             crate::dnspath::Side::Vpn.word()
         };
         line(&["dns", &zone, side, &crate::dnspath::words(&dns)]);
-        // Its tunnel and servers, and the host's way to each (`crate::netmap`).
-        if let Some(t) = crate::netmap::tunnel_of(&tools.state.join(&zone)) {
-            if t.servers.is_empty() {
-                line(&["endpoint", &zone, t.kind, "-", "-", "0", "-", "-"]);
-            }
-            for (raw, addr, named) in t.servers {
-                let route = addr.and_then(|a| crate::netmap::route_to(&tools.ip, a));
-                let (dev, via) = match &route {
-                    Some((dev, via)) => (dev.as_str(), via.as_deref().unwrap_or("-")),
-                    None => ("-", "-"),
-                };
-                let addr = addr.map_or("-".to_owned(), |a| a.to_string());
-                line(&[
-                    "endpoint",
-                    &zone,
-                    t.kind,
-                    &raw,
-                    &addr,
-                    if named { "1" } else { "0" },
-                    dev,
-                    via,
-                ]);
-            }
-        }
-    }
-    for i in crate::netmap::ifaces(&tools.ip) {
-        line(&[
-            "iface",
-            &i.name,
-            i.kind,
-            if i.up { "1" } else { "0" },
-            &i.addrs.join(","),
-        ]);
     }
     line(&[
         "network",

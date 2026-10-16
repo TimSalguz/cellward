@@ -54,6 +54,8 @@ rustPlatform.buildRustPackage {
       ./Cargo.toml
       ./Cargo.lock
       ./src
+      # The tests' readings (`window/tests/*.lines`).
+      ./tests
       # iced's renderer with its text damage fixed (vendor/README.md).
       ./vendor
     ];

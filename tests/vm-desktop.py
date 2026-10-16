@@ -1259,31 +1259,23 @@ if wanted(TASKS):
     machine.sleep(2)
 
 
-# --- 10c. The scheme: a zone as it is linked ---------------------------------
+# --- 10c. The scheme: every flow, a metro ------------------------------------
 
-SCHEME = "The scheme: a zone as it is linked, drawn"
+SCHEME = "The scheme: every flow and packet, drawn as a metro"
 
 if wanted(SCHEME):
     with scenario(SCHEME):
-        # The machine as it is, and a zone of AmneziaWG made up beside it:
-        # its server by a name, the host's Wi-Fi it goes by, a public
-        # resolver, a container with traffic.
+        # `cellward scheme --lines` as tests/vm-scheme.nix read it (three
+        # zones, their instances, the host's own; window/tests/scheme.lines):
+        # the window draws it, each row listed beside it, one chosen.
+        machine.copy_from_host(SCHEME_LINES, "/tmp/scheme.lines")
+        machine.succeed("chmod 644 /tmp/scheme.lines")
         real = alice("readlink -f $(command -v cellward)").strip()
-        lines = [
-            "container\twork\tprivate\tnl\t#3366ff",
-            "network\tnl\tzone\t1\t#3366ff\t0\talive",
-            "dns\tnl\tpublic\tDNS 1.1.1.1 — публичный резолвер: от сервера VPN до него имена идут "
-            "открытым текстом — их видят оператор сервера и всё по пути",
-            "endpoint\tnl\tamneziawg\tvpn.example.org:51820\t203.0.113.5\t1\twlp2s0\t192.168.1.1",
-            "iface\twlp2s0\twifi\t1\t192.168.1.5/24",
-            "instance\twork\twork\tnl\t1000\t2000\t1790000000",
-        ]
-        alice("printf '%s\\n' " + " ".join(shlex.quote(l) for l in lines) + " > /tmp/scheme.panel")
         fake = (
             "#!/bin/sh\n"
-            'if [ "$1" = _panel ]; then\n'
-            f"  {real} _panel\n"
-            "  cat /tmp/scheme.panel\n"
+            'if [ "$1" = scheme ]; then\n'
+            '  echo "$*" >> /tmp/scheme.asked\n'
+            "  cat /tmp/scheme.lines\n"
             "  exit 0\n"
             "fi\n"
             f'exec {real} "$@"\n'
@@ -1292,7 +1284,6 @@ if wanted(SCHEME):
             f"echo {base64.b64encode(fake.encode()).decode()} | base64 -d > /tmp/scheme-cellward "
             "&& chmod 755 /tmp/scheme-cellward"
         )
-        print(alice("/tmp/scheme-cellward _panel | grep -E '^(iface|endpoint|dns)'"))
         tools = alice(f"grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' {real}").strip()
         win = machine.succeed(f"grep -o '\"window\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
         alice(
@@ -1306,8 +1297,27 @@ if wanted(SCHEME):
         w = next(w for w in windows() if w["app_id"] == "cellward")
         alice(f"{NIRI_MSG} action focus-window --id {w['id']}")
         alice(f"{NIRI_MSG} action fullscreen-window")
-        machine.sleep(5)
+        machine.wait_until_succeeds("grep -qx 'scheme --lines' /tmp/scheme.asked", timeout=30)
+        machine.sleep(4)
+        # The pointer off the list and the lines (pointed at, a row is
+        # shown alone): every row.
+        pointer("move", 900, 900)
+        machine.sleep(1)
         shot("scheme")
+        # A row in the list chosen (socat's connections, zone nl): its line
+        # alone, its stretches named.
+        pointer("move", 150, 566)
+        machine.sleep(1)
+        pointer("press")
+        pointer("release")
+        machine.sleep(1)
+        pointer("move", 900, 900)
+        machine.sleep(2)
+        shot("scheme-chosen")
+        # Read again while shown, a few seconds apart, not every second.
+        machine.sleep(8)
+        asked = int(machine.succeed("wc -l < /tmp/scheme.asked").strip())
+        assert 3 <= asked <= 8, f"the scheme read {asked} times in ~15 s"
     alice("systemctl --user stop vmscheme", check=False)
     machine.sleep(2)
 

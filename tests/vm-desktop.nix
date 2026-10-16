@@ -217,6 +217,7 @@ let
       os.environ["VM_DESKTOP_VNC"] = ${builtins.toJSON (if vnc then "1" else "")}
       os.environ["VM_DESKTOP_RECORD"] = ${builtins.toJSON (if record then "1" else "")}
       POINTER = "${pkgs.python3}/bin/python3 ${./vm-pointer.py}"
+      SCHEME_LINES = "${../window/tests/scheme.lines}"
       exec(open("${./vm-desktop.py}").read())
     '';
   };

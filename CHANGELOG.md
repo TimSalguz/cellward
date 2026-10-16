@@ -48,6 +48,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   3 but the status pipe at the exec, and `doctor` checks it (`inherited`).
 
 ### Added
+- **The window's scheme is the whole network, as a metro**: the «Схема» tab
+  draws `cellward scheme --lines` (read every few seconds while shown) —
+  every zone, every flow and kind of packet, each a lane from its source to
+  its end; the host's networks each in a frame of their own, the unknown
+  beyond in another. The rows are listed beside it; a row pointed at or
+  chosen is shown alone, each stretch told in full under it. It replaces the
+  one zone's drawing of before.
 - **Whose each broadcast and multicast was**: a counting table in each
   container (decides nothing) counts every launch's broadcast and multicast
   by its cgroup; the keeper keeps each launch's totals with its program, and

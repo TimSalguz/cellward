@@ -1,0 +1,224 @@
+place	tap:main:lan	container	Сеть контейнера	tap · 10.254.0.0/16	0	0	0
+place	relay:main:lan	container	Привратник	пересылка: правила, счётчики	1	0	1
+place	passt:main:lan	zone	Вход в зону	passt	0	0	1
+place	prog:main:lan:ядро контейнера	program	ядро контейнера	программа	0	0	0
+place	prog:main:lan:getent	program	getent	программа	0	0	0
+place	tun:lan	zone	Шифратор	awg0 · WireGuard	1	0	1
+place	out:lan	uplink	Выход зоны	сокет туннеля + pasta	1	0	1
+place	if:eth1	host	eth1	кабель · 192.168.1.1/24	0	0	0
+place	link:eth1	outside	Сеть eth1	адресат прямо в ней, без шлюза	0	0	0
+place	vpn:lan	outside	Сервер VPN lan	192.168.1.2	0	0	0
+place	wall:main:lan	container	Стена контейнера	nft: что не уходит	1	0	0
+place	prog:main:lan:*	program	программы и ядро	контейнера	0	0	0
+place	prog:main:lan:~	program	ядро или запуск вне своей группы	контейнера	0	0	0
+place	tap:main:nl	container	Сеть контейнера	tap · 10.254.0.0/16	0	0	0
+place	relay:main:nl	container	Привратник	пересылка: правила, счётчики	1	0	1
+place	passt:main:nl	zone	Вход в зону	passt	0	0	1
+place	prog:main:nl:curl	program	curl	программа	0	0	0
+place	prog:main:nl:ядро контейнера	program	ядро контейнера	программа	0	0	0
+place	prog:main:nl:ping	program	ping	программа	0	0	0
+place	tun:nl	zone	Шифратор	awg0 · WireGuard	1	0	1
+place	out:nl	uplink	Выход зоны	сокет туннеля + pasta	1	0	1
+place	vpn:nl	outside	Сервер VPN nl	192.168.1.2	0	0	0
+place	dst:main:nl:ping	outside	Куда	10.99.0.1	0	0	0
+place	prog:main:nl:getent	program	getent	программа	0	0	0
+place	prog:main:nl:socat	program	socat	программа	0	0	0
+place	dst:main:nl:socat	outside	Куда	10.99.0.1:8080	0	0	0
+place	wall:main:nl	container	Стена контейнера	nft: что не уходит	1	0	0
+place	prog:main:nl:*	program	программы и ядро	контейнера	0	0	0
+place	prog:main:nl:~	program	ядро или запуск вне своей группы	контейнера	0	0	0
+place	prog:main:nl:announce	program	announce	программа	0	0	0
+place	tap:main:pub	container	Сеть контейнера	tap · 10.254.0.0/16	0	0	0
+place	relay:main:pub	container	Привратник	пересылка: правила, счётчики	1	0	1
+place	passt:main:pub	zone	Вход в зону	passt	0	0	1
+place	prog:main:pub:getent	program	getent	программа	0	0	0
+place	tun:pub	zone	Шифратор	awg0 · WireGuard	1	0	1
+place	out:pub	uplink	Выход зоны	сокет туннеля + pasta	1	0	1
+place	vpn:pub	outside	Сервер VPN pub	192.168.1.2	0	0	0
+place	dns:1.1.1.1	outside	Резолвер	1.1.1.1	0	0	0
+place	prog:main:pub:ядро контейнера	program	ядро контейнера	программа	0	0	0
+place	wall:main:pub	container	Стена контейнера	nft: что не уходит	1	0	0
+place	prog:main:pub:*	program	программы и ядро	контейнера	0	0	0
+place	prog:main:pub:~	program	ядро или запуск вне своей группы	контейнера	0	0	0
+place	hostdns	host	DNS хоста	как его настроил хост	0	0	0
+place	if:eth0	host	eth0	кабель · 10.0.2.15/24	0	0	0
+place	lan:eth0	outside	Шлюз 10.0.2.2	в сети eth0	0	0	0
+place	isp:eth0	outside	⋯ дальше не известно ⋯	сети за шлюзом	0	1	0
+place	hostapps	host	Программы хоста	вне cellward	0	0	0
+place	hostkernel	host	Ядро хоста	его служебное	0	0	0
+place	peer:eth0	outside	Соседи и сети за ними	eth0	0	0	0
+group	instance:main:lan	Настоящий дом · сеть lan
+group	instance:main:nl	Настоящий дом · сеть nl
+group	instance:main:pub	Настоящий дом · сеть pub
+group	zone:lan	Зона lan · WireGuard
+group	zone:nl	Зона nl · WireGuard
+group	zone:pub	Зона pub · WireGuard
+group	host	Сам хост
+row	main:lan:ядро контейнера:local	instance:main:lan	ядро контейнера	local	prog:main:lan:ядро контейнера	answered	отвечает вход в зону; дальше не идёт	3	366	164	1
+hop	main:lan:ядро контейнера:local	tap:main:lan	служебное ядра: соседи IPv6, ICMP	IP-пакет	machine	только контейнер
+hop	main:lan:ядро контейнера:local	relay:main:lan	служебное ядра: соседи IPv6, ICMP	пакет в кадре Ethernet	machine	только контейнер
+hop	main:lan:ядро контейнера:local	passt:main:lan	служебное ядра: соседи IPv6, ICMP	кадр по unix-сокету (не сеть)	machine	только машина
+row	main:lan:getent:dns	instance:main:lan	getent	dns	prog:main:lan:getent	answered	⚠ 192.168.1.2 — адрес твоей сети (eth1), но спросят его на стороне VPN, не твой роутер; не отвечают имена — причина здесь	2	142	0	1
+hop	main:lan:getent:dns	tap:main:lan	DNS-запрос к 10.254.255.253	IP-пакет	machine	только контейнер
+hop	main:lan:getent:dns	relay:main:lan	DNS-запрос к 10.254.255.253	пакет в кадре Ethernet	machine	только контейнер
+hop	main:lan:getent:dns	passt:main:lan	DNS-запрос к 10.254.255.253	кадр по unix-сокету (не сеть)	machine	только машина
+hop	main:lan:getent:dns	tun:lan	DNS-запрос к 10.254.255.253	IP-пакет зоны	machine	только машина
+hop	main:lan:getent:dns	out:lan	DNS-запрос к 10.254.255.253	зашифровано: UDP к серверу	nobody	никто
+hop	main:lan:getent:dns	if:eth1	DNS-запрос к 10.254.255.253 — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	main:lan:getent:dns	link:eth1	DNS-запрос к 10.254.255.253 — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	main:lan:getent:dns	vpn:lan	DNS-запрос к 10.254.255.253 — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+row	main:lan:ядро контейнера:arp	instance:main:lan	ядро контейнера	arp	prog:main:lan:ядро контейнера	answered	отвечает вход в зону — он и есть шлюз; дальше не идёт	2	84	84	1
+hop	main:lan:ядро контейнера:arp	tap:main:lan	ARP: «у кого адрес шлюза?»	IP-пакет	machine	только контейнер
+hop	main:lan:ядро контейнера:arp	relay:main:lan	ARP: «у кого адрес шлюза?»	пакет в кадре Ethernet	machine	только контейнер
+hop	main:lan:ядро контейнера:arp	passt:main:lan	ARP: «у кого адрес шлюза?»	кадр по unix-сокету (не сеть)	machine	только машина
+row	main:lan:wall:denied	instance:main:lan	запрещённые программы	dropped	prog:main:lan:~	denied	стена контейнера: ядро отклоняет их отправку — 0 пакет(ов)	0	0	0	1
+hop	main:lan:wall:denied	wall:main:lan	запрещённые программы	IP-пакет	machine	только контейнер
+row	main:lan:wall:mcast4	instance:main:lan	multicast IPv4: mDNS, SSDP…	dropped	prog:main:lan:~	denied	стена контейнера: групповые с указанным интерфейсом — не уходят (без него маршрута нет: ядро отказывает ещё до стены) — 0 пакет(ов)	0	0	0	1
+hop	main:lan:wall:mcast4	wall:main:lan	multicast IPv4: mDNS, SSDP…	IP-пакет	machine	только контейнер
+row	main:lan:wall:bcast4	instance:main:lan	broadcast IPv4	dropped	prog:main:lan:~	denied	стена контейнера: широковещательные — в туннель не уходят — 0 пакет(ов)	0	0	0	1
+hop	main:lan:wall:bcast4	wall:main:lan	broadcast IPv4	IP-пакет	machine	только контейнер
+row	main:lan:wall:mcast6	instance:main:lan	multicast IPv6	dropped	prog:main:lan:~	denied	стена контейнера: групповые — не уходят — 4 пакет(ов)	4	0	0	1
+hop	main:lan:wall:mcast6	wall:main:lan	multicast IPv6	IP-пакет	machine	только контейнер
+row	main:lan:wall:rest	instance:main:lan	прочее	dropped	prog:main:lan:~	denied	стена контейнера: не с адреса контейнера или не в туннель — отброшено — 0 пакет(ов)	0	0	0	1
+hop	main:lan:wall:rest	wall:main:lan	прочее	IP-пакет	machine	только контейнер
+row	main:lan:dhcp	instance:main:lan	DHCP	service	prog:main:lan:*	cut	DHCP нет: адрес и маршрут ставит пересылка	0	0	0	0
+hop	main:lan:dhcp	tap:main:lan	DHCP	—	machine	только контейнер
+row	main:nl:curl:denied	instance:main:nl	curl	denied	prog:main:nl:curl	denied	привратник: запрещено правилом контейнера	1	370	0	1
+hop	main:nl:curl:denied	tap:main:nl	соединение программы	IP-пакет	machine	только контейнер
+hop	main:nl:curl:denied	relay:main:nl	соединение программы	пакет в кадре Ethernet	machine	только контейнер
+row	main:nl:ядро контейнера:local	instance:main:nl	ядро контейнера	local	prog:main:nl:ядро контейнера	answered	отвечает вход в зону; дальше не идёт	2	366	0	1
+hop	main:nl:ядро контейнера:local	tap:main:nl	служебное ядра: соседи IPv6, ICMP	IP-пакет	machine	только контейнер
+hop	main:nl:ядро контейнера:local	relay:main:nl	служебное ядра: соседи IPv6, ICMP	пакет в кадре Ethernet	machine	только контейнер
+hop	main:nl:ядро контейнера:local	passt:main:nl	служебное ядра: соседи IPv6, ICMP	кадр по unix-сокету (не сеть)	machine	только машина
+row	main:nl:ядро контейнера:arp	instance:main:nl	ядро контейнера	arp	prog:main:nl:ядро контейнера	answered	отвечает вход в зону — он и есть шлюз; дальше не идёт	2	126	126	1
+hop	main:nl:ядро контейнера:arp	tap:main:nl	ARP: «у кого адрес шлюза?»	IP-пакет	machine	только контейнер
+hop	main:nl:ядро контейнера:arp	relay:main:nl	ARP: «у кого адрес шлюза?»	пакет в кадре Ethernet	machine	только контейнер
+hop	main:nl:ядро контейнера:arp	passt:main:nl	ARP: «у кого адрес шлюза?»	кадр по unix-сокету (не сеть)	machine	только машина
+row	main:nl:ping:ping	instance:main:nl	ping	ping	prog:main:nl:ping	arrives	10.99.0.1	1	98	98	1
+hop	main:nl:ping:ping	tap:main:nl	ping	IP-пакет	machine	только контейнер
+hop	main:nl:ping:ping	relay:main:nl	ping	пакет в кадре Ethernet	machine	только контейнер
+hop	main:nl:ping:ping	passt:main:nl	ping	кадр по unix-сокету (не сеть)	machine	только машина
+hop	main:nl:ping:ping	tun:nl	ping	IP-пакет зоны	machine	только машина
+hop	main:nl:ping:ping	out:nl	ping	зашифровано: UDP к серверу	nobody	никто
+hop	main:nl:ping:ping	if:eth1	ping — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	main:nl:ping:ping	link:eth1	ping — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	main:nl:ping:ping	vpn:nl	ping — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+hop	main:nl:ping:ping	dst:main:nl:ping	соединение программы	IP от адреса сервера	server	сервер VPN: куда; сайт — адрес сервера, не твой
+row	main:nl:getent:dns	instance:main:nl	getent	dns	prog:main:nl:getent	answered	резолвер 10.99.0.1 на стороне VPN: имена видит только она	1	77	93	1
+hop	main:nl:getent:dns	tap:main:nl	DNS-запрос к 10.254.255.253	IP-пакет	machine	только контейнер
+hop	main:nl:getent:dns	relay:main:nl	DNS-запрос к 10.254.255.253	пакет в кадре Ethernet	machine	только контейнер
+hop	main:nl:getent:dns	passt:main:nl	DNS-запрос к 10.254.255.253	кадр по unix-сокету (не сеть)	machine	только машина
+hop	main:nl:getent:dns	tun:nl	DNS-запрос к 10.254.255.253	IP-пакет зоны	machine	только машина
+hop	main:nl:getent:dns	out:nl	DNS-запрос к 10.254.255.253	зашифровано: UDP к серверу	nobody	никто
+hop	main:nl:getent:dns	if:eth1	DNS-запрос к 10.254.255.253 — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	main:nl:getent:dns	link:eth1	DNS-запрос к 10.254.255.253 — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	main:nl:getent:dns	vpn:nl	DNS-запрос к 10.254.255.253 — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+row	main:nl:socat:data	instance:main:nl	socat	data	prog:main:nl:socat	arrives	10.99.0.1:8080	1	290	239	1
+hop	main:nl:socat:data	tap:main:nl	соединение программы	IP-пакет	machine	только контейнер
+hop	main:nl:socat:data	relay:main:nl	соединение программы	пакет в кадре Ethernet	machine	только контейнер
+hop	main:nl:socat:data	passt:main:nl	соединение программы	кадр по unix-сокету (не сеть)	machine	только машина
+hop	main:nl:socat:data	tun:nl	соединение программы	IP-пакет зоны	machine	только машина
+hop	main:nl:socat:data	out:nl	соединение программы	зашифровано: UDP к серверу	nobody	никто
+hop	main:nl:socat:data	if:eth1	соединение программы — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	main:nl:socat:data	link:eth1	соединение программы — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	main:nl:socat:data	vpn:nl	соединение программы — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+hop	main:nl:socat:data	dst:main:nl:socat	соединение программы	IP от адреса сервера	server	сервер VPN: куда; сайт — адрес сервера, не твой
+row	main:nl:wall:denied	instance:main:nl	запрещённые программы	dropped	prog:main:nl:~	denied	стена контейнера: ядро отклоняет их отправку — 0 пакет(ов)	0	0	0	1
+hop	main:nl:wall:denied	wall:main:nl	запрещённые программы	IP-пакет	machine	только контейнер
+row	main:nl:wall:mcast4	instance:main:nl	multicast IPv4: mDNS, SSDP…	dropped	prog:main:nl:~	denied	стена контейнера: групповые с указанным интерфейсом — не уходят (без него маршрута нет: ядро отказывает ещё до стены) — 0 пакет(ов)	0	0	0	1
+hop	main:nl:wall:mcast4	wall:main:nl	multicast IPv4: mDNS, SSDP…	IP-пакет	machine	только контейнер
+row	main:nl:wall:bcast4:announce	instance:main:nl	broadcast IPv4	dropped	prog:main:nl:announce	denied	стена контейнера: широковещательные — в туннель не уходят — 5 пакет(ов)	5	0	0	1
+hop	main:nl:wall:bcast4:announce	wall:main:nl	broadcast IPv4	IP-пакет	machine	только контейнер
+row	main:nl:wall:bcast4	instance:main:nl	broadcast IPv4	dropped	prog:main:nl:~	denied	стена контейнера: широковещательные — в туннель не уходят — 1 пакет(ов)	1	0	0	1
+hop	main:nl:wall:bcast4	wall:main:nl	broadcast IPv4	IP-пакет	machine	только контейнер
+row	main:nl:wall:mcast6:announce	instance:main:nl	multicast IPv6	dropped	prog:main:nl:announce	denied	стена контейнера: групповые — не уходят — 4 пакет(ов)	4	0	0	1
+hop	main:nl:wall:mcast6:announce	wall:main:nl	multicast IPv6	IP-пакет	machine	только контейнер
+row	main:nl:wall:mcast6	instance:main:nl	multicast IPv6	dropped	prog:main:nl:~	denied	стена контейнера: групповые — не уходят — 6 пакет(ов)	6	0	0	1
+hop	main:nl:wall:mcast6	wall:main:nl	multicast IPv6	IP-пакет	machine	только контейнер
+row	main:nl:wall:rest	instance:main:nl	прочее	dropped	prog:main:nl:~	denied	стена контейнера: не с адреса контейнера или не в туннель — отброшено — 0 пакет(ов)	0	0	0	1
+hop	main:nl:wall:rest	wall:main:nl	прочее	IP-пакет	machine	только контейнер
+row	main:nl:dhcp	instance:main:nl	DHCP	service	prog:main:nl:*	cut	DHCP нет: адрес и маршрут ставит пересылка	0	0	0	0
+hop	main:nl:dhcp	tap:main:nl	DHCP	—	machine	только контейнер
+row	main:pub:getent:dns	instance:main:pub	getent	dns	prog:main:pub:getent	arrives	1.1.1.1: имена открытым текстом	1	142	0	1
+hop	main:pub:getent:dns	tap:main:pub	DNS-запрос к 10.254.255.253	IP-пакет	machine	только контейнер
+hop	main:pub:getent:dns	relay:main:pub	DNS-запрос к 10.254.255.253	пакет в кадре Ethernet	machine	только контейнер
+hop	main:pub:getent:dns	passt:main:pub	DNS-запрос к 10.254.255.253	кадр по unix-сокету (не сеть)	machine	только машина
+hop	main:pub:getent:dns	tun:pub	DNS-запрос к 10.254.255.253	IP-пакет зоны	machine	только машина
+hop	main:pub:getent:dns	out:pub	DNS-запрос к 10.254.255.253	зашифровано: UDP к серверу	nobody	никто
+hop	main:pub:getent:dns	if:eth1	DNS-запрос к 10.254.255.253 — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	main:pub:getent:dns	link:eth1	DNS-запрос к 10.254.255.253 — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	main:pub:getent:dns	vpn:pub	DNS-запрос к 10.254.255.253 — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+hop	main:pub:getent:dns	dns:1.1.1.1	DNS-запрос	⚠ UDP 53 открытым текстом	stranger	⚠ сервер VPN, путь до 1.1.1.1, сам 1.1.1.1
+row	main:pub:ядро контейнера:arp	instance:main:pub	ядро контейнера	arp	prog:main:pub:ядро контейнера	answered	отвечает вход в зону — он и есть шлюз; дальше не идёт	2	84	84	1
+hop	main:pub:ядро контейнера:arp	tap:main:pub	ARP: «у кого адрес шлюза?»	IP-пакет	machine	только контейнер
+hop	main:pub:ядро контейнера:arp	relay:main:pub	ARP: «у кого адрес шлюза?»	пакет в кадре Ethernet	machine	только контейнер
+hop	main:pub:ядро контейнера:arp	passt:main:pub	ARP: «у кого адрес шлюза?»	кадр по unix-сокету (не сеть)	machine	только машина
+row	main:pub:ядро контейнера:local	instance:main:pub	ядро контейнера	local	prog:main:pub:ядро контейнера	answered	отвечает вход в зону; дальше не идёт	2	366	0	1
+hop	main:pub:ядро контейнера:local	tap:main:pub	служебное ядра: соседи IPv6, ICMP	IP-пакет	machine	только контейнер
+hop	main:pub:ядро контейнера:local	relay:main:pub	служебное ядра: соседи IPv6, ICMP	пакет в кадре Ethernet	machine	только контейнер
+hop	main:pub:ядро контейнера:local	passt:main:pub	служебное ядра: соседи IPv6, ICMP	кадр по unix-сокету (не сеть)	machine	только машина
+row	main:pub:wall:denied	instance:main:pub	запрещённые программы	dropped	prog:main:pub:~	denied	стена контейнера: ядро отклоняет их отправку — 0 пакет(ов)	0	0	0	1
+hop	main:pub:wall:denied	wall:main:pub	запрещённые программы	IP-пакет	machine	только контейнер
+row	main:pub:wall:mcast4	instance:main:pub	multicast IPv4: mDNS, SSDP…	dropped	prog:main:pub:~	denied	стена контейнера: групповые с указанным интерфейсом — не уходят (без него маршрута нет: ядро отказывает ещё до стены) — 0 пакет(ов)	0	0	0	1
+hop	main:pub:wall:mcast4	wall:main:pub	multicast IPv4: mDNS, SSDP…	IP-пакет	machine	только контейнер
+row	main:pub:wall:bcast4	instance:main:pub	broadcast IPv4	dropped	prog:main:pub:~	denied	стена контейнера: широковещательные — в туннель не уходят — 0 пакет(ов)	0	0	0	1
+hop	main:pub:wall:bcast4	wall:main:pub	broadcast IPv4	IP-пакет	machine	только контейнер
+row	main:pub:wall:mcast6	instance:main:pub	multicast IPv6	dropped	prog:main:pub:~	denied	стена контейнера: групповые — не уходят — 4 пакет(ов)	4	0	0	1
+hop	main:pub:wall:mcast6	wall:main:pub	multicast IPv6	IP-пакет	machine	только контейнер
+row	main:pub:wall:rest	instance:main:pub	прочее	dropped	prog:main:pub:~	denied	стена контейнера: не с адреса контейнера или не в туннель — отброшено — 0 пакет(ов)	0	0	0	1
+hop	main:pub:wall:rest	wall:main:pub	прочее	IP-пакет	machine	только контейнер
+row	main:pub:dhcp	instance:main:pub	DHCP	service	prog:main:pub:*	cut	DHCP нет: адрес и маршрут ставит пересылка	0	0	0	0
+hop	main:pub:dhcp	tap:main:pub	DHCP	—	machine	только контейнер
+row	lan:handshake	zone:lan	WireGuard · клиент VPN зоны lan: рукопожатие, keepalive	handshake	tun:lan	arrives	сервер VPN	0	0	0	1
+hop	lan:handshake	out:lan	рукопожатие и keepalive	зашифровано: UDP к серверу	nobody	никто
+hop	lan:handshake	if:eth1	рукопожатие и keepalive — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	lan:handshake	link:eth1	рукопожатие и keepalive — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	lan:handshake	vpn:lan	рукопожатие и keepalive — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+row	lan:uplink-nd	zone:lan	ND/ARP выхода с pasta	service	out:lan	answered	отвечает pasta сама; дальше не идёт	0	0	0	0
+row	lan:inbound	zone:lan	Входящее из интернета	inbound	vpn:lan	denied	вход в зону не пробрасывает портов — ни до одной программы	0	0	0	0
+hop	lan:inbound	link:eth1	подключение к программе	внутри туннеля	nobody	как туннель: адрес сервера, размер
+hop	lan:inbound	if:eth1	подключение к программе	внутри туннеля	nobody	как туннель: адрес сервера, размер
+hop	lan:inbound	out:lan	подключение к программе	внутри туннеля	nobody	никто
+hop	lan:inbound	tun:lan	то же	IP-пакет зоны	machine	только машина
+row	nl:handshake	zone:nl	WireGuard · клиент VPN зоны nl: рукопожатие, keepalive	handshake	tun:nl	arrives	сервер VPN	0	0	0	1
+hop	nl:handshake	out:nl	рукопожатие и keepalive	зашифровано: UDP к серверу	nobody	никто
+hop	nl:handshake	if:eth1	рукопожатие и keepalive — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	nl:handshake	link:eth1	рукопожатие и keepalive — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	nl:handshake	vpn:nl	рукопожатие и keepalive — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+row	nl:uplink-nd	zone:nl	ND/ARP выхода с pasta	service	out:nl	answered	отвечает pasta сама; дальше не идёт	0	0	0	0
+row	nl:inbound	zone:nl	Входящее из интернета	inbound	vpn:nl	denied	вход в зону не пробрасывает портов — ни до одной программы	0	0	0	0
+hop	nl:inbound	link:eth1	подключение к программе	внутри туннеля	nobody	как туннель: адрес сервера, размер
+hop	nl:inbound	if:eth1	подключение к программе	внутри туннеля	nobody	как туннель: адрес сервера, размер
+hop	nl:inbound	out:nl	подключение к программе	внутри туннеля	nobody	никто
+hop	nl:inbound	tun:nl	то же	IP-пакет зоны	machine	только машина
+row	nl:name:vmvpn.test:51820	zone:nl	Имя сервера vmvpn.test:51820	server-name	hostdns	answered	один раз: адрес запомнен, дальше не спрашивается	0	0	0	1
+hop	nl:name:vmvpn.test:51820	if:eth0	«vmvpn.test?»	IP-пакет хоста	machine	только машина
+hop	nl:name:vmvpn.test:51820	lan:eth0	«vmvpn.test?»	кадр Ethernet	stranger	⚠ локальная сеть и шлюз: имя сервера VPN
+hop	nl:name:vmvpn.test:51820	isp:eth0	«vmvpn.test?»	IP	stranger	⚠ сети за шлюзом и резолвер хоста: какой VPN и когда
+row	pub:handshake	zone:pub	WireGuard · клиент VPN зоны pub: рукопожатие, keepalive	handshake	tun:pub	arrives	сервер VPN	0	0	0	1
+hop	pub:handshake	out:pub	рукопожатие и keepalive	зашифровано: UDP к серверу	nobody	никто
+hop	pub:handshake	if:eth1	рукопожатие и keepalive — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	pub:handshake	link:eth1	рукопожатие и keepalive — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: что есть поток к серверу 192.168.1.2, размер, время
+hop	pub:handshake	vpn:pub	рукопожатие и keepalive — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+row	pub:uplink-nd	zone:pub	ND/ARP выхода с pasta	service	out:pub	answered	отвечает pasta сама; дальше не идёт	0	0	0	0
+row	pub:inbound	zone:pub	Входящее из интернета	inbound	vpn:pub	denied	вход в зону не пробрасывает портов — ни до одной программы	0	0	0	0
+hop	pub:inbound	link:eth1	подключение к программе	внутри туннеля	nobody	как туннель: адрес сервера, размер
+hop	pub:inbound	if:eth1	подключение к программе	внутри туннеля	nobody	как туннель: адрес сервера, размер
+hop	pub:inbound	out:pub	подключение к программе	внутри туннеля	nobody	никто
+hop	pub:inbound	tun:pub	то же	IP-пакет зоны	machine	только машина
+row	host	host	Программы хоста	host	hostapps	arrives	интернет: видит твой адрес	0	0	0	1
+hop	host	if:eth0	их трафик, DHCP, ARP, mDNS	IP-пакет хоста	machine	только машина
+hop	host	lan:eth0	их трафик, DHCP, ARP, mDNS	кадр Ethernet	stranger	локальная сеть и шлюз
+hop	host	isp:eth0	их трафик, DHCP, ARP, mDNS	IP	stranger	сети за шлюзом — мимо VPN
+row	host:arp	host	ARP, ND с соседями	service	hostkernel	answered	соседи знают MAC и адрес машины	0	0	0	0
+hop	host:arp	if:eth0	«у кого этот адрес?»	IP-пакет хоста	machine	только машина
+hop	host:arp	lan:eth0	«у кого этот адрес?»	кадры локальной сети	stranger	локальная сеть и шлюз
+row	host:dhcp	host	DHCP, RA	service	hostkernel	answered	шлюз выдаёт адрес и DNS хоста	0	0	0	0
+hop	host:dhcp	if:eth0	аренда адреса, маршрутизатор	IP-пакет хоста	machine	только машина
+hop	host:dhcp	lan:eth0	аренда адреса, маршрутизатор	кадры локальной сети	stranger	локальная сеть и шлюз
+row	host:mcast	host	mDNS, SSDP, LLMNR, broadcast	service	hostkernel	arrives	слышат все в локальной сети	0	0	0	0
+hop	host:mcast	if:eth0	«кто тут есть?», имя машины	IP-пакет хоста	machine	только машина
+hop	host:mcast	lan:eth0	«кто тут есть?», имя машины	кадры локальной сети	stranger	локальная сеть и шлюз
+row	host:inbound	host	Входящее из локальной сети	inbound	peer:eth0	denied	в контейнеры маршрута нет; хосту — по его фаерволу	0	0	0	0
+hop	host:inbound	lan:eth0	подключение к машине	кадры локальной сети	stranger	локальная сеть
+hop	host:inbound	if:eth0	то же	IP-пакет	machine	машина
