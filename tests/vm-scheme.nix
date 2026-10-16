@@ -172,10 +172,14 @@ let
           for dst in ("UDP4-DATAGRAM:10.254.255.255:9,broadcast",
                       "UDP4-DATAGRAM:224.0.0.251:5353",
                       "UDP6-DATAGRAM:[ff02::fb]:5353"):
-              # As from the desktop: in a launch's own cgroup, counted as socat's.
+              # As from the desktop, in a launch's own cgroup, and as programs
+              # announce themselves — again and again: counted as that
+              # launch's from its keeper's next look on (a packet in its
+              # first milliseconds may be before it).
+              loop = f"for i in 1 2 3 4 5 6; do printf x | socat -u - {dst} 2>/dev/null; sleep 0.5; done"
               alice(
-                  'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- sh -c '
-                  + shlex.quote(f"printf x | cellward run nl -- socat -u - {dst}") + " || true"
+                  'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- '
+                  + "cellward run nl -- sh -c " + shlex.quote(loop)
               )
           alice("cellward container net main deny curl")
           alice("! cellward run nl -- curl -sS -m 10 --connect-timeout 5 http://10.99.0.1:8080/")
@@ -242,7 +246,8 @@ let
           # launch's cgroup (zone::WHO_TABLE); the kernel's own IPv6
           # multicast (MLD, solicitations) the rest.
           for c in ("bcast4", "mcast6"):
-              assert ids.get(f"main:nl:wall:{c}:socat", {}).get("count", 0) >= 1, sorted(i for i in ids if ":wall:" in i)
+              theirs = [r for i, r in ids.items() if i.startswith(f"main:nl:wall:{c}:")]
+              assert theirs and sum(r["count"] for r in theirs) >= 3, sorted(i for i in ids if ":wall:" in i)
           assert "main:nl:wall:mcast4" in ids, sorted(ids)
           for d in ("main:nl:dhcp", "nl:uplink-nd", "nl:inbound", "host:arp", "host:dhcp", "host:mcast", "host:inbound"):
               assert d in ids and ids[d]["observed"] is False, (d, ids.get(d))
