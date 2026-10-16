@@ -2197,6 +2197,106 @@ fn again_in_throwaway(tools: &Tools, label: &str) -> Again {
     }
 }
 
+/// Below the state directory: the networks each program has gone out to
+/// from the real home (`LEAK-MODEL.md` §4), a file per program's key, a
+/// network a line.
+const MAIN_NETWORKS: &str = ".mainnets";
+
+/// Whether `container` is the real home: the main profile, or a container
+/// whose home is it (`--home main`) — one identity either way.
+fn is_real_home(tools: &Tools, container: &Container) -> bool {
+    if container.fs_sandbox || !container.sandbox.is_empty() {
+        return false;
+    }
+    container.profile.is_empty()
+        || crate::container::load(tools, &container.profile)
+            .is_some_and(|c| c.home == crate::container::Home::Main)
+}
+
+/// The networks the program of `key` has gone out to from the real home,
+/// the latest last.
+fn main_networks(state: &Path, key: &str) -> Vec<String> {
+    fs::read_to_string(state.join(MAIN_NETWORKS).join(key))
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `zone` written down as the latest the program has gone out to.
+fn note_main_network(state: &Path, key: &str, zone: &str) {
+    let mut nets = main_networks(state, key);
+    nets.retain(|n| n != zone);
+    nets.push(zone.to_owned());
+    let dir = state.join(MAIN_NETWORKS);
+    if fs::create_dir_all(&dir).is_ok() {
+        let _ = fs::write(dir.join(key), nets.join("\n") + "\n");
+    }
+}
+
+/// The network to start the real home's program in (§4 of the leak model:
+/// one identity on both sides — cookies, logins, the fingerprint): `zone`
+/// where it has gone out to it before, or never anywhere, or `zone` has no
+/// network (`offline`); else the person is asked — the one before, `zone`
+/// all the same, or nothing. `None`: nothing started. With nowhere to ask,
+/// nothing either: never moved to another network unsaid.
+fn real_home_network(
+    tools: &Tools,
+    key: &str,
+    label: &str,
+    zone: &str,
+    container: &Container,
+) -> Option<String> {
+    if zone == "offline" || !is_real_home(tools, container) {
+        return Some(zone.to_owned());
+    }
+    let before = main_networks(&tools.state, key);
+    let Some(last) = before.last().filter(|_| !before.iter().any(|n| n == zone)) else {
+        note_main_network(&tools.state, key, zone);
+        return Some(zone.to_owned());
+    };
+    let name = |z: &str| match z {
+        launch::UNCONFINED => "без изоляции".to_owned(),
+        launch::HOST => "сеть хоста".to_owned(),
+        z => format!("«{z}»"),
+    };
+    let text = format!(
+        "«{label}» в настоящем доме уже выходила в сеть {}. В {} она будет той же: \
+         cookies, входы на сайтах и отпечаток у неё одни, и сайт свяжет обе сети.\n\
+         Чтобы быть в {} другой, нужен свой контейнер.",
+        name(last),
+        name(zone),
+        name(zone)
+    );
+    let back = format!("Запустить в {}", name(last));
+    let anyway = format!("Всё равно в {}", name(zone));
+    let answers = [
+        ("cancel", "Отмена", false),
+        ("back", back.as_str(), false),
+        ("anyway", anyway.as_str(), true),
+    ];
+    match crate::window::question(&tools.window, "Другая сеть", &text, None, &answers, None)
+    {
+        crate::window::Asked::Chose(tag) if tag == "back" => Some(last.clone()),
+        crate::window::Asked::Chose(tag) if tag == "anyway" => {
+            note_main_network(&tools.state, key, zone);
+            Some(zone.to_owned())
+        }
+        crate::window::Asked::NotShown => {
+            eprintln!(
+                "vpn-zone-pick: «{label}» настоящего дома не запущена в {}: она выходила в {}, \
+                 а спросить негде",
+                name(zone),
+                name(last)
+            );
+            None
+        }
+        _ => None,
+    }
+}
+
 /// How long the window a zone's program brought up starts nothing: the
 /// question's own `dialog::TOO_FAST`.
 const FROM_ZONE_GUARD: std::time::Duration = crate::dialog::TOO_FAST;
@@ -2961,6 +3061,12 @@ fn launch_asked(
     cmd: &[OsString],
     memory: &Memory,
 ) -> ExitCode {
+    // The real home in a network it has not gone out to: asked first.
+    let zone_choice = match real_home_network(tools, key, label, zone_choice, container) {
+        Some(zone) => zone,
+        None => return ExitCode::SUCCESS,
+    };
+    let zone_choice = zone_choice.as_str();
     let in_zone = std::env::var_os(launch::ENV_CURRENT).is_some_and(|v| !v.is_empty());
     let handover = watch_handover(memory, zone_choice, in_zone);
     if !handover && (in_zone || !launch::has_display()) {
@@ -3234,6 +3340,22 @@ fn launch_argv(
 
 #[cfg(test)]
 mod tests {
+
+    /// The networks a program went out to from the real home, the latest
+    /// last, each once.
+    #[test]
+    fn the_real_homes_networks_are_remembered() {
+        let base = std::env::temp_dir().join(format!("vz-mainnets-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        assert!(main_networks(&base, "firefox").is_empty());
+        note_main_network(&base, "firefox", "nl");
+        note_main_network(&base, "firefox", "de");
+        note_main_network(&base, "firefox", "nl");
+        assert_eq!(main_networks(&base, "firefox"), ["de", "nl"]);
+        assert!(main_networks(&base, "other").is_empty());
+        let _ = fs::remove_dir_all(&base);
+    }
     use super::*;
     use std::ffi::OsStr;
 

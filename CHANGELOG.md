@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- **The real home in another network is asked first** (`LEAK-MODEL.md` §4):
+  the picker remembers the networks a program went out to from the real home
+  (or a container of the real home); another one only after «в прежней сети
+  / всё равно в новой / отмена», and nothing where it cannot ask.
 - **`cellward tasks`**: each container's instance, its launches (by their
   cgroups) and their processes — memory, CPU, paused or not; `pause`,
   `resume` and `kill` a launch whole. In the cellward window, the tab
