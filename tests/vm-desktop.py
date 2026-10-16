@@ -371,6 +371,63 @@ if wanted('the permission panel on foot (Wayland), as a person clicks'):
 
 alice("systemctl --user stop foot-net", check=False)
 
+# --- 3b. X11 against a neighbour --------------------------------------------
+
+X11N = "X11 against a neighbour: another container's, another launch's X server out of reach"
+
+if wanted(X11N):
+    with scenario(X11N):
+        for box in ["xa", "xb"]:
+            alice(f"cellward container create {box} --home private")
+            alice(f"install -Dm600 /dev/null /home/alice/.config/vpn-zones/containers/{box}/perms")
+            alice(f"cellward container set {box} x11 on")
+        # A's window and its selection, kept by a running xclip.
+        run("x-a", "offline --container xa -- sh -c "
+            "'printf secret-of-xa | xclip -selection clipboard -loops 0 & "
+            "xmessage -name secretwin -title secretwin hello-from-xa'",
+            env="--setenv=VPN_ZONE_APPID=x-a")
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q secretwin",
+            timeout=60,
+        )
+        machine.sleep(3)
+
+        def probe(unit, args):
+            """What a program of `args` sees of X: its own display, every
+            display it may reach, the windows on it, the clipboard."""
+            out = f"/home/alice/{unit}.out"
+            alice(f"rm -f {out}")
+            script = (
+                f"exec > {out} 2>&1; "
+                "echo DISPLAY=$DISPLAY; ls -A /tmp/.X11-unix; "
+                "for n in $(seq 0 9) $(seq 100 120); do "
+                "  xdpyinfo -display :$n >/dev/null 2>&1 && echo reach :$n; done; "
+                "xwininfo -root -tree | grep -c secretwin || true; "
+                "xdotool search --name secretwin || echo no-window; "
+                "timeout 3 xclip -o -selection clipboard || echo no-clipboard; "
+                "echo done"
+            )
+            run(unit, f"{args} -- sh -c {shlex.quote(script)}", env=f"--setenv=VPN_ZONE_APPID={unit}")
+            machine.wait_until_succeeds(f"grep -q '^done' {out}", timeout=60)
+            text = machine.succeed(f"cat {out}")
+            print(unit, text)
+            return text
+
+        # Another container: its own X server, A's nowhere — no window,
+        # nothing to send input to, no selection unless pasted.
+        b = probe("x-b", "offline --container xb")
+        assert "secret-of-xa" not in b, b
+        assert "no-window" in b and "\n0\n" in b, b
+        assert len([l for l in b.splitlines() if l.startswith("reach ")]) == 1, b
+        # Another launch of A's own container: an X server of its own too.
+        a2 = probe("x-a2", "offline --container xa")
+        assert "no-window" in a2 and "\n0\n" in a2, a2
+        assert len([l for l in a2.splitlines() if l.startswith("reach ")]) == 1, a2
+        shot("x11-neighbours")
+    alice("systemctl --user stop x-a x-b x-a2", check=False)
+    machine.sleep(2)
+
+
 # --- 4. A running single-instance program, launched again from the menu ------
 
 
