@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A launch right after a container's last program no longer fails**: the
+  container, stopping as that program ended, had its space gone while its
+  unit was still active, so the launch's start did nothing and it said «не
+  поднимается». A launch now waits for a container on its way out, then
+  starts it again.
 - **A program denied the network is held back in the kernel**
   (`FIREWALL.md` §9): its launch lives in its epoch's `denied` cgroup, and
   the container's rules drop every packet of a socket made there, at the
