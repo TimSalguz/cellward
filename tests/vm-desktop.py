@@ -400,8 +400,12 @@ if wanted(X11N):
             script = (
                 "exec 2>&1; "
                 "echo DISPLAY=$DISPLAY; ls -A /tmp/.X11-unix; "
-                "for n in $(seq 0 9) $(seq 100 120); do "
-                "  xdpyinfo -display :$n >/dev/null 2>&1 && echo reach :$n; done; "
+                # Its own first: the satellite starts its X server on the
+                # first client, which waits.
+                "timeout 60 xdpyinfo >/dev/null 2>&1 && echo reach own; "
+                "for n in $(seq 0 9) $(seq 100 499); do "
+                "  [ :$n = $DISPLAY ] && continue; "
+                "  timeout 2 xdpyinfo -display :$n >/dev/null 2>&1 && echo reach :$n; done; "
                 "xwininfo -root -tree | grep -c secretwin || true; "
                 "xdotool search --name secretwin || echo no-window; "
                 "timeout 3 xclip -o -selection clipboard || echo no-clipboard; "
@@ -411,7 +415,7 @@ if wanted(X11N):
             journal = f"journalctl --user --no-pager -o cat -u {unit}"
             machine.wait_until_succeeds(
                 f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {journal}' | grep -qx done",
-                timeout=60,
+                timeout=300,
             )
             text = alice(journal)
             print(unit, text)
@@ -422,11 +426,13 @@ if wanted(X11N):
         b = probe("x-b", "offline --container xb")
         assert "secret-of-xa" not in b, b
         assert "no-window" in b and "\n0\n" in b, b
-        assert len([l for l in b.splitlines() if l.startswith("reach ")]) == 1, b
+        reached = [l for l in b.splitlines() if l.startswith("reach ")]
+        assert reached == ["reach own"], b
         # Another launch of A's own container: an X server of its own too.
         a2 = probe("x-a2", "offline --container xa")
         assert "no-window" in a2 and "\n0\n" in a2, a2
-        assert len([l for l in a2.splitlines() if l.startswith("reach ")]) == 1, a2
+        reached = [l for l in a2.splitlines() if l.startswith("reach ")]
+        assert reached == ["reach own"], a2
         shot("x11-neighbours")
     alice("systemctl --user stop x-a x-b x-a2", check=False)
     machine.sleep(2)
