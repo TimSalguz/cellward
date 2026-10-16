@@ -864,15 +864,18 @@ def tiny_png():
     )
 
 
-def window_box(at):
-    """The box of what is not niri's background above the bar: the one
-    window on the screen."""
+def window_box(at, before=None):
+    """The box of the window that came: what differs from `before` (the
+    screen before it opened), or else what is not niri's background above
+    the bar — whatever a scenario before left on the screen (a
+    notification, a panel) is no part of it."""
     w, h = at.size
     bg = at(5, 5)
     xs, ys = [], []
     for y in range(0, h - 40, 4):
         for x in range(0, w, 4):
-            if at(x, y) != bg:
+            new = at(x, y) != before(x, y) if before else at(x, y) != bg
+            if new:
                 xs.append(x)
                 ys.append(y)
     assert xs, "no window"
@@ -918,6 +921,7 @@ if wanted(CW):
             timeout=30,
         )
         window = machine.succeed("ls -d /nix/store/*-vpn-zone-window-*/bin/vpn-zone-window | head -1").strip()
+        screen_before = shot("clipwin-before")
         alice(
             f"systemd-run --user --unit=cwwin --setenv=WAYLAND_DISPLAY={nested} "
             f"{window} clip --history main --launch 1"
@@ -927,7 +931,7 @@ if wanted(CW):
             timeout=60,
         )
         machine.sleep(3)
-        box = window_box(shot("clipwin-feed"))
+        box = window_box(shot("clipwin-feed"), screen_before)
         print("the window:", box)
         # Words, live: the feed is what has them.
         alice(f"WAYLAND_DISPLAY={nested} wtype 1234")
