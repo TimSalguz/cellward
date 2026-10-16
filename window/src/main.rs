@@ -45,6 +45,7 @@ mod days;
 mod login;
 mod panel;
 mod pattern;
+mod scheme;
 mod thumb;
 
 use iced::keyboard::{self, key, Key};

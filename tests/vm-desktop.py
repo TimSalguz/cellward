@@ -1177,6 +1177,59 @@ if wanted(TASKS):
     machine.sleep(2)
 
 
+# --- 10c. The scheme: a zone as it is linked ---------------------------------
+
+SCHEME = "The scheme: a zone as it is linked, drawn"
+
+if wanted(SCHEME):
+    with scenario(SCHEME):
+        # The machine as it is, and a zone of AmneziaWG made up beside it:
+        # its server by a name, the host's Wi-Fi it goes by, a public
+        # resolver, a container with traffic.
+        real = alice("readlink -f $(command -v cellward)").strip()
+        lines = [
+            "container\twork\tprivate\tnl\t#3366ff",
+            "network\tnl\tzone\t1\t#3366ff\t0\talive",
+            "dns\tnl\tpublic\tDNS 1.1.1.1 — публичный резолвер: от сервера VPN до него имена идут "
+            "открытым текстом — их видят оператор сервера и всё по пути",
+            "endpoint\tnl\tamneziawg\tvpn.example.org:51820\t203.0.113.5\t1\twlp2s0\t192.168.1.1",
+            "iface\twlp2s0\twifi\t1\t192.168.1.5/24",
+            "instance\twork\twork\tnl\t1000\t2000\t1790000000",
+        ]
+        alice("printf '%s\\n' " + " ".join(shlex.quote(l) for l in lines) + " > /tmp/scheme.panel")
+        fake = (
+            "#!/bin/sh\n"
+            'if [ "$1" = _panel ]; then\n'
+            f"  {real} _panel\n"
+            "  cat /tmp/scheme.panel\n"
+            "  exit 0\n"
+            "fi\n"
+            f'exec {real} "$@"\n'
+        )
+        machine.succeed(
+            f"echo {base64.b64encode(fake.encode()).decode()} | base64 -d > /tmp/scheme-cellward "
+            "&& chmod 755 /tmp/scheme-cellward"
+        )
+        print(alice("/tmp/scheme-cellward _panel | grep -E '^(iface|endpoint|dns)'"))
+        tools = alice(f"grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' {real}").strip()
+        win = machine.succeed(f"grep -o '\"window\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
+        alice(
+            f"systemd-run --user --unit=vmscheme --setenv=WAYLAND_DISPLAY={nested} "
+            f"{win} panel --cellward /tmp/scheme-cellward --tab scheme"
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q '\"cellward\"'",
+            timeout=60,
+        )
+        w = next(w for w in windows() if w["app_id"] == "cellward")
+        alice(f"{NIRI_MSG} action focus-window --id {w['id']}")
+        alice(f"{NIRI_MSG} action fullscreen-window")
+        machine.sleep(5)
+        shot("scheme")
+    alice("systemctl --user stop vmscheme", check=False)
+    machine.sleep(2)
+
+
 # --- 11. The cellward window's connections, a tree ------------------------------
 
 TREE = "The cellward window's connections: a tree by program, a site blocked from its row"
