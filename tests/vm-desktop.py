@@ -412,12 +412,10 @@ if wanted(X11N):
                 "echo done; sleep 600"
             )
             run(unit, f"{args} -- sh -c {shlex.quote(script)}", env=f"--setenv=VPN_ZONE_APPID={unit}")
-            journal = f"journalctl --user --no-pager -o cat -u {unit}"
-            machine.wait_until_succeeds(
-                f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {journal}' | grep -qx done",
-                timeout=300,
-            )
-            text = alice(journal)
+            # The user's units' lines are in the system's journal here.
+            journal = f"journalctl --no-pager -o cat _SYSTEMD_USER_UNIT={unit}.service"
+            machine.wait_until_succeeds(f"{journal} | grep -qx done", timeout=300)
+            text = machine.succeed(journal)
             print(unit, text)
             return text
 
