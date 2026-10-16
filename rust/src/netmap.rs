@@ -104,6 +104,34 @@ pub fn route_to(ip: &Path, addr: IpAddr) -> Option<(String, Option<String>)> {
     parse_route(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// The interface and gateway `addr` is reached by in the network namespace of
+/// process `pid` — a zone's app namespace —, entered as the user
+/// (`nsenter -U -n`, read only): what a packet there really takes, not what
+/// it is meant to.
+pub fn route_in(
+    nsenter: &Path,
+    ip: &Path,
+    pid: i32,
+    addr: IpAddr,
+) -> Option<(String, Option<String>)> {
+    let out = Command::new(nsenter)
+        .args([
+            "--preserve-credentials",
+            "-U",
+            "-n",
+            "-t",
+            &pid.to_string(),
+            "--",
+        ])
+        .arg(ip)
+        .args(["-o", "route", "get", &addr.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_route(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// `dev` and `via` of a `route get` line.
 pub fn parse_route(text: &str) -> Option<(String, Option<String>)> {
     let words: Vec<&str> = text.split_whitespace().collect();

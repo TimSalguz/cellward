@@ -49,6 +49,17 @@ pub struct Zone {
     pub servers: Vec<Server>,
     /// Its config's `DNS =`, each by its side.
     pub dns: Vec<(IpAddr, Side)>,
+    /// What its app namespace really routes (`netmap::route_in`): none, not
+    /// looked at (down, or a kind with no tunnel of its own).
+    pub inside: Option<Inside>,
+}
+
+/// A zone's routes as its app namespace has them: the interface the
+/// internet is reached by, and each resolver's — `None`, no route at all.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Inside {
+    pub data: Option<String>,
+    pub dns: Vec<(IpAddr, Option<String>)>,
 }
 
 /// A zone's server, and the host's way to it.
@@ -141,12 +152,30 @@ pub fn facts(tools: &Tools) -> Facts {
                         .collect()
                 })
                 .unwrap_or_default();
+            let kind = tunnel.map_or("wireguard", |t| t.kind);
+            let dns = crate::dnspath::of_zone(&dir);
+            // What the zone's app namespace really routes: a tunnel zone's,
+            // up.
+            let pid = crate::cli::zone_pid(&tools.state, std::ffi::OsStr::new(&name));
+            let inside = pid
+                .filter(|_| matches!(kind, "amneziawg" | "wireguard" | "openconnect"))
+                .map(|pid| {
+                    let route = |a| crate::netmap::route_in(&tools.nsenter, &tools.ip, pid, a);
+                    Inside {
+                        data: route(SOMEWHERE).map(|(dev, _)| dev),
+                        dns: dns
+                            .iter()
+                            .map(|(a, _)| (*a, route(*a).map(|(d, _)| d)))
+                            .collect(),
+                    }
+                });
             Zone {
-                kind: tunnel.map_or("wireguard", |t| t.kind),
-                dns: crate::dnspath::of_zone(&dir),
+                kind,
+                dns,
                 name,
                 up,
                 servers,
+                inside,
             }
         })
         .collect();
@@ -290,6 +319,9 @@ pub enum End {
     Answered(String),
     /// Nothing goes past its last place.
     Cut(String),
+    /// Out around the tunnel: what the zone's own routes say, against what
+    /// it is meant to do.
+    Leak(String),
 }
 
 impl End {
@@ -299,12 +331,17 @@ impl End {
             Self::Denied(_) => "denied",
             Self::Answered(_) => "answered",
             Self::Cut(_) => "cut",
+            Self::Leak(_) => "leak",
         }
     }
 
     pub fn text(&self) -> &str {
         match self {
-            Self::Arrives(t) | Self::Denied(t) | Self::Answered(t) | Self::Cut(t) => t,
+            Self::Arrives(t)
+            | Self::Denied(t)
+            | Self::Answered(t)
+            | Self::Cut(t)
+            | Self::Leak(t) => t,
         }
     }
 }
@@ -497,6 +534,43 @@ struct Way {
     /// The last place reached; its server, when the way gets there.
     server: Option<String>,
     cut: Option<String>,
+}
+
+/// A flow's way around the zone's tunnel, as the zone's app namespace
+/// routes it ([`Inside`]): the internet's — or, `dns`, its resolver's — by
+/// another interface than the tunnel. `None`: by the tunnel, or not looked
+/// at. No route at all is no leak: nothing goes (the way says it cut).
+fn leak_of(s: &mut Scheme, zone: &Zone, dns: bool, what: &str) -> Option<(Hop, End)> {
+    let inside = zone.inside.as_ref()?;
+    let dev = if dns {
+        let addr = zone.dns.first()?.0;
+        inside.dns.iter().find(|(a, _)| *a == addr)?.1.clone()?
+    } else {
+        inside.data.clone()?
+    };
+    if dev == crate::zone::TUN_IFACE {
+        return None;
+    }
+    let z = &zone.name;
+    let to = s.place(
+        &format!("leak:{z}:{dev}"),
+        Layer::Zone,
+        "⚠ Мимо туннеля",
+        &dev,
+    );
+    let h = hop(
+        &to,
+        what,
+        "открытым текстом, мимо шифратора",
+        Sees::Stranger,
+        &format!("⚠ любой в сети за {dev}: маршрут зоны ведёт туда, а не в туннель"),
+    );
+    Some((
+        h,
+        End::Leak(format!(
+            "утечка: маршрут зоны ведёт через {dev}, мимо туннеля"
+        )),
+    ))
 }
 
 fn zone_way(s: &mut Scheme, facts: &Facts, zone: &Zone, what: &str) -> Way {
@@ -844,14 +918,28 @@ pub fn build(facts: &Facts) -> Scheme {
                         Sees::Machine,
                         "только машина",
                     ));
-                    let way = zone_way(&mut s, facts, zone, what);
+                    // Where the zone's own routes take it, first: a way
+                    // around its tunnel is a leak, whatever it is meant to do.
+                    let leak = leak_of(&mut s, zone, kind == Kind::Dns, what);
+                    let way = match leak {
+                        Some(_) => Way {
+                            hops: Vec::new(),
+                            server: None,
+                            cut: None,
+                        },
+                        None => zone_way(&mut s, facts, zone, what),
+                    };
                     hops.extend(way.hops);
-                    match (way.cut, way.server, kind) {
-                        (Some(cut), _, _) => End::Cut(cut),
-                        (None, server, Kind::Dns) => {
-                            dns_end(&mut s, zone, server.as_deref(), &mut hops)
+                    match (leak, way.cut, way.server, kind) {
+                        (Some((h, end)), ..) => {
+                            hops.push(h);
+                            end
                         }
-                        (None, Some(_), _) => {
+                        (None, Some(cut), _, _) => End::Cut(cut),
+                        (None, None, server, Kind::Dns) => {
+                            dns_end(&mut s, facts, zone, server.as_deref(), &mut hops)
+                        }
+                        (None, None, Some(_), _) => {
                             let dest = destinations(&flows);
                             let to = s.place(
                                 &format!("dst:{}:{who}", inst.id),
@@ -869,7 +957,7 @@ pub fn build(facts: &Facts) -> Scheme {
                             End::Arrives(dest)
                         }
                         // A host zone: no server; the destination is the internet itself.
-                        (None, None, _) => End::Arrives(destinations(&flows)),
+                        (None, None, None, _) => End::Arrives(destinations(&flows)),
                     }
                 }
             };
@@ -993,7 +1081,49 @@ pub fn build(facts: &Facts) -> Scheme {
 
 /// Where a zone's names end past its server: at a public resolver, in
 /// clear; else answered on the VPN's side.
-fn dns_end(s: &mut Scheme, zone: &Zone, server: Option<&str>, hops: &mut Vec<Hop>) -> End {
+/// Whether `addr` is in a network of one of the host's interfaces
+/// (`192.168.1.5/24` has 192.168.1.1).
+fn on_hosts_link(facts: &Facts, addr: &IpAddr) -> Option<String> {
+    let bits = |a: &IpAddr| -> u128 {
+        match a {
+            IpAddr::V4(v) => u128::from(u32::from(*v)) << 96,
+            IpAddr::V6(v) => u128::from(*v),
+        }
+    };
+    facts
+        .ifaces
+        .iter()
+        .filter(|i| i.kind != "loopback")
+        .find_map(|i| {
+            i.addrs.iter().find_map(|cidr| {
+                let (a, len) = cidr.split_once('/')?;
+                let (a, len): (IpAddr, u32) = (a.parse().ok()?, len.parse().ok()?);
+                let len = if a.is_ipv4() {
+                    len.min(32)
+                } else {
+                    len.min(128)
+                };
+                if a.is_ipv4() != addr.is_ipv4() || len == 0 {
+                    return None;
+                }
+                let shift = if a.is_ipv4() {
+                    32 - len + 96
+                } else {
+                    128 - len
+                };
+                let mask = if shift >= 128 { 0 } else { u128::MAX << shift };
+                (bits(&a) & mask == bits(addr) & mask).then(|| i.name.clone())
+            })
+        })
+}
+
+fn dns_end(
+    s: &mut Scheme,
+    facts: &Facts,
+    zone: &Zone,
+    server: Option<&str>,
+    hops: &mut Vec<Hop>,
+) -> End {
     if server.is_none() {
         return End::Arrives(crate::dnspath::words(&zone.dns));
     }
@@ -1016,6 +1146,18 @@ fn dns_end(s: &mut Scheme, zone: &Zone, server: Option<&str>, hops: &mut Vec<Hop
         }
         None if zone.dns.is_empty() => End::Answered("резолвер даёт сервер VPN".into()),
         None => {
+            // An address of the person's own network: asked on the VPN's
+            // side all the same — not their router, whatever it is called.
+            if let Some((addr, dev)) = zone
+                .dns
+                .iter()
+                .find_map(|(a, _)| on_hosts_link(facts, a).map(|d| (a, d)))
+            {
+                return End::Answered(format!(
+                    "⚠ {addr} — адрес твоей сети ({dev}), но спросят его на стороне VPN, \
+                     не твой роутер; не отвечают имена — причина здесь"
+                ));
+            }
             let all: Vec<String> = zone.dns.iter().map(|(a, _)| a.to_string()).collect();
             End::Answered(format!(
                 "резолвер {} на стороне VPN: имена видит только она",
@@ -1143,6 +1285,7 @@ pub fn text(s: &Scheme) -> String {
                 End::Arrives(_) => out.push_str(&format!(" → {}\n", r.end.text())),
                 End::Denied(_) | End::Cut(_) => out.push_str(&format!(" ✕ {}\n", r.end.text())),
                 End::Answered(_) => out.push_str(&format!(" ↩ {}\n", r.end.text())),
+                End::Leak(_) => out.push_str(&format!(" ⚠ {}\n", r.end.text())),
             }
         }
     }
@@ -1232,6 +1375,7 @@ mod tests {
                 let a: IpAddr = dns.parse().unwrap();
                 (a, crate::dnspath::side_of(a))
             }],
+            inside: None,
         }
     }
 
@@ -1384,6 +1528,86 @@ mod tests {
             matches!(&r.end, End::Answered(t) if t.contains("10.8.1.1")),
             "{:?}",
             r.end
+        );
+    }
+
+    /// The zone's own routes taking a flow around its tunnel: a leak,
+    /// shown as one — the data's and the names' each by their own route;
+    /// through the tunnel, none.
+    #[test]
+    fn a_way_around_the_tunnel_is_a_leak() {
+        let flows = || {
+            vec![
+                flow(TCP, "198.51.100.1", 443, "Firefox", Some(Verdict::Allow)),
+                flow(UDP, "10.254.255.253", 53, "Firefox", Some(Verdict::Allow)),
+            ]
+        };
+        let dns: IpAddr = "10.8.1.1".parse().unwrap();
+        let mut z = zone("amneziawg", "10.8.1.1", false);
+        z.inside = Some(Inside {
+            data: Some("awg0".into()),
+            dns: vec![(dns, Some("awg0".into()))],
+        });
+        let s = build(&facts(z.clone(), flows()));
+        assert!(
+            !s.rows.iter().any(|r| matches!(r.end, End::Leak(_))),
+            "{:#?}",
+            s.rows
+        );
+        z.inside = Some(Inside {
+            data: Some("awg0".into()),
+            dns: vec![(dns, Some("eth0".into()))],
+        });
+        let s = build(&facts(z.clone(), flows()));
+        let r = row(&s, "work-1:Firefox:dns");
+        assert!(
+            matches!(&r.end, End::Leak(t) if t.contains("eth0")),
+            "{:?}",
+            r.end
+        );
+        let last = r.hops.last().unwrap();
+        assert_eq!(
+            (last.to.as_str(), last.sees),
+            ("leak:nl:eth0", Sees::Stranger)
+        );
+        assert!(matches!(
+            row(&s, "work-1:Firefox:data").end,
+            End::Arrives(_)
+        ));
+        z.inside = Some(Inside {
+            data: Some("wlp2s0".into()),
+            dns: vec![(dns, Some("awg0".into()))],
+        });
+        let s = build(&facts(z, flows()));
+        assert!(matches!(row(&s, "work-1:Firefox:data").end, End::Leak(_)));
+        assert!(text(&s).contains("⚠ утечка"));
+    }
+
+    /// A resolver at an address of the host's own network: said as such.
+    #[test]
+    fn a_resolver_of_the_persons_own_network_is_said() {
+        let s = build(&facts(
+            zone("wireguard", "192.168.1.1", false),
+            vec![flow(
+                UDP,
+                "10.254.255.253",
+                53,
+                "Firefox",
+                Some(Verdict::Allow),
+            )],
+        ));
+        let r = row(&s, "work-1:Firefox:dns");
+        assert!(
+            matches!(&r.end, End::Answered(t) if t.contains("wlp2s0") && t.contains("не твой роутер")),
+            "{:?}",
+            r.end
+        );
+        assert_eq!(
+            on_hosts_link(
+                &facts(zone("wireguard", "10.8.1.1", false), vec![]),
+                &"10.8.1.1".parse().unwrap()
+            ),
+            None
         );
     }
 
