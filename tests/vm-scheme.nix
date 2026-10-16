@@ -180,7 +180,6 @@ let
           alice("cellward run lan -- getent ahostsv4 example.org || true")
 
       with subtest("the scheme says each flow where it ends"):
-          print("DIAG scheme stderr:", machine.execute("su -l alice -c " + shlex.quote("export XDG_RUNTIME_DIR=/run/user/1000; cellward scheme --json >/dev/null"))[1])
           text = alice("cellward scheme")
           print(text)
           raw = alice("cellward scheme --json")

@@ -110,9 +110,12 @@ pub fn parse_counters(text: &str) -> Vec<(String, u64)> {
 /// The counters of the instance whose space is process `pid`: its rules
 /// listed in its network namespace, entered as the user (read only).
 fn counters_of(tools: &Tools, pid: i32) -> Vec<(String, u64)> {
+    // `--keep-caps`, as `doctor` enters: what the user namespace gives kept
+    // across the exec — nft lists nothing without ("you must be root").
     std::process::Command::new(&tools.nsenter)
         .args([
             "--preserve-credentials",
+            "--keep-caps",
             "-U",
             "-n",
             "-t",
