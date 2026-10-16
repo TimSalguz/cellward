@@ -80,7 +80,7 @@ fn kind_words(kind: &str) -> &str {
 
 fn iface_words(kind: &str) -> &str {
     match kind {
-        "ethernet" => "кабель (Ethernet)",
+        "ethernet" => "кабель",
         "wifi" => "Wi-Fi",
         "loopback" => "петля",
         _ => "виртуальный",
@@ -351,18 +351,18 @@ impl<Message> canvas::Program<Message> for Scheme {
             .ifaces
             .iter()
             .filter(|i| i.kind != "loopback")
-            .take(7)
+            .take(6)
             .collect();
         let mut used_y = None;
         for (i, f) in shown.iter().enumerate() {
-            let y = 60.0 + i as f32 * 62.0;
+            let y = 50.0 + i as f32 * 70.0;
             let mine = used.as_deref() == Some(f.name.as_str());
             if mine {
-                used_y = Some(y + 26.0);
+                used_y = Some(y + 30.0);
             }
-            let line = if mine { BLUE } else { GREY };
             let under = format!(
-                "{}{}{}",
+                "{} · {}{}{}",
+                iface_words(&f.kind),
                 f.addrs.first().map_or("нет адреса", String::as_str),
                 if f.up { "" } else { " · выключен" },
                 if mine {
@@ -371,49 +371,21 @@ impl<Message> canvas::Program<Message> for Scheme {
                     ""
                 }
             );
-            pen.boxed(
-                780.0,
-                y,
-                190.0,
-                52.0,
-                line,
-                &format!("{} · {}", f.name, iface_words(&f.kind)),
-                &under,
-            );
+            let line = if mine { BLUE } else { GREY };
+            pen.boxed(780.0, y, 190.0, 60.0, line, &f.name, &under);
         }
         if let (true, Some(y)) = (tunnel, used_y) {
             pen.arrow((750.0, 203.0), (780.0, y), BLUE, &[], true);
         }
 
-        // The gateway, the server, the internet.
+        // The gateway, the server, the internet, the local network.
         let server = self.servers.first();
         let iy = used_y.unwrap_or(203.0);
         if tunnel {
-            if let Some(via) = server.and_then(|s| s.via.as_ref()) {
-                pen.boxed(1000.0, 60.0, 180.0, 52.0, GREY, "шлюз (роутер)", via);
-                pen.arrow((970.0, iy), (1000.0, 86.0), BLUE, &[], true);
-                // The local network of the interface: no way to it from the zone.
-                let lan = shown
-                    .iter()
-                    .find(|f| Some(f.name.as_str()) == used.as_deref())
-                    .and_then(|f| f.addrs.first())
-                    .and_then(|a| subnet(a));
-                if let Some(lan) = lan {
-                    let open = self.kind == "host";
-                    pen.boxed(
-                        1000.0,
-                        470.0,
-                        180.0,
-                        70.0,
-                        if open { ORANGE } else { GREY },
-                        &format!("локальная сеть {lan}"),
-                        if open {
-                            "открыта программам зоны"
-                        } else {
-                            "программам зоны недоступна"
-                        },
-                    );
-                }
+            let via = server.and_then(|s| s.via.as_ref());
+            if let Some(via) = via {
+                pen.boxed(1000.0, 50.0, 180.0, 60.0, GREY, "шлюз (роутер)", via);
+                pen.arrow((970.0, iy), (1000.0, 80.0), BLUE, &[], true);
             }
             if let Some(s) = server {
                 let at = s
@@ -421,41 +393,41 @@ impl<Message> canvas::Program<Message> for Scheme {
                     .clone()
                     .unwrap_or_else(|| "адрес ещё не известен".to_owned());
                 let under = if s.named {
-                    format!("{at} · имя {}", s.raw)
+                    format!("{at} · по имени {}", s.raw)
                 } else {
-                    at
+                    format!("{at}:{}", port_of(&s.raw))
                 };
-                pen.boxed(1000.0, 175.0, 180.0, 56.0, BLUE, "сервер VPN", &under);
-                let from = if s.via.is_some() {
-                    (1090.0, 112.0)
+                pen.boxed(1000.0, 165.0, 180.0, 70.0, BLUE, "сервер VPN", &under);
+                let from = if via.is_some() {
+                    (1090.0, 110.0)
                 } else {
                     (970.0, iy)
                 };
-                pen.arrow(from, (1090.0, 175.0), BLUE, &[], true);
+                pen.arrow(from, (1090.0, 165.0), BLUE, &[], true);
                 pen.text(
-                    985.0,
-                    238.0,
+                    1000.0,
+                    240.0,
                     &format!(
-                        "синее двойное — туннель, UDP {}, зашифрован",
+                        "двойное синее — туннель, UDP {}, зашифрован",
                         port_of(&s.raw)
                     ),
                     11.0,
                     BLUE,
-                    210.0,
+                    190.0,
                 );
                 if s.named {
                     pen.boxed(
                         780.0,
-                        520.0,
+                        470.0,
                         190.0,
-                        56.0,
+                        70.0,
                         ORANGE,
                         "DNS хоста",
-                        "имя сервера, один раз: провайдер видит",
+                        "имя сервера, один раз: провайдер хоста видит его",
                     );
                     pen.arrow(
-                        (875.0, iy + 26.0),
-                        (875.0, 520.0),
+                        (875.0, iy + 30.0),
+                        (875.0, 470.0),
                         ORANGE,
                         &[2.0, 4.0],
                         false,
@@ -464,30 +436,54 @@ impl<Message> canvas::Program<Message> for Scheme {
             }
             pen.boxed(
                 1000.0,
-                330.0,
+                300.0,
                 180.0,
-                56.0,
+                60.0,
                 dark,
                 "интернет",
                 "от сервера — открыто",
             );
-            pen.arrow((1090.0, 231.0), (1090.0, 330.0), dark, &[], false);
+            pen.arrow((1090.0, 235.0), (1090.0, 300.0), dark, &[], false);
+            let lan = shown
+                .iter()
+                .find(|f| Some(f.name.as_str()) == used.as_deref())
+                .and_then(|f| f.addrs.first())
+                .and_then(|a| subnet(a));
+            if let Some(lan) = lan {
+                let open = self.kind == "host";
+                pen.boxed(
+                    1000.0,
+                    400.0,
+                    180.0,
+                    70.0,
+                    if open { ORANGE } else { GREY },
+                    "локальная сеть",
+                    &format!(
+                        "{lan} · {}",
+                        if open {
+                            "открыта программам зоны"
+                        } else {
+                            "программам зоны недоступна"
+                        }
+                    ),
+                );
+            }
             // The names: to the server's side, or past it in clear.
             let dns_to = if side == "public" {
-                (1000.0, 358.0)
+                (1000.0, 330.0)
             } else {
-                (1000.0, 203.0)
+                (1000.0, 200.0)
             };
             pen.arrow((565.0, 300.0), dns_to, dns_color, &[7.0, 5.0], false);
         }
         pen.text(
             20.0,
-            H - 28.0,
+            H - 24.0,
             "пунктир — DNS: зелёный — резолвер на стороне VPN, красный — публичный, открытым \
              текстом за сервером; точки — имя сервера через DNS хоста",
             12.0,
             GREY,
-            W - 40.0,
+            740.0,
         );
         vec![frame.into_geometry()]
     }
