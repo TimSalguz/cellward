@@ -57,6 +57,12 @@ use std::path::{Path, PathBuf};
 
 /// Where the cgroup tree is, in the host's mount namespace.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+/// Below each epoch, the cgroup of the launches whose program is denied the
+/// network (the owner, 2026-10-16): the instance's rules drop every packet
+/// of a socket made there (`socket cgroupv2`, `zone::instance_ruleset`) —
+/// in the kernel, at the send, whether or not the program is still there
+/// when its keeper looks. The relay's gate decides the rest.
+pub const DENIED: &str = "denied";
 /// The subgroup systemd puts the instance's keeper in
 /// (`DelegateSubgroup=infra` of `vpn-zone-container@.service`).
 pub const INFRA: &str = "infra";
@@ -118,6 +124,17 @@ impl Epoch {
         PathBuf::from(format!("{CGROUP_ROOT}{}", self.path))
     }
 
+    /// Its [`DENIED`]'s directory.
+    pub fn denied_dir(&self) -> PathBuf {
+        self.dir().join(DENIED)
+    }
+
+    /// What the instance's rules drop with: `(level, path)` of its
+    /// [`DENIED`] — from the first epoch on, unlike the wall.
+    pub fn denied(&self) -> (u32, String) {
+        (self.level() + 1, format!("{}/{DENIED}", self.path))
+    }
+
     /// What the instance's rules wall its way out with: `(level, path)` —
     /// from the second epoch on, the first switch's. The first has no wall:
     /// every program had the network there as before the live switch was, a
@@ -166,7 +183,9 @@ impl Epoch {
     pub fn place_launch(&self, leaf: &str) -> io::Result<()> {
         if is_leaf(leaf) {
             let dir = self.leaf_dir(leaf);
-            let placed = match fs::create_dir(&dir) {
+            // A denied launch's: below the epoch's DENIED, made with it — or
+            // now, for an epoch an earlier build made.
+            let placed = match fs::create_dir_all(&dir) {
                 Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
                 _ => fs::OpenOptions::new()
                     .write(true)
@@ -178,7 +197,16 @@ impl Epoch {
             };
             // Said only where the epoch takes it: a launch from a login
             // session is refused both, which its caller says.
-            let fallback = self.place_self();
+            // A denied launch, its own cgroup refused: the epoch's DENIED
+            // itself — never the epoch, where its packets would go.
+            let fallback = if leaf.starts_with(DENIED) {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.denied_dir().join("cgroup.procs"))
+                    .and_then(|mut procs| procs.write_all(b"0"))
+            } else {
+                self.place_self()
+            };
             if fallback.is_ok() {
                 eprintln!(
                     "container-enter: the launch's own cgroup {} ({why}) — in the epoch's",
@@ -209,8 +237,19 @@ pub fn leaf_name(pid: i32, start: u64) -> String {
     format!("l{pid}-{start}")
 }
 
-/// Whether `name` is a launch's cgroup's ([`leaf_name`]).
+/// A launch denied the network lives below its epoch's [`DENIED`]: its
+/// cgroup's name there, `denied/l<pid>-<start>` ([`leaf_name`]).
+pub fn denied_leaf(leaf: &str) -> String {
+    format!("{DENIED}/{leaf}")
+}
+
+/// Whether `name` is a launch's cgroup's ([`leaf_name`]) — below the epoch,
+/// or below its [`DENIED`] ([`denied_leaf`]).
 pub fn is_leaf(name: &str) -> bool {
+    let name = name
+        .strip_prefix(DENIED)
+        .and_then(|n| n.strip_prefix('/'))
+        .unwrap_or(name);
     name.strip_prefix('l')
         .and_then(|rest| rest.split_once('-'))
         .is_some_and(|(pid, start)| {
@@ -223,22 +262,27 @@ pub fn is_leaf(name: &str) -> bool {
 
 /// `(pid, start time)` of the process a launch's cgroup is named by.
 pub fn leaf_of(name: &str) -> Option<(i32, u64)> {
-    let (pid, start) = name.strip_prefix('l')?.split_once('-')?;
     is_leaf(name).then_some(())?;
+    let name = name.rsplit('/').next()?;
+    let (pid, start) = name.strip_prefix('l')?.split_once('-')?;
     Some((pid.parse().ok()?, start.parse().ok()?))
 }
 
-/// The launches' cgroups below `dir` (an epoch's), by name.
+/// The launches' cgroups below `dir` (an epoch's), by name: those of its
+/// [`DENIED`] as `denied/<leaf>`.
 pub fn leaves(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+    let of = |dir: &Path| -> Vec<String> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.contains('/') && is_leaf(n))
+            .collect()
     };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| is_leaf(n))
-        .collect();
+    let mut names = of(dir);
+    names.extend(of(&dir.join(DENIED)).iter().map(|n| denied_leaf(n)));
     names.sort();
     names
 }
@@ -298,7 +342,17 @@ pub fn unit_of(text: &str, unit_name: &str) -> Option<String> {
 /// Make the epoch's cgroup. One that is there already is an error: a new
 /// epoch is a new cgroup, never one something may have been put in.
 pub fn make(epoch: &Epoch) -> io::Result<()> {
-    fs::create_dir(epoch.dir())
+    fs::create_dir(epoch.dir())?;
+    make_denied(epoch)
+}
+
+/// The epoch's [`DENIED`], there or made now: what the instance's rules
+/// name, and nft resolves a cgroup's path when it loads them.
+pub fn make_denied(epoch: &Epoch) -> io::Result<()> {
+    match fs::create_dir(epoch.denied_dir()) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// Freeze (`true`) or thaw the epoch's cgroup (`cgroup.freeze`).
@@ -369,9 +423,13 @@ pub fn move_all(
         // The epoch's own processes, then each launch's cgroup's into the
         // same launch's cgroup of the next epoch.
         let mut moved = move_procs(&from.dir(), &to.dir())?;
+        if from.denied_dir().exists() {
+            make_denied(to).map_err(Gave::Io)?;
+            moved |= move_procs(&from.denied_dir(), &to.denied_dir())?;
+        }
         for leaf in leaves(&from.dir()) {
             let into = to.leaf_dir(&leaf);
-            match fs::create_dir(&into) {
+            match fs::create_dir_all(&into) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(Gave::Io(e)),
@@ -386,6 +444,41 @@ pub fn move_all(
         }
         wait_for(watch.as_ref(), wake).map_err(Gave::Io)?;
     }
+}
+
+/// Each launch of `epoch` where its rule says (the owner, 2026-10-16): in
+/// the epoch's [`DENIED`] when `denied_of` its cgroup's name says so, out
+/// of it when it says not — `None`, not known, where it is. Its processes
+/// moved into the other cgroup, the one left taken away once empty. What a
+/// moved launch's sockets made before keep: their cgroup (a socket's is
+/// fixed at its birth) — its new ones are of the new place. How many moved.
+pub fn regroup(epoch: &Epoch, denied_of: &dyn Fn(&str) -> Option<bool>) -> usize {
+    regroup_in(&epoch.dir(), denied_of)
+}
+
+/// [`regroup`] of the epoch whose cgroup's directory is `dir`.
+fn regroup_in(dir: &Path, denied_of: &dyn Fn(&str) -> Option<bool>) -> usize {
+    let mut moved = 0;
+    for leaf in leaves(dir) {
+        let base = leaf.rsplit('/').next().unwrap_or(&leaf).to_owned();
+        let now = leaf != base;
+        let Some(want) = denied_of(&base) else {
+            continue;
+        };
+        if want == now {
+            continue;
+        }
+        let to = if want { denied_leaf(&base) } else { base };
+        let into = dir.join(&to);
+        if fs::create_dir_all(&into).is_err() {
+            continue;
+        }
+        if move_procs(&dir.join(&leaf), &into).is_ok() {
+            moved += 1;
+            let _ = fs::remove_dir(dir.join(&leaf));
+        }
+    }
+    moved
 }
 
 /// Every process of the cgroup `from` written into `to`'s `cgroup.procs`:
@@ -465,6 +558,10 @@ fn wait_for(watch: Option<&crate::sys::Inotify>, wake: Option<RawFd>) -> io::Res
 pub fn remove(epoch: &Epoch) -> io::Result<()> {
     for leaf in leaves(&epoch.dir()) {
         fs::remove_dir(epoch.leaf_dir(&leaf))?;
+    }
+    match fs::remove_dir(epoch.denied_dir()) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
     }
     fs::remove_dir(epoch.dir())
 }
@@ -578,7 +675,64 @@ mod tests {
         }
         fs::write(base.join("l9-9"), "a file").unwrap();
         assert_eq!(leaves(&base), ["l1-2", "l3-4"]);
+        // A denied launch's, below the epoch's DENIED.
+        fs::create_dir_all(base.join(DENIED).join("l5-6")).unwrap();
+        fs::create_dir_all(base.join(DENIED).join("x")).unwrap();
+        assert_eq!(leaves(&base), ["denied/l5-6", "l1-2", "l3-4"]);
         let _ = fs::remove_dir_all(&base);
+        let denied = denied_leaf(&name);
+        assert_eq!(denied, "denied/l4242-987654");
+        assert!(is_leaf(&denied));
+        assert_eq!(leaf_of(&denied), Some((4242, 987_654)));
+        for not in [
+            "denied/",
+            "denied/x",
+            "denied/../l1-2",
+            "denied/denied/l1-2",
+            "other/l1-2",
+        ] {
+            assert!(!is_leaf(not), "{not}");
+        }
+    }
+
+    /// Launches put where their rule says: into DENIED, out of it, left
+    /// where they are when not known; their processes with them.
+    #[test]
+    fn launches_are_regrouped_by_their_rule() {
+        // A tree of plain files stands in for the epoch's cgroup.
+        let dir = std::env::temp_dir().join(format!("vz-regroup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (leaf, pid) in [
+            ("l1-1", "11"),
+            ("l2-2", "22"),
+            ("denied/l3-3", "33"),
+            ("l4-4", "44"),
+        ] {
+            fs::create_dir_all(dir.join(leaf)).unwrap();
+            fs::write(dir.join(leaf).join("cgroup.procs"), format!("{pid}\n")).unwrap();
+        }
+        let rule = |leaf: &str| match leaf {
+            "l1-1" => Some(true),
+            "l2-2" => Some(false),
+            "l3-3" => Some(false),
+            _ => None,
+        };
+        assert_eq!(regroup_in(&dir, &rule), 2);
+        let procs = |leaf: &str| fs::read_to_string(dir.join(leaf).join("cgroup.procs")).unwrap();
+        assert_eq!(procs("denied/l1-1"), "11");
+        assert_eq!(procs("l3-3"), "33");
+        assert_eq!(procs("l2-2"), "22\n");
+        assert_eq!(procs("l4-4"), "44\n");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The denied launches' cgroup is one level below its epoch, the first
+    /// epoch's too.
+    #[test]
+    fn the_denied_cgroup_is_below_every_epoch() {
+        let e = Epoch::of(UNIT, 1);
+        assert_eq!(e.denied(), (7, format!("{UNIT}/e1/denied")));
+        assert_eq!(e.leaf_dir("denied/l1-2"), e.denied_dir().join("l1-2"));
     }
     use super::*;
 

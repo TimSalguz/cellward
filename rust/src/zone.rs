@@ -2991,6 +2991,16 @@ impl Epochs {
     fn wall(&self) -> Option<crate::relay::Wall> {
         self.now.as_ref().and_then(crate::relay::Wall::of)
     }
+
+    /// The wall, and the denied launches' cgroup of the epoch now
+    /// (`epoch::DENIED`): what the relay's rules carry.
+    fn walls(&self) -> (Option<crate::relay::Wall>, Option<crate::relay::Wall>) {
+        let denied = self.now.as_ref().map(|e| {
+            let (level, cgroup) = e.denied();
+            crate::relay::Wall { level, cgroup }
+        });
+        (self.wall(), denied)
+    }
 }
 
 /// A container instance's way out, as its keeper holds it (stage 2 of the
@@ -3044,6 +3054,9 @@ struct Transport {
     /// what looks up the new flows' owners (`crate::owners::Keeper`).
     news: Option<(OwnedFd, OwnedFd)>,
     owners: crate::owners::Keeper,
+    /// The rules its launches were last put where they say by
+    /// (`epoch::regroup`); none before the first round.
+    regrouped: Option<crate::netrules::Rules>,
     /// The firewall's gate (`docs/FIREWALL.md` §9, `crate::verdicts`): the
     /// decisions' file every relay of its reads, the keeper's writing map of
     /// it, and the pipe it wakes the relays on (read end, write end).
@@ -3058,7 +3071,7 @@ struct Transport {
 
 /// The record an instance's network rules are in (`crate::netrules`): its
 /// container's, the main home's; none for a throwaway.
-fn record_of(id: &str) -> Option<String> {
+pub(crate) fn record_of(id: &str) -> Option<String> {
     match crate::instance::who_of(id) {
         crate::origin::Who::Container(name) => Some(name),
         crate::origin::Who::Main => Some(crate::container::MAIN_RECORD.to_owned()),
@@ -3170,6 +3183,7 @@ impl Transport {
             news,
             // A sock_diag socket made in its network namespace: the cgroup
             // each socket was made in, so its launch (`crate::owners`).
+            regrouped: None,
             owners: crate::owners::Keeper::with_diag(
                 match (
                     std::env::current_exe(),
@@ -3381,13 +3395,20 @@ impl Transport {
             gate: self.gate.as_ref().map(|(r, _)| r.as_raw_fd()),
         };
         let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
+        // The denied launches' cgroup is there for the rules to name: an
+        // epoch an earlier build made has none.
+        if let Some(now) = &self.epochs.now {
+            if let Err(e) = crate::epoch::make_denied(now) {
+                eprintln!("instance {}: no cgroup of denied launches ({e})", self.id);
+            }
+        }
         let link = crate::bridge::attach(
             &zone_dir,
             &self.id,
             &space,
             self.previous,
             expect,
-            self.epochs.wall(),
+            self.epochs.walls(),
             &tools,
             wake,
             &stop,
@@ -3959,6 +3980,23 @@ impl Transport {
             Some(record) => crate::netrules::Rules::load(&self.config, &record),
             None => crate::netrules::Rules::template_only(&self.config),
         };
+        // Its rules changed since the last round: each running launch where
+        // its rule says now — in its epoch's cgroup of denied launches, or
+        // out of it (`epoch::regroup`). Whoever changed them: the person's
+        // answer, the menu, the command line, Nix.
+        if self.regrouped.as_ref() != Some(&rules) {
+            if let Some(now) = &self.epochs.now {
+                let denied_of = |leaf: &str| {
+                    // Its waiter, still the one of that start: its launch's key.
+                    let (waiter, start) = crate::epoch::leaf_of(leaf)?;
+                    (crate::sys::start_time(waiter) == Some(start)).then_some(())?;
+                    let (key, _) = crate::owners::launch_of(&registry, waiter)?;
+                    Some(rules.decide(Some(&key)) == crate::netrules::Rule::Deny)
+                };
+                crate::epoch::regroup(now, &denied_of);
+            }
+            self.regrouped = Some(rules.clone());
+        }
         // One verdict for every program: decided before anything is looked
         // up — the flow is held for as little as a wake-up.
         let uniform = rules.uniform();
@@ -9743,20 +9781,21 @@ pub fn bridge_refusal_rules(uid: u32, addresses: &[IpAddr]) -> Vec<String> {
 /// character — is refused rather than escaped.
 pub fn instance_ruleset(
     epoch: Option<(u32, &str)>,
+    denied: Option<(u32, &str)>,
     a4: std::net::Ipv4Addr,
     a6: Option<std::net::Ipv6Addr>,
 ) -> Result<String, String> {
+    let named = |level: u32, path: &str| {
+        path.strip_prefix('/')
+            // nft takes a quoted string as it is, a unit name's `\x2d`
+            // included; only a quote would end it.
+            .filter(|p| !p.is_empty() && !p.contains('"') && !p.contains(char::is_control))
+            .map(|relative| format!("socket cgroupv2 level {level} \"{relative}\""))
+            .ok_or_else(|| format!("a cgroup nft cannot name: {path:?}"))
+    };
     let cgroup = match epoch {
         None => String::new(),
-        Some((level, path)) => {
-            let relative = path
-                .strip_prefix('/')
-                // nft takes a quoted string as it is, a unit name's `\x2d`
-                // included; only a quote would end it.
-                .filter(|p| !p.is_empty() && !p.contains('"') && !p.contains(char::is_control))
-                .ok_or_else(|| format!("a cgroup nft cannot name: {path:?}"))?;
-            format!(" socket cgroupv2 level {level} \"{relative}\"")
-        }
+        Some((level, path)) => format!(" {}", named(level, path)?),
     };
     // Broadcast and multicast never go (the gate's holes, 2026-10-16): to
     // passt they are addresses like any, sent from the zone into its
@@ -9765,13 +9804,17 @@ pub fn instance_ruleset(
     // instance's own subnet's broadcast too: ALL of 10.254.0.0/16 is the
     // instance's link. Neighbour discovery, multicast as well, goes first.
     let broadcast = std::net::Ipv4Addr::from(u32::from(a4) | (u32::MAX >> crate::bridge::PREFIX4));
-    let mut rules = vec![
-        "oifname \"lo\" accept".to_string(),
-        NDP_RULE.to_string(),
+    let mut rules = vec!["oifname \"lo\" accept".to_string(), NDP_RULE.to_string()];
+    // A socket made by a launch denied the network (`epoch::DENIED`): its
+    // packets dropped here, at the send — no race with its keeper's look.
+    if let Some((level, path)) = denied {
+        rules.push(format!("{} drop", named(level, path)?));
+    }
+    rules.extend([
         format!("ip daddr {{ 224.0.0.0/4, 255.255.255.255, {broadcast} }} drop"),
         "ip6 daddr ff00::/8 drop".to_string(),
         format!("oifname \"{TUN_IFACE}\" ip saddr {a4}{cgroup} accept"),
-    ];
+    ]);
     // Stage 4: `epoch` goes with a live switch, and a switch's epoch is
     // where the rules say it: its programs' sockets pass, and nothing else
     // of the instance's does.
@@ -11275,7 +11318,7 @@ networks:  files
         let a4: std::net::Ipv4Addr = "10.254.3.4".parse().unwrap();
         let a6: std::net::Ipv6Addr = "fd63:656c:6c77::1:2".parse().unwrap();
         assert_eq!(
-            instance_ruleset(None, a4, None).unwrap(),
+            instance_ruleset(None, None, a4, None).unwrap(),
             concat!(
                 "table inet vpnzone {\n",
                 "\tchain output {\n",
@@ -11292,13 +11335,15 @@ networks:  files
         let path = "/user.slice/user-1000.slice/user@1000.service/app.slice/\
                     vpn-zone-container@work\\x2d2.service/e3";
         assert_eq!(
-            instance_ruleset(Some((6, path)), a4, Some(a6)).unwrap(),
+            instance_ruleset(Some((6, path)), Some((7, &format!("{path}/denied"))), a4, Some(a6)).unwrap(),
             concat!(
                 "table inet vpnzone {\n",
                 "\tchain output {\n",
                 "\t\ttype filter hook output priority filter; policy drop;\n",
                 "\t\toifname \"lo\" accept\n",
                 "\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n",
+                "\t\tsocket cgroupv2 level 7 \"user.slice/user-1000.slice/user@1000.service/app.slice/",
+                "vpn-zone-container@work\\x2d2.service/e3/denied\" drop\n",
                 "\t\tip daddr { 224.0.0.0/4, 255.255.255.255, 10.254.255.255 } drop\n",
                 "\t\tip6 daddr ff00::/8 drop\n",
                 "\t\toifname \"awg0\" ip saddr 10.254.3.4 socket cgroupv2 level 6 ",
@@ -11313,7 +11358,8 @@ networks:  files
         );
         for bad in ["", "/", "relative/e1", "/a\"b/e1", "/a\nb/e1"] {
             assert!(
-                instance_ruleset(Some((2, bad)), a4, None).is_err(),
+                instance_ruleset(Some((2, bad)), None, a4, None).is_err()
+                    && instance_ruleset(None, Some((2, bad)), a4, None).is_err(),
                 "{bad:?}"
             );
         }
