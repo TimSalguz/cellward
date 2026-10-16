@@ -6,7 +6,7 @@
 # the host runs is never given this way. Exec'd by tests/vm.nix in the
 # hermetic zone's subtest (`alice`, `machine`, `json`, `STATE` are its).
 
-alice("mkdir -p ~/vmrepo ~/.cache/nix && touch ~/vmrepo/flake.nix ~/.gitconfig ~/.cache/nix/host-made")
+alice("mkdir -p ~/vmrepo ~/.cache/nix ~/.config/zed && touch ~/vmrepo/flake.nix ~/.gitconfig ~/.cache/nix/host-made ~/.config/zed/settings.json")
 alice("cellward protect add ~/vmrepo")
 prot_out = alice("cellward protect")
 assert "/home/alice/vmrepo" in prot_out, prot_out
@@ -18,6 +18,8 @@ alice("cellward container create vmprot --home main")
 PROT = "cellward run vmherm --container vmprot --"
 alice(f"{PROT} sh -c '! touch /home/alice/vmrepo/x'")
 alice(f"{PROT} sh -c '! sh -c \"echo x >> /home/alice/.gitconfig\"'")
+# An editor's settings: code the host's editor runs (a task, its git).
+alice(f"{PROT} sh -c '! sh -c \"echo x >> /home/alice/.config/zed/settings.json\"'")
 # The rest of the real home is its own to write, as before.
 alice(f"{PROT} sh -c 'touch /home/alice/vmprot-wrote && rm /home/alice/vmprot-wrote'")
 # The Nix cache: its own, not the host's.

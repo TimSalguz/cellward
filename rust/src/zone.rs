@@ -7005,6 +7005,22 @@ const HOST_RUNS_IN_ZONES: &[&str] = &[
     ".config/emacs",
     ".config/helix",
     ".vscode/extensions",
+    // Editors' settings and tasks: a task run on opening a folder, the git or
+    // terminal they start — code the host's editor runs next time.
+    ".vscode-oss/extensions",
+    ".cursor/extensions",
+    ".config/Code/User",
+    ".config/Code - OSS/User",
+    ".config/VSCodium/User",
+    ".config/Cursor/User",
+    ".config/zed",
+    ".config/JetBrains",
+    ".local/share/JetBrains",
+    ".config/lazygit",
+    // KWin's scripts and Plasma's widgets: code the desktop's shell runs.
+    ".local/share/kwin",
+    ".local/share/plasma",
+    ".config/kwinrc",
 ];
 
 /// Where the Nix client keeps its caches below the home: what it evaluated,
