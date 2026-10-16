@@ -3067,6 +3067,9 @@ struct Transport {
     /// Each counted launch's program, found while it was there (its leaf →
     /// its key): what its counts are said as once it is gone.
     leaf_programs: std::collections::HashMap<String, String>,
+    /// What each launch's rules counted before the table was last made
+    /// anew, by its leaf and kind: added up, reload after reload.
+    leaf_totals: std::collections::BTreeMap<(String, String), u64>,
     /// The firewall's gate (`docs/FIREWALL.md` §9, `crate::verdicts`): the
     /// decisions' file every relay of its reads, the keeper's writing map of
     /// it, and the pipe it wakes the relays on (read end, write end).
@@ -3197,6 +3200,7 @@ impl Transport {
             counted: None,
             launches: None,
             leaf_programs: std::collections::HashMap::new(),
+            leaf_totals: std::collections::BTreeMap::new(),
             owners: crate::owners::Keeper::with_diag(
                 match (
                     std::env::current_exe(),
@@ -4109,26 +4113,24 @@ impl Transport {
         }
         if let (Ok(core), Some(space)) = (std::env::current_exe(), self.space_pidfd()) {
             match crate::bridge::count_launches(&core, &self.nft, &space, a4, &leaves) {
-                // The counts of the launches gone: kept in the instance's
-                // directory (`DROPS_GONE`), by their program.
+                // The table is made anew, its counts from 0: what it had
+                // counted is added to each launch's total, kept in the
+                // instance's directory (`DROPS_BY_LAUNCH`) with its program —
+                // a launch here still or gone.
                 Ok(before) => {
-                    let now: std::collections::HashSet<&str> =
-                        leaves.iter().filter_map(|p| p.rsplit('/').next()).collect();
-                    let mut text = String::new();
                     for (leaf, kind, packets) in crate::scheme::parse_by_launch(&before) {
-                        if now.contains(leaf.as_str()) || packets == 0 {
-                            continue;
+                        if packets > 0 {
+                            *self.leaf_totals.entry((leaf, kind)).or_default() += packets;
                         }
-                        let program = self.leaf_programs.remove(&leaf).unwrap_or_default();
-                        text.push_str(&format!("{program}\t{kind}\t{packets}\n"));
                     }
-                    if !text.is_empty() {
-                        let _ = fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(self.dir.join(DROPS_GONE))
-                            .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()));
+                    let mut text = String::new();
+                    for ((leaf, kind), packets) in &self.leaf_totals {
+                        let program = self.leaf_programs.get(leaf).map_or("", String::as_str);
+                        text.push_str(&format!("{leaf}\t{program}\t{kind}\t{packets}\n"));
                     }
+                    let file = self.dir.join(DROPS_BY_LAUNCH);
+                    let _ = crate::epoch::write_whole(&self.dir, DROPS_BY_LAUNCH, &text)
+                        .or_else(|_| fs::write(&file, &text));
                 }
                 Err(e) => eprintln!(
                     "instance {}: {e} — its drops are counted, not by launch",
@@ -9952,10 +9954,11 @@ pub fn instance_ruleset(
 /// each launch sends to broadcast and multicast, which those rules drop.
 pub(crate) const WHO_TABLE: &str = "vpnzone_who";
 
-/// In an instance's directory: the counts by launch of its launches gone,
-/// `<program key, empty if not found>⇥<kind>⇥<packets>` a line, appended as
-/// each goes.
-pub(crate) const DROPS_GONE: &str = "drops-gone";
+/// In an instance's directory: each launch's counts as of the counting
+/// table's last making (`WHO_TABLE` starts from 0 each time), `<leaf>⇥<its
+/// program's key, empty if not found>⇥<kind>⇥<packets>` a line — the live
+/// table's counts are added to these.
+pub(crate) const DROPS_BY_LAUNCH: &str = "drops-by-launch";
 
 /// What `WHO_TABLE` says of each launch whose cgroup is one of `leaves`
 /// (absolute paths, `epoch::leaf_name` last): its broadcast, IPv4 multicast

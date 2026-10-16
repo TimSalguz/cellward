@@ -329,38 +329,54 @@ pub fn facts(tools: &Tools) -> Facts {
                 .join(".running")
                 .join(l.container.as_deref().unwrap_or(crate::registry::MAIN));
             let labels = &l.labels;
-            let by_launch = running
+            // Each launch's counts: as its keeper added them up at the
+            // counting table's last making (`zone::DROPS_BY_LAUNCH`, its
+            // program found while it was there), and what the live table
+            // counted since — by its program.
+            let mut totals: std::collections::BTreeMap<(String, String), (String, u64)> =
+                std::collections::BTreeMap::new();
+            let kept = running
+                .as_ref()
+                .and_then(|i| {
+                    std::fs::read_to_string(i.dir.join(crate::zone::DROPS_BY_LAUNCH)).ok()
+                })
+                .unwrap_or_default();
+            for line in kept.lines() {
+                let mut f = line.split('\t');
+                if let (Some(leaf), Some(key), Some(kind), Some(Ok(packets))) = (
+                    f.next(),
+                    f.next(),
+                    f.next(),
+                    f.next().map(str::parse::<u64>),
+                ) {
+                    totals.insert(
+                        (leaf.to_owned(), kind.to_owned()),
+                        (key.to_owned(), packets),
+                    );
+                }
+            }
+            let live = running
                 .as_ref()
                 .map(|i| by_launch_of(tools, i.pid))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(leaf, kind, packets)| {
-                    let program = crate::epoch::leaf_of(&leaf)
+                .unwrap_or_default();
+            for (leaf, kind, packets) in live {
+                let entry = totals.entry((leaf.clone(), kind)).or_insert_with(|| {
+                    let key = crate::epoch::leaf_of(&leaf)
                         .filter(|(waiter, start)| crate::sys::start_time(*waiter) == Some(*start))
                         .and_then(|(waiter, _)| crate::owners::launch_of(&registry, waiter))
-                        .map(|(key, _)| labels.get(&key).cloned().unwrap_or(key));
+                        .map(|(key, _)| key)
+                        .unwrap_or_default();
+                    (key, 0)
+                });
+                entry.1 += packets;
+            }
+            let by_launch = totals
+                .into_iter()
+                .map(|((_, kind), (key, packets))| {
+                    let program =
+                        (!key.is_empty()).then(|| labels.get(&key).cloned().unwrap_or(key));
                     (program, kind, packets)
                 })
-                .chain(
-                    // The launches gone (`zone::DROPS_GONE`), by their program.
-                    running
-                        .as_ref()
-                        .and_then(|i| {
-                            std::fs::read_to_string(i.dir.join(crate::zone::DROPS_GONE)).ok()
-                        })
-                        .unwrap_or_default()
-                        .lines()
-                        .filter_map(|l| {
-                            let mut f = l.split('\t');
-                            let (key, kind, packets) =
-                                (f.next()?, f.next()?, f.next()?.parse().ok()?);
-                            let program = (!key.is_empty()).then(|| {
-                                labels.get(key).cloned().unwrap_or_else(|| key.to_owned())
-                            });
-                            Some((program, kind.to_owned(), packets))
-                        })
-                        .collect::<Vec<_>>(),
-                )
                 .collect();
             Instance {
                 id: l.id,
