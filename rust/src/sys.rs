@@ -257,6 +257,23 @@ impl Inotify {
         })
     }
 
+    /// Watch `dir` as well, for the events of `mask`, on the same descriptor.
+    pub(crate) fn also(&self, dir: &Path, mask: u32) -> io::Result<()> {
+        let path = cstring(dir.as_os_str().as_bytes())?;
+        // SAFETY: a valid inotify descriptor and a NUL-terminated path.
+        let wd = unsafe {
+            libc::inotify_add_watch(
+                std::os::fd::AsRawFd::as_raw_fd(&self.fd),
+                path.as_ptr(),
+                mask,
+            )
+        };
+        if wd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     /// Block until something appears; the names that did. When the queue
     /// overflowed, every name in the directory — the caller cannot know what
     /// it missed. `Err` when the watch is gone for good.

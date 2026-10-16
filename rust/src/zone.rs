@@ -3057,6 +3057,13 @@ struct Transport {
     /// The rules its launches were last put where they say by
     /// (`epoch::regroup`); none before the first round.
     regrouped: Option<crate::netrules::Rules>,
+    /// The launches' cgroups its counts by launch were last loaded for
+    /// (`WHO_TABLE`); none before the first.
+    counted: Option<Vec<String>>,
+    /// A launch's cgroup made or taken away in the epoch now (its
+    /// directory and its `denied`'s): the counts by launch loaded anew at
+    /// once — a launch that only broadcasts makes no flow to be heard by.
+    launches: Option<(String, sys::Inotify)>,
     /// The firewall's gate (`docs/FIREWALL.md` §9, `crate::verdicts`): the
     /// decisions' file every relay of its reads, the keeper's writing map of
     /// it, and the pipe it wakes the relays on (read end, write end).
@@ -3184,6 +3191,8 @@ impl Transport {
             // A sock_diag socket made in its network namespace: the cgroup
             // each socket was made in, so its launch (`crate::owners`).
             regrouped: None,
+            counted: None,
+            launches: None,
             owners: crate::owners::Keeper::with_diag(
                 match (
                     std::env::current_exe(),
@@ -3425,6 +3434,8 @@ impl Transport {
         let exit = self.describe();
         println!("instance {}: {exit}", self.id);
         self.journal("attach", &[("exit", exit.as_str())]);
+        self.counted = None;
+        self.count_launches();
         Ok(())
     }
 
@@ -3940,6 +3951,13 @@ impl Transport {
                 revents: 0,
             });
         }
+        if let Some((_, launches)) = &self.launches {
+            out.push(libc::pollfd {
+                fd: launches.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+        }
         // The person's answers (`crate::netask`): last but the news.
         if let Some(asker) = &self.asker {
             out.push(libc::pollfd {
@@ -3997,6 +4015,7 @@ impl Transport {
             }
             self.regrouped = Some(rules.clone());
         }
+        self.count_launches();
         // Whose each flow is, looked up while its first packet is held —
         // its program still waiting for an answer, so still there: decided
         // first, a ping or a short request was over and its owner gone
@@ -4035,6 +4054,50 @@ impl Transport {
             }
         }
         self.decide(decided.into_iter());
+    }
+
+    /// The counts by launch (`WHO_TABLE`) loaded anew when the launches
+    /// changed: whose each broadcast and multicast was, which the rules drop
+    /// unseen by the relay.
+    fn count_launches(&mut self) {
+        let Some(now) = &self.epochs.now else {
+            return;
+        };
+        // Watched from its epoch on: made anew when the epoch changes.
+        if self
+            .launches
+            .as_ref()
+            .is_none_or(|(path, _)| *path != now.path)
+        {
+            let mask = libc::IN_CREATE | libc::IN_DELETE;
+            self.launches = sys::Inotify::watch_for(&now.dir(), mask)
+                .and_then(|w| {
+                    let _ = crate::epoch::make_denied(now);
+                    w.also(&now.denied_dir(), mask).map(|()| w)
+                })
+                .map(|w| (now.path.clone(), w))
+                .ok();
+        }
+        let leaves: Vec<String> = crate::epoch::leaves(&now.dir())
+            .iter()
+            .map(|leaf| format!("{}/{leaf}", now.path))
+            .collect();
+        if self.counted.as_ref() == Some(&leaves) {
+            return;
+        }
+        let Some(a4) = self.link.as_ref().map(|l| l.plan.a4) else {
+            return;
+        };
+        if let (Ok(core), Some(space)) = (std::env::current_exe(), self.space_pidfd()) {
+            if let Err(e) = crate::bridge::count_launches(&core, &self.nft, &space, a4, &leaves) {
+                eprintln!(
+                    "instance {}: {e} — its drops are counted, not by launch",
+                    self.id
+                );
+            }
+        }
+        // Tried for these: not again until they change.
+        self.counted = Some(leaves);
     }
 
     /// The person answered (`crate::netask`): the flows that waited decided.
@@ -4087,6 +4150,15 @@ impl Transport {
                 .is_some_and(|p| p.revents != 0)
         {
             self.heard_answers();
+        }
+        // A launch came or went: its counts by launch anew. Found by its
+        // place: after the link's two and the zone's watch.
+        let launches_at = 2 * usize::from(self.link.is_some()) + usize::from(self.watch.is_some());
+        if self.launches.is_some() && polled.get(launches_at).is_some_and(|p| p.revents != 0) {
+            if let Some((_, launches)) = &self.launches {
+                let _ = launches.names();
+            }
+            self.count_launches();
         }
         let mut at = 0;
         if let Some(link) = &self.link {
@@ -9835,6 +9907,49 @@ pub fn instance_ruleset(
     Ok(output_table_counted(&INSTANCE_COUNTERS, &rules))
 }
 
+/// The table of an instance's counts by launch (`who_ruleset`): it decides
+/// nothing — every packet goes on to `vpnzone`'s rules — and counts what
+/// each launch sends to broadcast and multicast, which those rules drop.
+pub(crate) const WHO_TABLE: &str = "vpnzone_who";
+
+/// What `WHO_TABLE` says of each launch whose cgroup is one of `leaves`
+/// (absolute paths, `epoch::leaf_name` last): its broadcast, IPv4 multicast
+/// and IPv6 multicast packets counted, by a rule of its cgroup (`socket
+/// cgroupv2`), named by its leaf and kind in the rule's comment. Replaces
+/// the table whole. A path nft could not take as it is is refused.
+pub fn who_ruleset(a4: std::net::Ipv4Addr, leaves: &[String]) -> Result<String, String> {
+    let broadcast = std::net::Ipv4Addr::from(u32::from(a4) | (u32::MAX >> crate::bridge::PREFIX4));
+    let mut rules = Vec::new();
+    for path in leaves {
+        let leaf = path.rsplit('/').next().unwrap_or_default();
+        let relative = path
+            .strip_prefix('/')
+            .filter(|_| crate::epoch::sane_path(path) && crate::epoch::is_leaf(leaf))
+            .ok_or_else(|| format!("no launch's cgroup: {path:?}"))?;
+        let level = relative.split('/').count();
+        let at = format!("socket cgroupv2 level {level} \"{relative}\"");
+        rules.push(format!(
+            "{at} ip daddr {{ 255.255.255.255, {broadcast} }} counter comment \"{leaf} bcast4\""
+        ));
+        rules.push(format!(
+            "{at} ip daddr 224.0.0.0/4 counter comment \"{leaf} mcast4\""
+        ));
+        rules.push(format!(
+            "{at} ip6 daddr ff00::/8 counter comment \"{leaf} mcast6\""
+        ));
+    }
+    let mut text = format!("table inet {WHO_TABLE}\nflush table inet {WHO_TABLE}\n");
+    text.push_str(&format!("table inet {WHO_TABLE} {{\n\tchain output {{\n"));
+    text.push_str("\t\ttype filter hook output priority -10; policy accept;\n");
+    for r in rules {
+        text.push_str("\t\t");
+        text.push_str(&r);
+        text.push('\n');
+    }
+    text.push_str("\t}\n}\n");
+    Ok(text)
+}
+
 /// The instance's named counters (`instance_ruleset`): what its rules drop,
 /// by why — `denied` (a launch denied the network), `mcast4`, `bcast4`,
 /// `mcast6`, `rest` (all the policy drops).
@@ -11398,6 +11513,33 @@ networks:  files
                     && instance_ruleset(None, Some((2, bad)), a4, None).is_err(),
                 "{bad:?}"
             );
+        }
+    }
+
+    /// The counts by launch: three counting rules a launch, by its cgroup
+    /// and named by its leaf; no verdict, the table replaced whole; no path
+    /// that is not a launch's.
+    #[test]
+    fn each_launchs_drops_are_counted_by_its_cgroup() {
+        let a4: std::net::Ipv4Addr = "10.254.3.4".parse().unwrap();
+        let leaf = "/u/x.service/e1/l12-34";
+        let text = who_ruleset(
+            a4,
+            &[leaf.to_owned(), "/u/x.service/e1/denied/l5-6".to_owned()],
+        )
+        .unwrap();
+        assert!(
+            text.starts_with("table inet vpnzone_who\nflush table inet vpnzone_who\n"),
+            "{text}"
+        );
+        assert!(text.contains("policy accept;"), "{text}");
+        assert!(text.contains(
+            "socket cgroupv2 level 4 \"u/x.service/e1/l12-34\" ip daddr { 255.255.255.255, 10.254.255.255 } counter comment \"l12-34 bcast4\""
+        ), "{text}");
+        assert!(text.contains("level 5 \"u/x.service/e1/denied/l5-6\" ip6 daddr ff00::/8 counter comment \"l5-6 mcast6\""), "{text}");
+        assert!(!text.contains(" drop"), "{text}");
+        for bad in ["/u/e1/notaleaf", "relative/l1-2", "/u/\"x/l1-2"] {
+            assert!(who_ruleset(a4, &[bad.to_owned()]).is_err(), "{bad}");
         }
     }
 

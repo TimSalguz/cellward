@@ -172,7 +172,11 @@ let
           for dst in ("UDP4-DATAGRAM:10.254.255.255:9,broadcast",
                       "UDP4-DATAGRAM:224.0.0.251:5353",
                       "UDP6-DATAGRAM:[ff02::fb]:5353"):
-              alice(f"printf x | cellward run nl -- socat -u - {dst} || true")
+              # As from the desktop: in a launch's own cgroup, counted as socat's.
+              alice(
+                  'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- sh -c '
+                  + shlex.quote(f"printf x | cellward run nl -- socat -u - {dst}") + " || true"
+              )
           alice("cellward container net main deny curl")
           alice("! cellward run nl -- curl -sS -m 10 --connect-timeout 5 http://10.99.0.1:8080/")
           # A name of pub's: asked of 1.1.1.1 past the server, unanswered here.
@@ -234,8 +238,11 @@ let
           assert "main:nl:ядро контейнера:arp" in ids, sorted(ids)
           # IPv4 multicast with no interface named is refused by the
           # container's unreachable route before the rules: counted 0.
+          # Each by whose it was: socat's broadcast and IPv6 multicast, by its
+          # launch's cgroup (zone::WHO_TABLE); the kernel's own IPv6
+          # multicast (MLD, solicitations) the rest.
           for c in ("bcast4", "mcast6"):
-              assert ids[f"main:nl:wall:{c}"]["count"] >= 1, ids.get(f"main:nl:wall:{c}")
+              assert ids.get(f"main:nl:wall:{c}:socat", {}).get("count", 0) >= 1, sorted(i for i in ids if ":wall:" in i)
           assert "main:nl:wall:mcast4" in ids, sorted(ids)
           for d in ("main:nl:dhcp", "nl:uplink-nd", "nl:inbound", "host:arp", "host:dhcp", "host:mcast", "host:inbound"):
               assert d in ids and ids[d]["observed"] is False, (d, ids.get(d))

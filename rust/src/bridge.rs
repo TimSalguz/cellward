@@ -1388,6 +1388,40 @@ pub fn seal(core: &Path, nft: &Path, space: &OwnedFd) -> Result<crate::sockdiag:
     )))
 }
 
+/// The instance's counts by launch (`relay --who`) loaded for `leaves`,
+/// its launches' cgroups now, its tap's address `a4` — in its namespaces, as
+/// its root, as the seal is.
+pub fn count_launches(
+    core: &Path,
+    nft: &Path,
+    space: &OwnedFd,
+    a4: std::net::Ipv4Addr,
+    leaves: &[String],
+) -> Result<(), String> {
+    let mut command = in_instance(core, space, &[]);
+    command
+        .arg("frame-relay")
+        .arg("--who")
+        .arg("--nft")
+        .arg(nft)
+        .arg("--a4")
+        .arg(a4.to_string());
+    for leaf in leaves {
+        command.arg("--leaf").arg(leaf);
+    }
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("the counts by launch did not start ({e})"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("the counts by launch failed ({status})"))
+    }
+}
+
 /// An attach that failed at `what`, for the journal.
 fn failed(what: &str, e: impl std::fmt::Display) -> NoLink {
     NoLink::Failed(format!("{what}: {e}"))
