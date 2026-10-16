@@ -330,6 +330,14 @@ impl<Message> canvas::Program<Message> for Scheme {
             340.0,
         );
         pen.arrow((420.0, 146.0), (420.0, 175.0), GREY, &[], false);
+        // The names asked go into the tunnel with everything else.
+        pen.arrow(
+            (520.0, 255.0),
+            (520.0, 231.0),
+            dns_color,
+            &[7.0, 5.0],
+            false,
+        );
 
         // The host's way out: pasta, the interfaces, the gateway.
         let tunnel = !matches!(self.kind.as_str(), "offline");
@@ -468,19 +476,41 @@ impl<Message> canvas::Program<Message> for Scheme {
                     ),
                 );
             }
-            // The names: to the server's side, or past it in clear.
-            let dns_to = if side == "public" {
-                (1000.0, 330.0)
-            } else {
-                (1000.0, 200.0)
-            };
-            pen.arrow((565.0, 300.0), dns_to, dns_color, &[7.0, 5.0], false);
+            // The names go the way everything goes — into the tunnel, inside
+            // it to the server —, and only there part: answered at the
+            // server's side, or asked of a public resolver past it, in clear.
+            let resolver = words
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .trim_end_matches(',');
+            if side == "public" {
+                pen.arrow((1150.0, 235.0), (1150.0, 300.0), RED, &[7.0, 5.0], false);
+                pen.text(
+                    1000.0,
+                    365.0,
+                    &format!("DNS к {resolver} — отсюда открытым текстом"),
+                    11.0,
+                    RED,
+                    190.0,
+                );
+            } else if side == "vpn" {
+                pen.text(
+                    1000.0,
+                    258.0,
+                    &format!("DNS {resolver} отвечает здесь, у сервера VPN"),
+                    11.0,
+                    GREEN,
+                    190.0,
+                );
+            }
         }
         pen.text(
             20.0,
             H - 24.0,
-            "пунктир — DNS: зелёный — резолвер на стороне VPN, красный — публичный, открытым \
-             текстом за сервером; точки — имя сервера через DNS хоста",
+            "пунктир — DNS: идёт в туннеле вместе с данными; зелёный — отвечает сервер VPN, \
+             красный — публичный резолвер, за сервером открытым текстом; точки — имя \
+             сервера через DNS хоста",
             12.0,
             GREY,
             740.0,
