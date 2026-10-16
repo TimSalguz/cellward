@@ -1844,16 +1844,17 @@ fn inside_instance(facts: &Facts) -> bool {
 
 /// `cellward scheme [--json]`.
 pub fn run(tools: &Tools, args: &[std::ffi::OsString]) -> u8 {
-    let as_json = match args
+    let form = match args
         .iter()
         .map(|a| a.to_str())
         .collect::<Vec<_>>()
         .as_slice()
     {
-        [] => false,
-        [Some("--json")] => true,
+        [] => "text",
+        [Some("--json")] => "json",
+        [Some("--lines")] => "lines",
         _ => {
-            eprintln!("cellward scheme [--json]");
+            eprintln!("cellward scheme [--json | --lines]");
             return 2;
         }
     };
@@ -1868,12 +1869,78 @@ pub fn run(tools: &Tools, args: &[std::ffi::OsString]) -> u8 {
         return 1;
     }
     let s = build(&facts);
-    if as_json {
-        println!("{}", json(&s));
-    } else {
-        print!("{}", text(&s));
+    match form {
+        "json" => println!("{}", json(&s)),
+        "lines" => print!("{}", lines(&s)),
+        _ => print!("{}", text(&s)),
     }
     0
+}
+
+/// The scheme as the cellward window reads it, as it reads `_panel`: a
+/// line an item, fields by a tab, none with a tab or a line break in it
+/// (`window::clean`) —
+///
+/// ```text
+/// place⇥<id>⇥<layer>⇥<name>⇥<tech>⇥<gate 0|1>⇥<unknown 0|1>⇥<translates 0|1>
+/// group⇥<id>⇥<title>
+/// row⇥<id>⇥<group>⇥<name>⇥<kind>⇥<from>⇥<end kind>⇥<end text>⇥<count>⇥<out>⇥<in>⇥<observed 0|1>
+/// hop⇥<row id>⇥<to>⇥<what>⇥<wrap>⇥<sees>⇥<seen by>
+/// ```
+///
+/// a row's hops after it, in order.
+pub fn lines(s: &Scheme) -> String {
+    use crate::window::clean;
+    let b = |v: bool| if v { "1" } else { "0" };
+    let mut out = String::new();
+    let mut line = |fields: &[&str]| {
+        let f: Vec<String> = fields.iter().map(|f| clean(f)).collect();
+        out.push_str(&f.join("\t"));
+        out.push('\n');
+    };
+    for p in &s.places {
+        line(&[
+            "place",
+            &p.id,
+            p.layer.word(),
+            &p.name,
+            &p.tech,
+            b(p.gate),
+            b(p.unknown),
+            b(p.translates),
+        ]);
+    }
+    for (id, title) in &s.groups {
+        line(&["group", id, title]);
+    }
+    for r in &s.rows {
+        line(&[
+            "row",
+            &r.id,
+            &r.group,
+            &r.name,
+            r.kind.word(),
+            &r.from,
+            r.end.word(),
+            r.end.text(),
+            &r.count.to_string(),
+            &r.out_bytes.to_string(),
+            &r.in_bytes.to_string(),
+            b(r.observed),
+        ]);
+        for h in &r.hops {
+            line(&[
+                "hop",
+                &r.id,
+                &h.to,
+                &h.what,
+                &h.wrap,
+                h.sees.word(),
+                &h.seen_by,
+            ]);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2290,6 +2357,36 @@ mod tests {
             parse_by_launch(text),
             [("l12-34".to_owned(), "mcast4".to_owned(), 5)]
         );
+    }
+
+    /// The window's lines: every place, group, row and hop, a tab between
+    /// fields and none in them.
+    #[test]
+    fn the_windows_lines_say_everything() {
+        let s = build(&facts(
+            zone("amneziawg", "1.1.1.1", true),
+            vec![flow(
+                TCP,
+                "198.51.100.1",
+                443,
+                "Fire\tfox",
+                Some(Verdict::Allow),
+            )],
+        ));
+        let text = lines(&s);
+        let count = |kind: &str| {
+            text.lines()
+                .filter(|l| l.starts_with(&format!("{kind}\t")))
+                .count()
+        };
+        assert_eq!(count("place"), s.places.len());
+        assert_eq!(count("row"), s.rows.len());
+        assert_eq!(
+            count("hop"),
+            s.rows.iter().map(|r| r.hops.len()).sum::<usize>()
+        );
+        assert!(text.lines().all(|l| l.split('\t').count() >= 3), "{text}");
+        assert!(text.contains("Fire fox"), "a tab in a name is a space");
     }
 
     /// `nft list counters`, read back.
