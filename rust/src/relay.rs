@@ -1549,6 +1549,16 @@ fn who_main(args: &[OsString]) -> u8 {
         eprintln!("vpn-zone-core frame-relay --who: needs --nft and --a4");
         return 2;
     };
+    // What the table counted so far, before it is made anew: the keeper
+    // keeps the launches' that are gone (their rules go with them).
+    if let Ok(out) = std::process::Command::new(&nft)
+        .args(["list", "table", "inet", crate::zone::WHO_TABLE])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        print!("{}", String::from_utf8_lossy(&out.stdout));
+    }
     let loaded =
         crate::zone::who_ruleset(a4, &leaves).and_then(|r| crate::zone::feed_nft(&nft, &r));
     match loaded {

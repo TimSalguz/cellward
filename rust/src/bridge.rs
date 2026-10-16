@@ -1390,14 +1390,15 @@ pub fn seal(core: &Path, nft: &Path, space: &OwnedFd) -> Result<crate::sockdiag:
 
 /// The instance's counts by launch (`relay --who`) loaded for `leaves`,
 /// its launches' cgroups now, its tap's address `a4` — in its namespaces, as
-/// its root, as the seal is.
+/// its root, as the seal is. What the table had counted before, as nft
+/// lists it (`scheme::parse_by_launch`).
 pub fn count_launches(
     core: &Path,
     nft: &Path,
     space: &OwnedFd,
     a4: std::net::Ipv4Addr,
     leaves: &[String],
-) -> Result<(), String> {
+) -> Result<String, String> {
     let mut command = in_instance(core, space, &[]);
     command
         .arg("frame-relay")
@@ -1409,16 +1410,15 @@ pub fn count_launches(
     for leaf in leaves {
         command.arg("--leaf").arg(leaf);
     }
-    let status = command
+    let out = command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
         .stderr(Stdio::inherit())
-        .status()
+        .output()
         .map_err(|e| format!("the counts by launch did not start ({e})"))?;
-    if status.success() {
-        Ok(())
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(format!("the counts by launch failed ({status})"))
+        Err(format!("the counts by launch failed ({})", out.status))
     }
 }
 

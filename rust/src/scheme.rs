@@ -341,6 +341,26 @@ pub fn facts(tools: &Tools) -> Facts {
                         .map(|(key, _)| labels.get(&key).cloned().unwrap_or(key));
                     (program, kind, packets)
                 })
+                .chain(
+                    // The launches gone (`zone::DROPS_GONE`), by their program.
+                    running
+                        .as_ref()
+                        .and_then(|i| {
+                            std::fs::read_to_string(i.dir.join(crate::zone::DROPS_GONE)).ok()
+                        })
+                        .unwrap_or_default()
+                        .lines()
+                        .filter_map(|l| {
+                            let mut f = l.split('\t');
+                            let (key, kind, packets) =
+                                (f.next()?, f.next()?, f.next()?.parse().ok()?);
+                            let program = (!key.is_empty()).then(|| {
+                                labels.get(key).cloned().unwrap_or_else(|| key.to_owned())
+                            });
+                            Some((program, kind.to_owned(), packets))
+                        })
+                        .collect::<Vec<_>>(),
+                )
                 .collect();
             Instance {
                 id: l.id,
