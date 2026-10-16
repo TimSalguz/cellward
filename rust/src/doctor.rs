@@ -1974,6 +1974,20 @@ pub fn live_switch_check(live: Option<crate::epoch::LiveSwitch>) -> Check {
     }
 }
 
+/// Where the zone's names go past its tunnel (`crate::dnspath`): a public
+/// resolver is asked by the VPN's server in clear — said, not refused: it
+/// is the config's choice.
+pub fn dns_side_check(found: &[(std::net::IpAddr, crate::dnspath::Side)]) -> Check {
+    let public = found
+        .iter()
+        .any(|(_, s)| *s == crate::dnspath::Side::Public);
+    Check::new(
+        "dns-side",
+        if public { Level::Warn } else { Level::Ok },
+        crate::dnspath::words(found),
+    )
+}
+
 pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
     // Its lock against its containers (review 2026-09-28), up or not: what
     // is bound to it is named either way.
@@ -1985,6 +1999,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
             .exists(),
         &crate::launch::lock_not_held_by(tools, name),
     );
+    let dns = dns_side_check(&crate::dnspath::of_zone(&tools.state.join(name)));
     let Some(pid) = zone_pid(&tools.state, name.as_ref()) else {
         let mut checks = vec![Check::new(
             "up",
@@ -1992,6 +2007,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
             "зона не поднята — проверяется только поднятая",
         )];
         checks.extend(lock);
+        checks.push(dns);
         return (false, checks);
     };
     let dir = tools.state.join(name);
@@ -2001,6 +2017,7 @@ pub fn zone_checks(tools: &Tools, name: &str, uid: u32) -> (bool, Vec<Check>) {
         &crate::build::installed(tools),
     ))];
     checks.extend(lock);
+    checks.push(dns);
     if !offline {
         checks.push(bridge_check(
             crate::bridge::carries(&dir),

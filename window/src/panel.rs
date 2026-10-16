@@ -136,6 +136,9 @@ struct ProcRow {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Data {
+    /// Where each zone's names go past its tunnel: `zone → (vpn|public|-,
+    /// words)` (`dns` lines).
+    dns: HashMap<String, (String, String)>,
     tasks: Vec<TaskRow>,
     procs: Vec<ProcRow>,
     containers: Vec<Cont>,
@@ -199,6 +202,12 @@ fn parse(text: &str) -> Data {
             ["pin", key, name, to] => {
                 d.pins
                     .push(((*key).to_owned(), (*name).to_owned(), (*to).to_owned()))
+            }
+            ["dns", zone, side, words] => {
+                d.dns.insert(
+                    (*zone).to_owned(),
+                    ((*side).to_owned(), (*words).to_owned()),
+                );
             }
             ["task", id, leaf, name, frozen, rss, ticks, hz] => d.tasks.push(TaskRow {
                 instance: (*id).to_owned(),
@@ -2717,6 +2726,21 @@ impl Panel {
             if n.kind == "zone" {
                 buttons = buttons.push(act("Удалить…", Msg::RemoveZoneAsk(n.name.clone()), true));
             }
+            // Where its programs' names go past the tunnel: a public
+            // resolver is asked in clear by the VPN's server — said in red.
+            let dns: Element<'_, Msg> = match self.data.dns.get(&n.name) {
+                Some((side, words)) => {
+                    let t = text(words.as_str())
+                        .size(12)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+                    if side == "public" {
+                        t.color(Color::from_rgb8(0xd0, 0x3a, 0x3a)).into()
+                    } else {
+                        t.into()
+                    }
+                }
+                None => column![].into(),
+            };
             page = page.push(
                 column![
                     row![
@@ -2726,6 +2750,7 @@ impl Panel {
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
+                    dns,
                     buttons,
                 ]
                 .spacing(4),

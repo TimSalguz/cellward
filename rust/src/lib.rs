@@ -121,6 +121,7 @@ pub mod device_guard;
 pub mod devices;
 pub mod dialog;
 pub mod dnsfwd;
+pub mod dnspath;
 pub mod doctor;
 pub mod egress;
 pub mod enter;

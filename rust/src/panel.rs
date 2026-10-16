@@ -20,6 +20,7 @@
 //! program⇥<container>⇥<program, for a person>⇥<out bytes>⇥<in bytes>
 //! setting⇥<default|default-profile|mode|wayland-sandbox>⇥<value>⇥<nix|local|default>
 //! pin⇥<program's key>⇥<its name>⇥<the container it goes to, or empty>
+//! dns⇥<zone>⇥<vpn|public|->⇥<where its names go, for a person>
 //! task⇥<instance id>⇥<launch>⇥<its program, for a person, or empty>⇥<paused: 0|1>⇥<resident KiB>⇥<CPU ticks>⇥<ticks a second>
 //! tproc⇥<instance id>⇥<launch>⇥<pid>⇥<comm>⇥<resident KiB>⇥<CPU ticks>
 //! ```
@@ -153,6 +154,16 @@ pub fn data(tools: &Tools) -> String {
             locked(&zone),
             tunnel(&zone, up),
         ]);
+        // Where its names go past the tunnel (`crate::dnspath`).
+        let dns = crate::dnspath::of_zone(&tools.state.join(&zone));
+        let side = if dns.is_empty() {
+            "-"
+        } else if dns.iter().any(|(_, s)| *s == crate::dnspath::Side::Public) {
+            crate::dnspath::Side::Public.word()
+        } else {
+            crate::dnspath::Side::Vpn.word()
+        };
+        line(&["dns", &zone, side, &crate::dnspath::words(&dns)]);
     }
     line(&[
         "network",
