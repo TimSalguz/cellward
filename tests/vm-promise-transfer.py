@@ -412,6 +412,23 @@ def xf_zone(zone, addr, addr6):
         out = alice(f"{run} {cmd} </dev/null")
         assert ok in out, (prog, out)
     XF_ROWS.append((f"{zone}: names and pings of a program denied", "blocked", "-", "-"))
+    # A program too short to be found (the owner, 2026-10-16): a datagram
+    # sent and the program gone before its keeper looks for its socket —
+    # denied all the same (`netrules::Rules::unknown`); forgotten, it goes.
+    got = f"/tmp/udpgot-{zone}"
+    server.succeed(
+        f"systemd-run --unit=udpgot-{zone} socat -u "
+        f"UDP-RECV:9999,bind=10.99.0.1,reuseaddr OPEN:{got},creat,append"
+    )
+    alice("cellward container net main deny socat")
+    alice(f"printf 'denied-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9999")
+    machine.sleep(3)
+    server.fail(f"grep -q denied-{zone} {got}")
+    alice("cellward container net main forget socat")
+    alice(f"printf 'allowed-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9999")
+    server.wait_until_succeeds(f"grep -q allowed-{zone} {got}", timeout=30)
+    server.succeed(f"systemctl stop udpgot-{zone}")
+    XF_ROWS.append((f"{zone}: a denied program's datagram, the program gone", "blocked", "-", "-"))
     # The question (2026-09-29): with "ask" and no screen to ask on, a
     # program's new connection does not leave — a question that cannot be
     # shown is "no"; the template's "yes" again, it goes.

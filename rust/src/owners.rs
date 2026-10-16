@@ -3,7 +3,7 @@
 //! of flows (`crate::flows`), which knows no processes.
 //!
 //! **How.** From the host, as the user, nothing entered: the sockets of the
-//! instance's network namespace as `/proc/<pid>/net/{tcp,udp,icmp}{,6}` of
+//! instance's network namespace as `/proc/<pid>/net/{tcp,udp,icmp,raw}{,6}` of
 //! its space lists them — each with its ends and its inode —; the
 //! instance's processes, those whose `/proc/<pid>/ns/net` is the space's;
 //! which of them holds each inode (`/proc/<pid>/fd`); and, up its parents,
@@ -15,7 +15,9 @@
 //! **What it cannot say.** A socket closed by the time it is looked at, and a
 //! process gone, leave their flow without an owner: the record says so, and
 //! guesses nothing. A ping is matched by its ping socket — its identifier is
-//! the socket's port (`crate::flows::frame`); a raw socket's is not. Nothing
+//! the socket's port (`crate::flows::frame`) —, else by the one raw socket of
+//! its protocol there is. A flow left with no owner is decided as an unknown
+//! program's, never let past a denial (`crate::netrules::Rules::unknown`). Nothing
 //! here decides — the wall is the instance's rules.
 //!
 //! **At the first packet** ([`Keeper`]). The relay says a word on a pipe
@@ -110,6 +112,10 @@ pub fn parse_net(text: &str, proto: u8) -> Vec<Sock> {
         .collect()
 }
 
+/// A raw socket, as [`Sock::proto`] says it: its "port" in `/proc/net/raw`
+/// is the protocol it sends.
+pub const RAW: u8 = 255;
+
 /// The sockets of the network namespace of process `space`.
 fn sockets(space: i32) -> Vec<Sock> {
     [
@@ -119,6 +125,8 @@ fn sockets(space: i32) -> Vec<Sock> {
         ("udp6", UDP),
         ("icmp", ICMP),
         ("icmp6", ICMP6),
+        ("raw", RAW),
+        ("raw6", RAW),
     ]
     .iter()
     .flat_map(|(file, proto)| {
@@ -147,6 +155,16 @@ pub fn socket_of<'a>(socks: &'a [Sock], flow: &Flow) -> Option<&'a Sock> {
                 .iter()
                 .filter(ours)
                 .find(|s| (s.proto == UDP || ping) && s.remote.is_unspecified() && s.rport == 0)
+        })
+        // A raw socket of the flow's protocol: a ping that has the
+        // capability to send its own (iputils', with cap_net_raw) — the one
+        // there is, or none said where two could be it.
+        .or_else(|| {
+            let mut raw = socks
+                .iter()
+                .filter(|s| s.proto == RAW && s.lport == u16::from(k.proto));
+            let one = raw.next();
+            raw.next().is_none().then_some(one).flatten()
         })
 }
 
@@ -741,6 +759,21 @@ mod tests {
         assert_eq!(of(&ping(ICMP, 0x1234, "1.1.1.1")), Some(5));
         assert_eq!(of(&ping(ICMP6, 7, "2001:db8::1")), Some(6));
         assert_eq!(of(&ping(ICMP, 0x4321, "1.1.1.1")), None);
+        // A raw socket of ICMP's: the one there is; of two, neither.
+        let mut raws = vec![Sock {
+            proto: RAW,
+            ..sock(u16::from(ICMP), "0.0.0.0", 0, 7)
+        }];
+        assert_eq!(
+            socket_of(&raws, &ping(ICMP, 0x4321, "1.1.1.1")).map(|s| s.inode),
+            Some(7)
+        );
+        assert_eq!(socket_of(&raws, &ping(ICMP6, 9, "2001:db8::1")), None);
+        raws.push(Sock {
+            inode: 8,
+            ..raws[0].clone()
+        });
+        assert_eq!(socket_of(&raws, &ping(ICMP, 0x4321, "1.1.1.1")), None);
     }
 
     /// A socket nobody readable holds is a closed process's only when every
