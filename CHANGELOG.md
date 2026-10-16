@@ -48,6 +48,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   3 but the status pipe at the exec, and `doctor` checks it (`inherited`).
 
 ### Added
+- **Whose each broadcast and multicast was**: a counting table in each
+  container (decides nothing) counts every launch's broadcast and multicast
+  by its cgroup; the keeper keeps each launch's totals with its program, and
+  the scheme names them. The VPN's client is a source of its own (its
+  handshakes and keepalives); places that make packets anew — the relay,
+  passt, the encryptor, pasta — are marked as such.
 - **Every kind of packet in the scheme**: the relay notes ARP and other
   frames that are not IP; the container's rules count each drop by name
   (broadcast, IPv4 and IPv6 multicast, denied launches, the rest), read by
