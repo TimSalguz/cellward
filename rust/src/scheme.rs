@@ -1,7 +1,7 @@
 //! The network scheme as data (`cellward scheme [--json]`): every place a
 //! container's packet passes — its program, its container's network and
 //! gate, its zone's way in, tunnel and way out, the host's interface, the
-//! router, the provider, the VPN's server, where it goes — and every flow
+//! gateway, what is past it, the VPN's server, where it goes — and every flow
 //! through them, hop by hop: what goes, in what it is wrapped, who can read
 //! it, and where the flow ends — arrived, denied, answered on the way, or
 //! cut. What the window draws and a person reads in a terminal, from one
@@ -23,9 +23,11 @@
 //!
 //! **Who can read a hop** ([`Sees`]): the machine alone; nobody (encrypted);
 //! the VPN's server, as any site's way out; a stranger, in clear — the LAN,
-//! the provider, a public resolver. Told by the zone's kind and its
-//! resolvers' side (`crate::dnspath`), never by guessing what is unknown: the
-//! provider's network is a place of its own, marked unknown.
+//! the networks past the gateway, a public resolver. Told by the zone's kind
+//! and its resolvers' side (`crate::dnspath`), never by guessing what is
+//! unknown: the host knows its route's next hop — a gateway, or none, the
+//! destination on its own link —, not whether it is a router or a provider's;
+//! what is past it is a place of its own, marked unknown.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -238,7 +240,7 @@ pub struct Place {
     pub tech: String,
     /// The firewall decides here.
     pub gate: bool,
-    /// What is inside is not known (the provider's network).
+    /// What is inside is not known (the networks past the gateway).
     pub unknown: bool,
 }
 
@@ -311,6 +313,8 @@ impl End {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Data,
+    /// ICMP echo.
+    Ping,
     Dns,
     Denied,
     /// With the gateway (ARP, neighbour discovery): answered by passt.
@@ -328,6 +332,7 @@ impl Kind {
     pub fn word(self) -> &'static str {
         match self {
             Self::Data => "data",
+            Self::Ping => "ping",
             Self::Dns => "dns",
             Self::Denied => "denied",
             Self::Local => "local",
@@ -429,7 +434,7 @@ fn kind_word(kind: &str) -> &'static str {
 }
 
 /// The host's way out by `route` — its interface and gateway: its places
-/// (the interface, the router, the provider) and the hops onto them, each
+/// (the interface, the gateway, what is past it) and the hops onto them, each
 /// carrying `what` and read as `sees`.
 fn host_way(
     s: &mut Scheme,
@@ -447,30 +452,36 @@ fn host_way(
         None => iface_word(kind).to_owned(),
     };
     let ifc = s.place(&format!("if:{dev}"), Layer::Host, dev, &tech);
-    let lan = s.place(
-        &format!("lan:{dev}"),
-        Layer::Outside,
-        if kind == "wifi" || kind == "ethernet" {
-            "Роутер"
-        } else {
-            "Первая сеть"
-        },
-        via.unwrap_or("та же сеть"),
-    );
-    let isp = s.place(
-        &format!("isp:{dev}"),
-        Layer::Outside,
-        "⋯ провайдер ⋯",
-        "что внутри — не известно",
-    );
-    if let Some(p) = s.places.iter_mut().find(|p| p.id == isp) {
-        p.unknown = true;
-    }
     let frame = if kind == "wifi" {
         "кадр Wi-Fi (802.11)"
     } else {
         "кадр Ethernet"
     };
+    // No gateway: what it goes to is on the link itself — nothing between.
+    let Some(via) = via else {
+        let lan = s.place(
+            &format!("link:{dev}"),
+            Layer::Outside,
+            "Локальная сеть",
+            "без шлюза: адресат в ней",
+        );
+        return vec![
+            hop(&ifc, what, "IP-пакет хоста", Sees::Machine, "только машина"),
+            hop(&lan, what, frame, sees, lan_sees),
+        ];
+    };
+    // The gateway is what the host knows: the next hop of its route. A
+    // router, a provider's box, a phone sharing its network — not known.
+    let lan = s.place(&format!("lan:{dev}"), Layer::Outside, "Шлюз", via);
+    let isp = s.place(
+        &format!("isp:{dev}"),
+        Layer::Outside,
+        "⋯ дальше не известно ⋯",
+        "сети за шлюзом",
+    );
+    if let Some(p) = s.places.iter_mut().find(|p| p.id == isp) {
+        p.unknown = true;
+    }
     vec![
         hop(&ifc, what, "IP-пакет хоста", Sees::Machine, "только машина"),
         hop(&lan, what, frame, sees, lan_sees),
@@ -532,8 +543,8 @@ fn zone_way(s: &mut Scheme, facts: &Facts, zone: &Zone, what: &str) -> Way {
                 (&dev, via.as_deref()),
                 what,
                 Sees::Stranger,
-                "⚠ локальная сеть и роутер: куда и что, если не TLS",
-                "⚠ провайдер: куда и что, если не TLS",
+                "⚠ локальная сеть и шлюз: куда и что, если не TLS",
+                "⚠ сети за шлюзом: куда и что, если не TLS",
             ));
             return Way {
                 hops,
@@ -641,8 +652,8 @@ fn zone_way(s: &mut Scheme, facts: &Facts, zone: &Zone, what: &str) -> Way {
         (&dev, server.via.as_deref()),
         &carried,
         Sees::Nobody,
-        &format!("локальная сеть и роутер: что есть поток {port_text} {addr}, размер, время"),
-        &format!("провайдер: что есть поток {port_text} {addr}, размер, время"),
+        &format!("локальная сеть и шлюз: что есть поток {port_text} {addr}, размер, время"),
+        &format!("сети за шлюзом: что есть поток {port_text} {addr}, размер, время"),
     );
     // The way out's first hop is the zone's socket in the host's: by uid
     // of the zone, the host's routes choosing the interface.
@@ -689,6 +700,9 @@ fn kind_of(f: &Flow) -> Kind {
     if crate::relay::to_forwarder(&key) {
         return Kind::Dns;
     }
+    if f.proto == crate::flows::ICMP || f.proto == ICMP6 {
+        return Kind::Ping;
+    }
     Kind::Data
 }
 
@@ -718,9 +732,10 @@ pub fn build(facts: &Facts) -> Scheme {
     let mut s = Scheme::default();
     for inst in &facts.instances {
         let group = format!("instance:{}", inst.id);
-        let title = match &inst.container {
-            Some(c) => format!("Контейнер {c} · сеть {}", inst.network),
-            None => format!("Одноразовый {} · сеть {}", inst.id, inst.network),
+        let title = match (&inst.container, crate::instance::who_of(&inst.id)) {
+            (Some(c), _) => format!("Контейнер {c} · сеть {}", inst.network),
+            (None, crate::origin::Who::Main) => format!("Настоящий дом · сеть {}", inst.network),
+            (None, _) => format!("Одноразовый {} · сеть {}", inst.id, inst.network),
         };
         s.group(&group, title);
         let zone = facts.zones.iter().find(|z| z.name == inst.network);
@@ -792,6 +807,7 @@ pub fn build(facts: &Facts) -> Scheme {
             let what = match kind {
                 Kind::Dns => "DNS-запрос к 10.254.255.253",
                 Kind::Local => "служебное: ARP, соседи IPv6",
+                Kind::Ping => "ping",
                 _ => "соединение программы",
             };
             let mut hops = vec![
@@ -910,8 +926,8 @@ pub fn build(facts: &Facts) -> Scheme {
                     (&dev, via.as_deref()),
                     &format!("«{name}?»"),
                     Sees::Stranger,
-                    "⚠ локальная сеть и роутер: имя сервера VPN",
-                    "⚠ провайдер и его резолвер: какой VPN и когда",
+                    "⚠ локальная сеть и шлюз: имя сервера VPN",
+                    "⚠ сети за шлюзом и резолвер хоста: какой VPN и когда",
                 );
             }
             let end = if server.addr.is_some() {
@@ -943,8 +959,8 @@ pub fn build(facts: &Facts) -> Scheme {
             (&dev, via.as_deref()),
             "их трафик, DHCP, ARP, mDNS",
             Sees::Stranger,
-            "локальная сеть и роутер",
-            "провайдер — мимо VPN",
+            "локальная сеть и шлюз",
+            "сети за шлюзом — мимо VPN",
         );
         s.rows.push(Row {
             id: "host".into(),
@@ -995,10 +1011,13 @@ fn dns_end(s: &mut Scheme, zone: &Zone, server: Option<&str>, hops: &mut Vec<Hop
             End::Arrives(format!("{addr}: имена открытым текстом"))
         }
         None if zone.dns.is_empty() => End::Answered("резолвер даёт сервер VPN".into()),
-        None => End::Answered(format!(
-            "{} — на стороне VPN",
-            crate::dnspath::words(&zone.dns)
-        )),
+        None => {
+            let all: Vec<String> = zone.dns.iter().map(|(a, _)| a.to_string()).collect();
+            End::Answered(format!(
+                "резолвер {} на стороне VPN: имена видит только она",
+                all.join(", ")
+            ))
+        }
     }
 }
 
@@ -1113,13 +1132,14 @@ pub fn text(s: &Scheme) -> String {
             for h in &r.hops {
                 out.push_str(&format!(" {} {}", mark(h.sees), name(&h.to)));
             }
-            let end = match r.end {
-                End::Arrives(_) => "→",
-                End::Denied(_) => "✕",
-                End::Answered(_) => "↩",
-                End::Cut(_) => "✕",
-            };
-            out.push_str(&format!(" {end} {}\n", r.end.text()));
+            // Arrived where its last place says: nothing to add.
+            let at_place = r.hops.last().is_some_and(|h| h.to.starts_with("dst:"));
+            match r.end {
+                End::Arrives(_) if at_place => out.push_str(" ✓\n"),
+                End::Arrives(_) => out.push_str(&format!(" → {}\n", r.end.text())),
+                End::Denied(_) | End::Cut(_) => out.push_str(&format!(" ✕ {}\n", r.end.text())),
+                End::Answered(_) => out.push_str(&format!(" ↩ {}\n", r.end.text())),
+            }
         }
     }
     out.push_str(
@@ -1297,6 +1317,24 @@ mod tests {
             .places
             .iter()
             .any(|p| p.id == "if:eth0" && p.tech.contains("не подключён")));
+    }
+
+    /// A server on the host's own link, no gateway: nothing between.
+    #[test]
+    fn a_server_on_the_link_has_nothing_between() {
+        let mut z = zone("wireguard", "10.8.1.1", false);
+        z.servers[0].via = None;
+        let s = build(&facts(z, vec![]));
+        let to: Vec<&str> = row(&s, "nl:handshake")
+            .hops
+            .iter()
+            .map(|h| h.to.as_str())
+            .collect();
+        assert_eq!(to, ["if:wlp2s0", "link:wlp2s0", "vpn:nl"]);
+        assert!(s
+            .places
+            .iter()
+            .any(|p| p.id == "link:wlp2s0" && p.name == "Локальная сеть"));
     }
 
     /// A denied program ends at the gate; so does what the gate drops.

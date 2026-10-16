@@ -38,8 +38,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 - **`cellward scheme [--json]`**: the network as places and flows — each
   place a packet passes (the program, its container's network and gate, the
-  zone's way in, tunnel and way out, the host's interface, the router, the
-  provider, the VPN's server, the destination), each program's flows of one
+  zone's way in, tunnel and way out, the host's interface, its gateway — or
+  none, the destination on its link —, what is past it, unknown, the VPN's
+  server, the destination), each program's flows of one
   kind a row, hop by hop: what goes, in what, who can read it, where it ends
   (arrived, denied, answered on the way, cut). The zones' handshakes and
   servers' names, the host's own programs and the interfaces nothing uses are
