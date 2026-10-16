@@ -168,6 +168,7 @@ pub mod pw_context;
 pub mod rebind;
 pub mod registry;
 pub mod relay;
+pub mod scheme;
 pub mod screencast;
 pub mod seccomp;
 pub mod sockdiag;

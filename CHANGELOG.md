@@ -36,6 +36,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   3 but the status pipe at the exec, and `doctor` checks it (`inherited`).
 
 ### Added
+- **`cellward scheme [--json]`**: the network as places and flows — each
+  place a packet passes (the program, its container's network and gate, the
+  zone's way in, tunnel and way out, the host's interface, the router, the
+  provider, the VPN's server, the destination), each program's flows of one
+  kind a row, hop by hop: what goes, in what, who can read it, where it ends
+  (arrived, denied, answered on the way, cut). The zones' handshakes and
+  servers' names, the host's own programs and the interfaces nothing uses are
+  there too. What the window's scheme is to draw, from one source.
 - **Where a zone's names go, said** (`LEAK-MODEL.md` §6): by its resolver's
   address — the VPN's side, encrypted to its server, or a public one asked in
   clear past it —, in `doctor` (`dns-side`) and on each zone's row in the

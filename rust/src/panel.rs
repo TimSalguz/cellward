@@ -63,7 +63,7 @@ pub fn home_word(home: Home) -> &'static str {
 }
 
 /// The zones: directories of the state directory with a config.
-fn zones(state: &Path) -> Vec<String> {
+pub(crate) fn zones(state: &Path) -> Vec<String> {
     let mut out: Vec<String> = crate::cli::visible_entries(state)
         .into_iter()
         .filter(|d| d.join("config.conf").is_file())
