@@ -67,6 +67,7 @@ impl Home {
             ("window", "/nonexistent/vpn-zone-window".to_owned()),
             ("busctl", "/nonexistent/busctl".to_owned()),
             ("secret-tool", "/nonexistent/secret-tool".to_owned()),
+            ("nft", "/nonexistent/nft".to_owned()),
             ("notify-send", "/nonexistent/notify-send".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));
@@ -260,7 +261,9 @@ fn add_copies_the_config_without_carriage_returns_and_at_mode_600() {
 
     let out = home.run(&["add", "nl", source.to_str().unwrap()]);
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(stdout(&out).trim(), "зона nl создана");
+    // Then what the zone is linked to (`dnspath::links_of`).
+    assert_eq!(stdout(&out).lines().next(), Some("зона nl создана"));
+    assert!(stdout(&out).contains("сервер "), "{}", stdout(&out));
 
     let copy = home.state().join("nl/config.conf");
     let text = fs::read_to_string(&copy).unwrap();

@@ -105,11 +105,13 @@ pub struct Tools {
     /// `secret-tool` (libsecret): a network's remembered password in the
     /// session's keyring (`crate::connect`), handed to it on stdin.
     pub secret_tool: PathBuf,
+    /// `nft`: the counters of a container's rules, read (`crate::scheme`).
+    pub nft: PathBuf,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
 /// struct so that `module/default.nix` and this file can be diffed by eye.
-const KEYS: [&str; 24] = [
+const KEYS: [&str; 25] = [
     "home",
     "state",
     "profiles",
@@ -134,6 +136,7 @@ const KEYS: [&str; 24] = [
     "window",
     "busctl",
     "secret-tool",
+    "nft",
 ];
 
 /// Why the manifest could not be used. Every variant names the file: when this
@@ -226,6 +229,7 @@ impl Tools {
             window: take("window")?,
             busctl: take("busctl")?,
             secret_tool: take("secret-tool")?,
+            nft: take("nft")?,
         })
     }
 

@@ -136,6 +136,10 @@ struct ProcRow {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Data {
+    /// The host's interfaces (`iface` lines).
+    ifaces: Vec<crate::scheme::Iface>,
+    /// Each zone's tunnel and servers: `zone → (kind, servers)` (`endpoint`).
+    tunnels: HashMap<String, (String, Vec<crate::scheme::Server>)>,
     /// Where each zone's names go past its tunnel: `zone → (vpn|public|-,
     /// words)` (`dns` lines).
     dns: HashMap<String, (String, String)>,
@@ -202,6 +206,32 @@ fn parse(text: &str) -> Data {
             ["pin", key, name, to] => {
                 d.pins
                     .push(((*key).to_owned(), (*name).to_owned(), (*to).to_owned()))
+            }
+            ["iface", name, kind, up, addrs] => d.ifaces.push(crate::scheme::Iface {
+                name: (*name).to_owned(),
+                kind: (*kind).to_owned(),
+                up: *up == "1",
+                addrs: addrs
+                    .split(',')
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            }),
+            ["endpoint", zone, kind, raw, addr, named, dev, via] => {
+                let opt = |v: &str| (v != "-").then(|| v.to_owned());
+                let entry = d
+                    .tunnels
+                    .entry((*zone).to_owned())
+                    .or_insert_with(|| ((*kind).to_owned(), Vec::new()));
+                if *raw != "-" {
+                    entry.1.push(crate::scheme::Server {
+                        raw: (*raw).to_owned(),
+                        addr: opt(addr),
+                        named: *named == "1",
+                        dev: opt(dev),
+                        via: opt(via),
+                    });
+                }
             }
             ["dns", zone, side, words] => {
                 d.dns.insert(
@@ -569,14 +599,16 @@ fn network_text(network: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Network,
+    Scheme,
     Tasks,
     Containers,
     Zones,
     Settings,
 }
 
-const TABS: [Tab; 5] = [
+const TABS: [Tab; 6] = [
     Tab::Network,
+    Tab::Scheme,
     Tab::Tasks,
     Tab::Containers,
     Tab::Zones,
@@ -747,6 +779,8 @@ enum Msg {
     /// Space and Delete, outside a field.
     TasksSpace,
     TasksDelete,
+    /// The zone the scheme draws.
+    SchemeZone(String),
     Modifiers(keyboard::Modifiers),
 }
 
@@ -785,6 +819,8 @@ struct Panel {
     picked: HashSet<(String, String)>,
     opened: HashSet<(String, String)>,
     ctrl: bool,
+    /// The zone the scheme draws: chosen, else the first one up.
+    scheme_zone: Option<String>,
 }
 
 /// Run `cellward <args>` off the window's threads; its output, or why not.
@@ -942,6 +978,7 @@ impl Panel {
             picked: HashSet::new(),
             opened: HashSet::new(),
             ctrl: false,
+            scheme_zone: None,
         }
     }
 
@@ -1299,6 +1336,10 @@ impl Panel {
                 Task::none()
             }
             Msg::ZoneDo(zone, verb) => self.act(vec![verb.to_owned(), zone]),
+            Msg::SchemeZone(zone) => {
+                self.scheme_zone = Some(zone);
+                Task::none()
+            }
             Msg::Modifiers(m) => {
                 self.ctrl = m.control();
                 Task::none()
@@ -1560,6 +1601,7 @@ impl Panel {
             .map_or(String::new(), |t| format!("⚠ {t}"));
         let top = row![
             tab("Сеть", Tab::Network),
+            tab("Схема", Tab::Scheme),
             tab("Задачи", Tab::Tasks),
             tab("Контейнеры", Tab::Containers),
             tab("Подключения", Tab::Zones),
@@ -1575,6 +1617,7 @@ impl Panel {
         let body = match self.tab {
             Tab::Network => self.view_network(),
             Tab::Tasks => self.view_tasks(),
+            Tab::Scheme => self.view_scheme(),
             Tab::Containers => self.view_containers(),
             Tab::Zones => self.view_zones(),
             Tab::Settings => self.view_settings(),
@@ -2485,6 +2528,91 @@ impl Panel {
         )
     }
 
+    /// **Схема**: one zone as it is linked (`crate::scheme`), its zones to
+    /// choose from above it.
+    fn view_scheme(&self) -> Element<'_, Msg> {
+        let zones: Vec<&Net> = self
+            .data
+            .networks
+            .iter()
+            .filter(|n| n.kind == "zone" || n.kind == "host")
+            .collect();
+        let chosen = self
+            .scheme_zone
+            .clone()
+            .filter(|z| zones.iter().any(|n| &n.name == z))
+            .or_else(|| zones.iter().find(|n| n.up).map(|n| n.name.clone()))
+            .or_else(|| zones.first().map(|n| n.name.clone()));
+        let Some(zone) = chosen else {
+            return text("Подключений нет: добавьте VPN на вкладке «Подключения»")
+                .size(14)
+                .into();
+        };
+        let mut pick = row![].spacing(6);
+        for n in &zones {
+            pick = pick.push(
+                button(text(n.name.as_str()).size(13))
+                    .padding([4, 10])
+                    .style(if n.name == zone {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press(Msg::SchemeZone(n.name.clone())),
+            );
+        }
+        let net = zones.iter().find(|n| n.name == zone);
+        let (kind, servers) = self
+            .data
+            .tunnels
+            .get(&zone)
+            .cloned()
+            .unwrap_or_else(|| ("offline".to_owned(), Vec::new()));
+        let conts = self
+            .data
+            .instances
+            .iter()
+            .filter(|i| i.network == zone)
+            .map(|i| {
+                let (out, inb) = self.rates.get(&i.id).copied().unwrap_or((0.0, 0.0));
+                crate::scheme::Cont {
+                    name: if i.container == "-" {
+                        i.id.clone()
+                    } else {
+                        i.container.clone()
+                    },
+                    out,
+                    inb,
+                }
+            })
+            .collect();
+        let scheme = crate::scheme::Scheme {
+            zone: zone.clone(),
+            up: net.is_some_and(|n| n.up),
+            color: net
+                .and_then(|n| n.color)
+                .unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88)),
+            kind,
+            servers,
+            dns: self
+                .data
+                .dns
+                .get(&zone)
+                .cloned()
+                .unwrap_or_else(|| ("-".to_owned(), String::new())),
+            conts,
+            ifaces: self.data.ifaces.clone(),
+        };
+        column![
+            pick,
+            iced::widget::canvas(scheme)
+                .width(Length::Fill)
+                .height(Length::Fill)
+        ]
+        .spacing(10)
+        .into()
+    }
+
     /// **Задачи**: each container's launches by their cgroups, what they
     /// use now, and their processes when unfolded; chosen by a click, more
     /// with Ctrl, paused, resumed, ended (asked first).
@@ -2939,6 +3067,7 @@ pub fn run(args: &[String]) -> iced::Result {
             "--cellward" => cellward = Some(PathBuf::from(value)),
             "--dirs" if !value.is_empty() => dirs = Some(PathBuf::from(value)),
             "--tab" if value == "tasks" => tab = Tab::Tasks,
+            "--tab" if value == "scheme" => tab = Tab::Scheme,
             "--tab" if value == "containers" => tab = Tab::Containers,
             "--tab" if value == "zones" => tab = Tab::Zones,
             "--tab" if value == "settings" => tab = Tab::Settings,

@@ -262,6 +262,27 @@ jobs:
       - name: Прогнать VM-тест
         run: env -u XDG_RUNTIME_DIR ./vm-uplink-driver/bin/nixos-test-driver
 
+  # Схема сети (tests/vm-scheme.nix): две настоящие зоны к серверу, трафик
+  # программ, `cellward scheme` — каждый поток кончается там, где кончается.
+  vm-scheme:
+    name: vm-scheme (NixOS test, the network as places and flows)
+    runs-on: ubuntu-24.04
+    needs: eval
+    steps:
+      - uses: actions/checkout@v4
+      - name: Включить KVM для раннера
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -c /dev/kvm
+      - uses: cachix/install-nix-action@v31
+      - name: Собрать драйвер VM-теста
+        run: nix-build tests/vm-scheme.nix -A driver -o vm-scheme-driver
+      - name: Прогнать VM-тест
+        run: env -u XDG_RUNTIME_DIR ./vm-scheme-driver/bin/nixos-test-driver
+
   # PipeWire герметичной зоны (tests/vm-audio.nix): настоящие PipeWire и
   # WirePlumber с политикой модуля NixOS, нулевые выход и микрофон. Изнутри
   # зоны: свой контекст безопасности вместо сырого pipewire-0 (и после

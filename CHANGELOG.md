@@ -48,10 +48,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   3 but the status pipe at the exec, and `doctor` checks it (`inherited`).
 
 ### Added
+- **Every kind of packet in the scheme**: the relay notes ARP and other
+  frames that are not IP; the container's rules count each drop by name
+  (broadcast, IPv4 and IPv6 multicast, denied launches, the rest), read by
+  `cellward scheme` in the container's namespace; what the design says
+  happens (no DHCP in a container, a way out's ND with pasta, what comes in
+  unasked, the host's ARP, DHCP and mDNS with its link) is drawn as not
+  seen. A zone's real routes are read in it: a way around its tunnel is
+  shown as a leak.
+- **`cellward scheme [--json]`**: the network as places and flows — each
+  place a packet passes (the program, its container's network and gate, the
+  zone's way in, tunnel and way out, the host's interface, its gateway — or
+  none, the destination on its link —, what is past it, unknown, the VPN's
+  server, the destination), each program's flows of one
+  kind a row, hop by hop: what goes, in what, who can read it, where it ends
+  (arrived, denied, answered on the way, cut). The zones' handshakes and
+  servers' names, the host's own programs and the interfaces nothing uses are
+  there too. What the window's scheme is to draw, from one source.
 - **Where a zone's names go, said** (`LEAK-MODEL.md` §6): by its resolver's
   address — the VPN's side, encrypted to its server, or a public one asked in
   clear past it —, in `doctor` (`dns-side`) and on each zone's row in the
   cellward window.
+- **`cellward add` says what the new zone is linked to**, before it is ever
+  up: each server by a name (resolved once in the host's network, seen by
+  the host's provider) or an address, and where its names go.
 - **Open a file or a folder from the real home** (`LEAK-MODEL.md` §2): the
   portal's `OpenFile`/`OpenDirectory` of a program of the real home goes to
   the broker, which checks the file on the host — in the home, every link

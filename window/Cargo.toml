@@ -26,6 +26,7 @@ iced = { version = "0.14", default-features = false, features = [
     "wayland",
     "x11",
     "image-without-codecs",
+    "canvas",
 ] }
 regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 libc = "0.2"

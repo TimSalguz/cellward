@@ -557,7 +557,7 @@ const DEFAULT_RESOLVERS: [&str; 2] = ["1.1.1.1", "9.9.9.9"];
 
 /// Name of the table both namespaces get, so that `nft list ruleset` inside a
 /// zone says whose rules these are.
-const NFT_TABLE: &str = "vpnzone";
+pub(crate) const NFT_TABLE: &str = "vpnzone";
 
 /// How often the tunnel state is mirrored into the `status` file. Five seconds
 /// is the compromise the bash version settled on: the handshake shows up almost
@@ -9808,11 +9808,18 @@ pub fn instance_ruleset(
     // A socket made by a launch denied the network (`epoch::DENIED`): its
     // packets dropped here, at the send — no race with its keeper's look.
     if let Some((level, path)) = denied {
-        rules.push(format!("{} drop", named(level, path)?));
+        rules.push(format!(
+            "{} counter name \"denied\" drop",
+            named(level, path)?
+        ));
     }
+    // Each drop counted by name (`INSTANCE_COUNTERS`): what never left, for
+    // the scheme of the network to say — every kind of packet, not only
+    // those that went.
     rules.extend([
-        format!("ip daddr {{ 224.0.0.0/4, 255.255.255.255, {broadcast} }} drop"),
-        "ip6 daddr ff00::/8 drop".to_string(),
+        "ip daddr 224.0.0.0/4 counter name \"mcast4\" drop".to_string(),
+        format!("ip daddr {{ 255.255.255.255, {broadcast} }} counter name \"bcast4\" drop"),
+        "ip6 daddr ff00::/8 counter name \"mcast6\" drop".to_string(),
         format!("oifname \"{TUN_IFACE}\" ip saddr {a4}{cgroup} accept"),
     ]);
     // Stage 4: `epoch` goes with a live switch, and a switch's epoch is
@@ -9823,8 +9830,15 @@ pub fn instance_ruleset(
             "oifname \"{TUN_IFACE}\" ip6 saddr {a6}{cgroup} accept"
         ));
     }
-    Ok(output_table(&rules))
+    // What the policy drops: counted on its way there.
+    rules.push("counter name \"rest\"".to_string());
+    Ok(output_table_counted(&INSTANCE_COUNTERS, &rules))
 }
+
+/// The instance's named counters (`instance_ruleset`): what its rules drop,
+/// by why — `denied` (a launch denied the network), `mcast4`, `bcast4`,
+/// `mcast6`, `rest` (all the policy drops).
+pub const INSTANCE_COUNTERS: [&str; 5] = ["denied", "mcast4", "bcast4", "mcast6", "rest"];
 
 /// A container instance's ruleset between a switch's cut and its next
 /// attach, and for good after a switch to `offline` (stage 4, `frame-relay
@@ -9886,10 +9900,18 @@ pub(crate) fn replacing_table(ruleset: &str) -> String {
 /// and neither of those becomes safer for being filtered here — what this is
 /// about is packets LEAVING somewhere they should not.
 fn output_table(rules: &[String]) -> String {
+    output_table_counted(&[], rules)
+}
+
+/// [`output_table`] with named counters declared in the table.
+fn output_table_counted(counters: &[&str], rules: &[String]) -> String {
     let mut text = String::new();
     text.push_str("table inet ");
     text.push_str(NFT_TABLE);
     text.push_str(" {\n");
+    for c in counters {
+        text.push_str(&format!("\tcounter {c} {{\n\t}}\n"));
+    }
     text.push_str("\tchain output {\n");
     text.push_str("\t\ttype filter hook output priority filter; policy drop;\n");
     for rule in rules {
@@ -11321,13 +11343,20 @@ networks:  files
             instance_ruleset(None, None, a4, None).unwrap(),
             concat!(
                 "table inet vpnzone {\n",
+                "\tcounter denied {\n\t}\n",
+                "\tcounter mcast4 {\n\t}\n",
+                "\tcounter bcast4 {\n\t}\n",
+                "\tcounter mcast6 {\n\t}\n",
+                "\tcounter rest {\n\t}\n",
                 "\tchain output {\n",
                 "\t\ttype filter hook output priority filter; policy drop;\n",
                 "\t\toifname \"lo\" accept\n",
                 "\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n",
-                "\t\tip daddr { 224.0.0.0/4, 255.255.255.255, 10.254.255.255 } drop\n",
-                "\t\tip6 daddr ff00::/8 drop\n",
+                "\t\tip daddr 224.0.0.0/4 counter name \"mcast4\" drop\n",
+                "\t\tip daddr { 255.255.255.255, 10.254.255.255 } counter name \"bcast4\" drop\n",
+                "\t\tip6 daddr ff00::/8 counter name \"mcast6\" drop\n",
                 "\t\toifname \"awg0\" ip saddr 10.254.3.4 accept\n",
+                "\t\tcounter name \"rest\"\n",
                 "\t}\n",
                 "}\n",
             )
@@ -11338,20 +11367,27 @@ networks:  files
             instance_ruleset(Some((6, path)), Some((7, &format!("{path}/denied"))), a4, Some(a6)).unwrap(),
             concat!(
                 "table inet vpnzone {\n",
+                "\tcounter denied {\n\t}\n",
+                "\tcounter mcast4 {\n\t}\n",
+                "\tcounter bcast4 {\n\t}\n",
+                "\tcounter mcast6 {\n\t}\n",
+                "\tcounter rest {\n\t}\n",
                 "\tchain output {\n",
                 "\t\ttype filter hook output priority filter; policy drop;\n",
                 "\t\toifname \"lo\" accept\n",
                 "\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n",
                 "\t\tsocket cgroupv2 level 7 \"user.slice/user-1000.slice/user@1000.service/app.slice/",
-                "vpn-zone-container@work\\x2d2.service/e3/denied\" drop\n",
-                "\t\tip daddr { 224.0.0.0/4, 255.255.255.255, 10.254.255.255 } drop\n",
-                "\t\tip6 daddr ff00::/8 drop\n",
+                "vpn-zone-container@work\\x2d2.service/e3/denied\" counter name \"denied\" drop\n",
+                "\t\tip daddr 224.0.0.0/4 counter name \"mcast4\" drop\n",
+                "\t\tip daddr { 255.255.255.255, 10.254.255.255 } counter name \"bcast4\" drop\n",
+                "\t\tip6 daddr ff00::/8 counter name \"mcast6\" drop\n",
                 "\t\toifname \"awg0\" ip saddr 10.254.3.4 socket cgroupv2 level 6 ",
                 "\"user.slice/user-1000.slice/user@1000.service/app.slice/",
                 "vpn-zone-container@work\\x2d2.service/e3\" accept\n",
                 "\t\toifname \"awg0\" ip6 saddr fd63:656c:6c77::1:2 socket cgroupv2 level 6 ",
                 "\"user.slice/user-1000.slice/user@1000.service/app.slice/",
                 "vpn-zone-container@work\\x2d2.service/e3\" accept\n",
+                "\t\tcounter name \"rest\"\n",
                 "\t}\n",
                 "}\n",
             )

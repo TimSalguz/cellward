@@ -93,6 +93,41 @@ pub fn words(found: &[(IpAddr, Side)]) -> String {
     }
 }
 
+/// What a zone made of config `raw` is linked to, for a person, before it
+/// is ever up (`cellward add`): its servers — a name is resolved once, in
+/// the host's network, at the first up (§5) —, and where its names go (§6).
+pub fn links_of(raw: &[u8]) -> Vec<String> {
+    let Ok(cfg) = crate::config::WgConfig::parse(raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in cfg.sections.iter().flat_map(|s| s.entries.iter()) {
+        if !entry.key.eq_ignore_ascii_case("Endpoint") {
+            continue;
+        }
+        let Some(endpoint) = crate::config::Endpoint::parse(&entry.value) else {
+            continue;
+        };
+        out.push(match endpoint.host {
+            crate::config::EndpointHost::Name(_) => format!(
+                "сервер {} — имя: при первом подъёме оно один раз резолвится в сети хоста, и \
+                 провайдер хоста видит его; дальше — запомненный адрес. Адрес вместо имени в \
+                 конфиге не спрашивает никого",
+                endpoint.raw
+            ),
+            _ => format!("сервер {} — по адресу, без DNS хоста", endpoint.raw),
+        });
+    }
+    let dns: Vec<(IpAddr, Side)> = cfg
+        .dns()
+        .iter()
+        .filter_map(|d| d.parse::<IpAddr>().ok())
+        .map(|a| (a, side_of(a)))
+        .collect();
+    out.push(words(&dns));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +154,13 @@ mod tests {
         assert!(words(&mixed).contains("1.1.1.1 — публичный"));
         assert!(words(&mixed[..1]).contains("на стороне VPN"));
         assert!(words(&[]).contains("не задан"));
+        let said = links_of(
+            b"[Interface]\nDNS = 1.1.1.1\n[Peer]\nEndpoint = vpn.example.org:51820\n\
+              [Peer]\nEndpoint = 192.0.2.7:51820\n",
+        );
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert!(said[0].contains("vpn.example.org:51820 — имя"), "{said:?}");
+        assert!(said[1].contains("по адресу"), "{said:?}");
+        assert!(said[2].contains("публичный"), "{said:?}");
     }
 }
