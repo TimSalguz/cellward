@@ -909,6 +909,14 @@ if wanted(CW):
         machine.sleep(5)
         print(alice("cellward-clip list main", check=False))
         print(alice("cellward-clip list cwb", check=False))
+        # The one window on the screen (`window_box`): what scenarios before
+        # left open is closed first.
+        for w in windows():
+            alice(f"{NIRI_MSG} action close-window --id {w['id']}", check=False)
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -qx '\\[\\]'",
+            timeout=30,
+        )
         window = machine.succeed("ls -d /nix/store/*-vpn-zone-window-*/bin/vpn-zone-window | head -1").strip()
         alice(
             f"systemd-run --user --unit=cwwin --setenv=WAYLAND_DISPLAY={nested} "
