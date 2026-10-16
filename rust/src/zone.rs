@@ -3997,16 +3997,16 @@ impl Transport {
             }
             self.regrouped = Some(rules.clone());
         }
-        // One verdict for every program: decided before anything is looked
-        // up — the flow is held for as little as a wake-up.
-        let uniform = rules.uniform();
-        if let Some(verdict) = uniform {
-            self.decide(fresh.iter().map(|f| (f.key, verdict)));
-        }
+        // Whose each flow is, looked up while its first packet is held —
+        // its program still waiting for an answer, so still there: decided
+        // first, a ping or a short request was over and its owner gone
+        // before the look (the owner, 2026-10-16: even a short program is
+        // recorded). One verdict for every program then, as soon as that.
         let owners = self
             .owners
             .resolve(&self.dir, self.space, &registry, &fresh);
-        if uniform.is_some() {
+        if let Some(verdict) = rules.uniform() {
+            self.decide(fresh.iter().map(|f| (f.key, verdict)));
             return;
         }
         // By each flow's program — asked about where its rule says so
