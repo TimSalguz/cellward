@@ -1,0 +1,450 @@
+# The channels of a container's program: what it can reach, and through what.
+# Read by tests/channels-check.py, which walks every route from `program` to
+# an `outside` node and fails on a route with no guard on it, or a guard with
+# no test, unless the route is `known` (an open item, named by its ROADMAP or
+# LEAK-MODEL entry). See docs/CHANNELS.md.
+#
+# node:  id, kind (process | resource | outside), what
+# edge:  from, to, kind (shares | sees | connects | inherits | spawns | signals),
+#        guard  — what holds it ("" for nothing),
+#        test   — where that is checked ("" for nowhere),
+#        known  — an open item this route is ("" for none)
+
+# --- outside: what a program must not reach unasked -------------------------
+
+[[node]]
+id = "host-network"
+kind = "outside"
+what = "the host's network, around the tunnel"
+
+[[node]]
+id = "host-process"
+kind = "outside"
+what = "a process of the host that acts for whoever asks (starts, opens, runs)"
+
+[[node]]
+id = "other-container"
+kind = "outside"
+what = "another container's programs, files, clipboard, windows"
+
+[[node]]
+id = "host-identity"
+kind = "outside"
+what = "what is the same machine in every container and network (fingerprint)"
+
+[[node]]
+id = "host-input"
+kind = "outside"
+what = "the whole screen, every window's input, the host's clipboard"
+
+# --- the program and what is its own ------------------------------------------
+
+[[node]]
+id = "program"
+kind = "process"
+what = "a program of a container, in its instance (profile-run's child)"
+
+[[node]]
+id = "instance-netns"
+kind = "resource"
+what = "the instance's network namespace: lo and the relay's tap"
+
+[[node]]
+id = "relay"
+kind = "process"
+what = "frame-relay: the instance's tap to its zone, its flows, the gate"
+
+[[node]]
+id = "zone"
+kind = "process"
+what = "the zone: the tunnel (the way out it is meant to be)"
+
+[[node]]
+id = "forwarder"
+kind = "process"
+what = "the instance's DNS forwarder (bridge), answers from the zone"
+
+[[node]]
+id = "wl-proxy"
+kind = "process"
+what = "the launch's Wayland proxy, on the host"
+
+[[node]]
+id = "compositor"
+kind = "process"
+what = "the host's compositor"
+
+[[node]]
+id = "bus-filter"
+kind = "process"
+what = "the zone's session-bus filter, before xdg-dbus-proxy"
+
+[[node]]
+id = "session-bus"
+kind = "process"
+what = "the host's session bus: portals, systemd --user, everything on it"
+
+[[node]]
+id = "broker"
+kind = "process"
+what = "the broker on the host: launches, links and files asked by a zone"
+
+[[node]]
+id = "pulse-filter"
+kind = "process"
+what = "the zone's PulseAudio/PipeWire filter"
+
+[[node]]
+id = "pipewire"
+kind = "process"
+what = "the host's PipeWire"
+
+[[node]]
+id = "camera-server"
+kind = "process"
+what = "the launch's black camera (camera-serve), FUSE"
+
+[[node]]
+id = "x11-satellite"
+kind = "process"
+what = "the container's own xwayland-satellite"
+
+[[node]]
+id = "launcher-fds"
+kind = "resource"
+what = "descriptors left open by whatever ran `cellward run`"
+
+[[node]]
+id = "paths"
+kind = "resource"
+what = "unix sockets reachable by path in the instance's mounts"
+
+[[node]]
+id = "sysfs"
+kind = "resource"
+what = "/sys as the instance shows it"
+
+[[node]]
+id = "machine-id"
+kind = "resource"
+what = "/etc/machine-id as the instance shows it"
+
+[[node]]
+id = "nix-store"
+kind = "resource"
+what = "/nix/store as the instance shows it"
+
+[[node]]
+id = "proc"
+kind = "resource"
+what = "/proc as the instance shows it"
+
+[[node]]
+id = "tmp"
+kind = "resource"
+what = "/tmp, /var/tmp, /dev/shm as the instance shows them"
+
+[[node]]
+id = "host-home"
+kind = "resource"
+what = "the real home's files"
+
+# --- edges ------------------------------------------------------------------
+
+[[edge]]
+from = "program"
+to = "instance-netns"
+kind = "shares"
+guard = ""
+test = ""
+
+[[edge]]
+from = "instance-netns"
+to = "host-network"
+kind = "connects"
+guard = "a network namespace of its own; nothing but lo and the relay's tap"
+test = "tests/vm.nix: leak capture of every zone"
+
+[[edge]]
+from = "instance-netns"
+to = "relay"
+kind = "connects"
+guard = ""
+test = ""
+
+[[edge]]
+from = "relay"
+to = "zone"
+kind = "connects"
+guard = "the zone's tunnel is the way out meant; nft of the instance, epoch wall"
+test = "tests/vm-switch.py"
+
+[[edge]]
+from = "relay"
+to = "host-network"
+kind = "connects"
+guard = "the relay reaches only its zone's socket; seccomp"
+test = "tests/vm-instance-bridge.py"
+
+[[edge]]
+from = "program"
+to = "forwarder"
+kind = "connects"
+guard = "its own resolv.conf naming the forwarder; host resolvers hidden"
+test = "tests/vm-promise-resolv-rename.py: D2"
+
+[[edge]]
+from = "forwarder"
+to = "host-network"
+kind = "connects"
+guard = "asks the zone's DNS through the zone"
+test = "tests/vm.nix: DNS leak capture"
+known = "LEAK-MODEL §5/§6: the VPN server's name, DNS in clear past the tunnel"
+
+[[edge]]
+from = "program"
+to = "wl-proxy"
+kind = "connects"
+guard = "the restricted socket only (security-context); raw compositor socket hidden"
+test = "tests/vm-niri-question.py; doctor wayland-raw"
+
+[[edge]]
+from = "wl-proxy"
+to = "compositor"
+kind = "connects"
+guard = "the proxy's filter: no screencopy, no virtual input, no data-control"
+test = "tests/vm-niri-question.py; tests/vm-window-buttons.py"
+
+[[edge]]
+from = "compositor"
+to = "host-input"
+kind = "connects"
+guard = "what the proxy passes on is the program's own windows' only"
+test = "tests/vm-niri-question.py"
+
+[[edge]]
+from = "wl-proxy"
+to = "other-container"
+kind = "connects"
+guard = "clipboard by container: a foreign selection read only when pasted"
+test = "tests/vm-desktop.py: The clipboard by container (local)"
+
+[[edge]]
+from = "program"
+to = "bus-filter"
+kind = "connects"
+guard = ""
+test = ""
+
+[[edge]]
+from = "bus-filter"
+to = "session-bus"
+kind = "connects"
+guard = "portal doors answered by the filter; xdg-dbus-proxy's names"
+test = "tests/vm.nix: sandbox: a link through the portal opens in the zone"
+
+[[edge]]
+from = "session-bus"
+to = "host-process"
+kind = "connects"
+guard = "systemd --user, portals and names not in the proxy's policy are not reached"
+test = "tests/vm.nix: hermetic zone's bus"
+
+[[edge]]
+from = "bus-filter"
+to = "broker"
+kind = "connects"
+guard = "links and files of the real home: the person chooses the program, network, container"
+test = "tests/vm.nix: a link through the portal; a file of the real home"
+
+[[edge]]
+from = "program"
+to = "broker"
+kind = "connects"
+guard = "a launch elsewhere only through the launch window on the host"
+test = "tests/vm.nix: broker"
+
+[[edge]]
+from = "broker"
+to = "host-process"
+kind = "spawns"
+guard = "only what the person chose in the launch window; never what runs for a file"
+test = "tests/vm.nix: broker"
+
+[[edge]]
+from = "program"
+to = "pulse-filter"
+kind = "connects"
+guard = ""
+test = ""
+
+[[edge]]
+from = "pulse-filter"
+to = "pipewire"
+kind = "connects"
+guard = "the filter's policy: the microphone asked, the monitors never"
+test = "tests/vm-audio"
+
+[[edge]]
+from = "pipewire"
+to = "host-input"
+kind = "connects"
+guard = "monitors of the host's outputs never recorded by a zone"
+test = "tests/vm-audio"
+
+[[edge]]
+from = "program"
+to = "camera-server"
+kind = "connects"
+guard = "black until allowed; fail-closed ioctls"
+test = "tests/vm-camera"
+
+[[edge]]
+from = "program"
+to = "x11-satellite"
+kind = "connects"
+guard = "the container's own satellite; the host's X server hidden"
+test = "doctor x11"
+
+[[edge]]
+from = "x11-satellite"
+to = "other-container"
+kind = "connects"
+guard = ""
+test = ""
+known = "ROADMAP: X11 in a zone against an evil neighbour"
+
+[[edge]]
+from = "program"
+to = "launcher-fds"
+kind = "inherits"
+guard = "container-enter closes every descriptor from 3 but the status pipe and the camera's"
+test = "tests/vm-instance-offline.py: no descriptor of its launcher; doctor inherited"
+
+[[edge]]
+from = "launcher-fds"
+to = "host-process"
+kind = "connects"
+guard = ""
+test = ""
+
+[[edge]]
+from = "program"
+to = "paths"
+kind = "sees"
+guard = ""
+test = ""
+
+[[edge]]
+from = "paths"
+to = "host-process"
+kind = "connects"
+guard = "hermetic runtime; ssh, tmux, root daemons, nix daemon, resolvers hidden"
+test = "doctor sockets (crate::sockets); tests/vm.nix"
+
+[[edge]]
+from = "program"
+to = "tmp"
+kind = "sees"
+guard = ""
+test = ""
+
+[[edge]]
+from = "tmp"
+to = "host-process"
+kind = "connects"
+guard = "a hermetic instance's own /tmp, /var/tmp, /dev/shm"
+test = "tests/vm.nix: LEAK-MODEL §15"
+
+[[edge]]
+from = "program"
+to = "sysfs"
+kind = "sees"
+guard = ""
+test = ""
+
+[[edge]]
+from = "sysfs"
+to = "host-identity"
+kind = "sees"
+guard = "a sysfs of its own netns; DMI, firmware, serials covered"
+test = "tests/vm-instance-offline.py: fingerprint in sysfs"
+
+[[edge]]
+from = "program"
+to = "machine-id"
+kind = "sees"
+guard = ""
+test = ""
+
+[[edge]]
+from = "machine-id"
+to = "host-identity"
+kind = "sees"
+guard = "an instance's own machine-id, a container's kept, a throwaway's new"
+test = "tests/vm-instance-offline.py: fingerprint in sysfs"
+
+[[edge]]
+from = "program"
+to = "nix-store"
+kind = "sees"
+guard = ""
+test = ""
+
+[[edge]]
+from = "nix-store"
+to = "host-identity"
+kind = "sees"
+guard = ""
+test = ""
+known = "LEAK-MODEL §10: the whole store, not the program's closure"
+
+[[edge]]
+from = "program"
+to = "proc"
+kind = "sees"
+guard = ""
+test = ""
+
+[[edge]]
+from = "proc"
+to = "other-container"
+kind = "sees"
+guard = "a pid namespace of its own (X4)"
+test = "tests/vm-instance-offline.py: X4"
+
+[[edge]]
+from = "program"
+to = "host-process"
+kind = "signals"
+guard = "a pid namespace and a user namespace of its own"
+test = "tests/vm.nix: LEAK-MODEL §16"
+
+[[edge]]
+from = "program"
+to = "host-home"
+kind = "sees"
+guard = ""
+test = ""
+
+[[edge]]
+from = "host-home"
+to = "other-container"
+kind = "sees"
+guard = "a container's home is its own; the real home only for the real home's"
+test = "tests/vm.nix: containers' homes"
+
+[[edge]]
+from = "host-home"
+to = "host-process"
+kind = "spawns"
+guard = "what the host runs from the home read-only in a hermetic container (protect_host_files)"
+test = "tests/vm-protect.py; tests/vm.nix: mimeapps"
+
+[[edge]]
+from = "host-home"
+to = "host-process"
+kind = "spawns"
+guard = ""
+test = ""
+known = "IDE settings and tasks (VS Code, Zed, JetBrains), KWin scripts and plasmoids, lazygit: not among the places covered"

@@ -142,6 +142,25 @@ with subtest("an instance's programs are in its epoch; one from a login session 
     machine.succeed("pkill -xf 'sleep 4343'")
     live_switch_is("vmia", True, None)
 
+with subtest("the machine's fingerprint in sysfs is out of a container's sight"):
+    # LEAK-MODEL §10: its own sysfs — no network device of the host's, so no
+    # hardware address of them —, DMI and the firmware's tables covered.
+    host_devs = machine.succeed("ls /sys/class/net").split()
+    assert any(d != "lo" for d in host_devs), host_devs
+    seen = in_c("vmia", "ls /sys/class/net").split()
+    assert seen == ["lo"], seen
+    assert machine.succeed("cat /sys/class/dmi/id/sys_vendor").strip(), "the VM has DMI"
+    in_c("vmia", "sh -c '! cat /sys/class/dmi/id/sys_vendor'")
+    assert not in_c("vmia", "ls -A /sys/firmware").strip()
+    # The GPU's and the rest's devices are still there for drivers.
+    in_c("vmia", "test -d /sys/dev/char")
+    # Its own machine-id, another container's another, both kept.
+    host_id = machine.succeed("cat /etc/machine-id").strip()
+    a_id = in_c("vmia", "cat /etc/machine-id").strip()
+    b_id = in_c("vmib", "cat /etc/machine-id").strip()
+    assert len({host_id, a_id, b_id}) == 3 and len(a_id) == 32, (host_id, a_id, b_id)
+
+
 with subtest("a launch takes no descriptor of its launcher into the container"):
     # A socket the launcher left open (fd 5, as a shell's or an editor's
     # would be): the program in the container never has it, and the doctor
