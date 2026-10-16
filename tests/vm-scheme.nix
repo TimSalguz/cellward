@@ -167,6 +167,12 @@ let
               'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- '
               "cellward run nl -- ping -c1 -W5 10.99.0.1"
           )
+          # Broadcast and multicast: dropped by the container's own rules,
+          # the sender refused (EPERM) — counted there.
+          for dst in ("UDP4-DATAGRAM:10.254.255.255:9,broadcast",
+                      "UDP4-DATAGRAM:224.0.0.251:5353",
+                      "UDP6-DATAGRAM:[ff02::fb]:5353"):
+              alice(f"printf x | cellward run nl -- socat -u - {dst} || true")
           alice("cellward container net main deny curl")
           alice("! cellward run nl -- curl -sS -m 10 --connect-timeout 5 http://10.99.0.1:8080/")
           # A name of pub's: asked of 1.1.1.1 past the server, unanswered here.
@@ -221,6 +227,15 @@ let
           # and said so — not the person's router.
           lan_dns = of("dns", "lan")
           assert lan_dns and "не твой роутер" in lan_dns[0]["end"]["text"], lan_dns
+          # Every kind of packet: ARP with passt, each drop of the
+          # container's rules with its packets, and what the design says,
+          # drawn as not seen.
+          ids = {r["id"]: r for r in rows}
+          assert "main:nl:ядро контейнера:arp" in ids, sorted(ids)
+          for c in ("bcast4", "mcast4", "mcast6"):
+              assert ids[f"main:nl:wall:{c}"]["count"] >= 1, ids.get(f"main:nl:wall:{c}")
+          for d in ("main:nl:dhcp", "nl:uplink-nd", "nl:inbound", "host:arp", "host:dhcp", "host:mcast", "host:inbound"):
+              assert d in ids and ids[d]["observed"] is False, (d, ids.get(d))
           # The provider's network: a place, not known.
           assert any(p["unknown"] for p in places.values()), places
           assert "⚠→" in text, text

@@ -67,6 +67,7 @@ impl Home {
             ("window", "/nonexistent/vpn-zone-window".to_owned()),
             ("busctl", "/nonexistent/busctl".to_owned()),
             ("secret-tool", "/nonexistent/secret-tool".to_owned()),
+            ("nft", "/nonexistent/nft".to_owned()),
             ("notify-send", "/nonexistent/notify-send".to_owned()),
         ] {
             json.push_str(&format!("  \"{key}\": \"{value}\",\n"));

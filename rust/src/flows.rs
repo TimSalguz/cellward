@@ -113,15 +113,48 @@ const ECHO_REPLY4: u8 = 0;
 pub const ECHO6: u8 = 128;
 const ECHO_REPLY6: u8 = 129;
 
-/// An Ethernet frame's flow; `None` for one that is not IPv4 or IPv6, or
-/// does not read.
+/// A frame that is not IP is a flow of [`NOT_IP`] by its ethertype, the
+/// other end's port: ARP with the address asked about (out) or answered
+/// for (in), anything else with none.
+pub const NOT_IP: u8 = 0;
+pub const ETHER_ARP: u16 = 0x0806;
+
+fn not_ip(buf: &[u8], ethertype: u16, outbound: bool) -> Seen<'_> {
+    let remote = (ethertype == ETHER_ARP)
+        .then(|| {
+            // The sender's address at 14, the target's at 24 of the ARP body.
+            let at = if outbound { 14 + 24 } else { 14 + 14 };
+            u32_at(buf, at).map(|a| IpAddr::V4(Ipv4Addr::from(a)))
+        })
+        .flatten()
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    Seen {
+        key: Key {
+            proto: NOT_IP,
+            lport: 0,
+            remote,
+            rport: ethertype,
+        },
+        outbound,
+        len: buf.len(),
+        dns: None,
+        fragment: false,
+    }
+}
+
+/// An Ethernet frame's flow; `None` for an IP one that does not read — a
+/// frame that is not IP at all is one of [`NOT_IP`].
 ///
 /// A ping is a flow by its identifier — the ping socket's own "port", as
 /// `/proc/net/icmp` lists it — with the request's type for the other end's
 /// port, its reply's the same flow. Another ICMP message is the instance's
 /// port 0 and its type.
 pub fn frame(buf: &[u8], outbound: bool) -> Option<Seen<'_>> {
-    let (proto, src, dst, payload, fragment) = match u16_at(buf, 12)? {
+    let ethertype = u16_at(buf, 12)?;
+    if ethertype != 0x0800 && ethertype != 0x86dd {
+        return Some(not_ip(buf, ethertype, outbound));
+    }
+    let (proto, src, dst, payload, fragment) = match ethertype {
         0x0800 => {
             let ip = buf.get(14..)?;
             let ihl = usize::from(*ip.first()? & 0x0f) * 4;
@@ -748,6 +781,7 @@ pub fn proto_name(proto: u8) -> String {
         UDP => "udp".to_owned(),
         ICMP => "icmp".to_owned(),
         ICMP6 => "icmpv6".to_owned(),
+        NOT_IP => "ether".to_owned(),
         2 => "igmp".to_owned(),
         n => n.to_string(),
     }
@@ -1095,8 +1129,23 @@ mod tests {
         let v6 = eth(0x86dd, &ip6);
         let s6 = frame(&v6, true).unwrap();
         assert_eq!((s6.key.proto, s6.key.rport), (UDP, 4433));
-        // Not IP, or cut short: nothing.
-        assert!(frame(&eth(0x0806, &[0; 28]), true).is_none());
+        // ARP: by the address asked about, out, and answered for, in.
+        let mut arp = vec![0, 1, 8, 0, 6, 4, 0, 1];
+        arp.extend_from_slice(&[2; 6]);
+        arp.extend_from_slice(&[10, 254, 0, 2]);
+        arp.extend_from_slice(&[0; 6]);
+        arp.extend_from_slice(&[10, 254, 255, 254]);
+        let arp = eth(ETHER_ARP, &arp);
+        let a = frame(&arp, true).unwrap();
+        assert_eq!(
+            (a.key.proto, a.key.remote, a.key.rport),
+            (NOT_IP, "10.254.255.254".parse().unwrap(), ETHER_ARP)
+        );
+        // Another ethertype: by itself, no address.
+        let lldp = eth(0x88cc, &[0; 30]);
+        let other = frame(&lldp, true).unwrap();
+        assert_eq!((other.key.proto, other.key.rport), (NOT_IP, 0x88cc));
+        // IP cut short: nothing.
         assert!(frame(&out[..20], true).is_none());
         assert!(frame(&[], true).is_none());
         // A later fragment: no ports.

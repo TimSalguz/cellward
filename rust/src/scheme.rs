@@ -84,6 +84,48 @@ pub struct Instance {
     pub container: Option<String>,
     pub network: String,
     pub flows: Vec<Flow>,
+    /// Its rules' named counters (`zone::INSTANCE_COUNTERS`): packets each
+    /// drop rule dropped; none, not read.
+    pub counters: Vec<(String, u64)>,
+}
+
+/// The named counters of `nft list counters` text: each one's name and its
+/// packets.
+pub fn parse_counters(text: &str) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let mut name = None;
+    for line in text.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("counter ") {
+            name = rest.split_whitespace().next().map(str::to_owned);
+        } else if let (Some(n), Some(rest)) = (&name, line.strip_prefix("packets ")) {
+            if let Some(p) = rest.split_whitespace().next().and_then(|p| p.parse().ok()) {
+                out.push((n.clone(), p));
+            }
+            name = None;
+        }
+    }
+    out
+}
+
+/// The counters of the instance whose space is process `pid`: its rules
+/// listed in its network namespace, entered as the user (read only).
+fn counters_of(tools: &Tools, pid: i32) -> Vec<(String, u64)> {
+    std::process::Command::new(&tools.nsenter)
+        .args([
+            "--preserve-credentials",
+            "-U",
+            "-n",
+            "-t",
+            &pid.to_string(),
+            "--",
+        ])
+        .arg(&tools.nft)
+        .args(["list", "counters", "table", "inet", crate::zone::NFT_TABLE])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| parse_counters(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 /// A flow of an instance's.
@@ -214,11 +256,17 @@ pub fn facts(tools: &Tools) -> Facts {
             if let Some(t) = decisions {
                 t.close();
             }
+            let counters = crate::instance::running(&tools.state)
+                .into_iter()
+                .find(|i| i.id == l.id)
+                .map(|i| counters_of(tools, i.pid))
+                .unwrap_or_default();
             Instance {
                 id: l.id,
                 container: l.container,
                 network: l.network,
                 flows,
+                counters,
             }
         })
         .collect();
@@ -363,6 +411,15 @@ pub enum Kind {
     Host,
     /// An instance with no network.
     Offline,
+    /// ARP with the gateway: answered by passt.
+    Arp,
+    /// Dropped by the instance's rules (`zone::INSTANCE_COUNTERS`) or its
+    /// gate, never relayed: broadcast, multicast, a frame of no IP.
+    Dropped,
+    /// Come from outside, unasked.
+    Inbound,
+    /// The host's or a zone's own upkeep with its link: ARP, DHCP, ND.
+    Service,
 }
 
 impl Kind {
@@ -377,6 +434,10 @@ impl Kind {
             Self::ServerName => "server-name",
             Self::Host => "host",
             Self::Offline => "offline",
+            Self::Arp => "arp",
+            Self::Dropped => "dropped",
+            Self::Inbound => "inbound",
+            Self::Service => "service",
         }
     }
 }
@@ -393,10 +454,13 @@ pub struct Row {
     pub from: String,
     pub hops: Vec<Hop>,
     pub end: End,
-    /// The connections it stands for.
+    /// The connections it stands for — or, a counter's, its packets.
     pub count: usize,
     pub out_bytes: u64,
     pub in_bytes: u64,
+    /// Seen — a flow the relay noted, a counter of the rules —; else what
+    /// the design says happens, drawn as such.
+    pub observed: bool,
 }
 
 /// The scheme.
@@ -765,6 +829,13 @@ fn kind_of(f: &Flow) -> Kind {
         remote: f.remote,
         rport: f.rport,
     };
+    if f.proto == crate::flows::NOT_IP {
+        return if f.rport == crate::flows::ETHER_ARP {
+            Kind::Arp
+        } else {
+            Kind::Dropped
+        };
+    }
     if f.proto == ICMP6 && f.lport == 0 && [133, 135, 136].contains(&f.rport) {
         return Kind::Local;
     }
@@ -774,7 +845,12 @@ fn kind_of(f: &Flow) -> Kind {
     if !crate::relay::gated(&key) && f.out_bytes == 0 {
         return Kind::Local;
     }
-    if !crate::relay::gated(&key) || f.verdict == Some(crate::verdicts::Verdict::Deny) {
+    // Not the gate's to pass: dropped by it — another protocol, an ICMP
+    // message of no ping, a fragment.
+    if !crate::relay::gated(&key) {
+        return Kind::Dropped;
+    }
+    if f.verdict == Some(crate::verdicts::Verdict::Deny) {
         return Kind::Denied;
     }
     if crate::relay::to_forwarder(&key) {
@@ -842,6 +918,7 @@ pub fn build(facts: &Facts) -> Scheme {
                 count: 0,
                 out_bytes: 0,
                 in_bytes: 0,
+                observed: true,
             });
             continue;
         }
@@ -871,7 +948,10 @@ pub fn build(facts: &Facts) -> Scheme {
             // ARP and neighbour discovery are the instance's kernel's own:
             // no socket, no program — said as what they are.
             let who = match (kind, &f.program) {
-                (Kind::Local, _) => "ядро контейнера".to_owned(),
+                (Kind::Local | Kind::Arp, _) => "ядро контейнера".to_owned(),
+                (Kind::Dropped, None) if f.proto == crate::flows::NOT_IP => {
+                    "кадры не IP".to_owned()
+                }
                 (_, Some(p)) => p.clone(),
                 (_, None) => "неизвестная программа".to_owned(),
             };
@@ -891,6 +971,8 @@ pub fn build(facts: &Facts) -> Scheme {
             let what = match kind {
                 Kind::Dns => "DNS-запрос к 10.254.255.253",
                 Kind::Local => "служебное ядра: соседи IPv6, ICMP",
+                Kind::Arp => "ARP: «у кого адрес шлюза?»",
+                Kind::Dropped => "то, что привратник не пропускает",
                 Kind::Ping => "ping",
                 _ => "соединение программы",
             };
@@ -906,6 +988,19 @@ pub fn build(facts: &Facts) -> Scheme {
             ];
             let end = match kind {
                 Kind::Denied => End::Denied("привратник: запрещено правилом контейнера".into()),
+                Kind::Dropped => End::Denied(
+                    "привратник отбрасывает: не TCP, не UDP, не ping, фрагмент или не IP".into(),
+                ),
+                Kind::Arp => {
+                    hops.push(hop(
+                        &passt,
+                        what,
+                        "кадр по unix-сокету (не сеть)",
+                        Sees::Machine,
+                        "только машина",
+                    ));
+                    End::Answered("отвечает вход в зону — он и есть шлюз; дальше не идёт".into())
+                }
                 Kind::Local => {
                     hops.push(hop(
                         &passt,
@@ -978,8 +1073,69 @@ pub fn build(facts: &Facts) -> Scheme {
                 count: flows.len(),
                 out_bytes: flows.iter().map(|f| f.out_bytes).sum(),
                 in_bytes: flows.iter().map(|f| f.in_bytes).sum(),
+                observed: true,
             });
         }
+        // What the instance's rules dropped, by why — counted, never
+        // relayed (`zone::INSTANCE_COUNTERS`).
+        let wall = s.gate(
+            &format!("wall:{}", inst.id),
+            Layer::Container,
+            "Стена контейнера",
+            "nft: что не уходит",
+        );
+        let senders = s.place(
+            &format!("prog:{}:*", inst.id),
+            Layer::Program,
+            "программы и ядро",
+            "контейнера",
+        );
+        for (name, packets) in &inst.counters {
+            let (title, why) = match name.as_str() {
+                "bcast4" => ("broadcast IPv4", "широковещательные — в туннель не уходят"),
+                "mcast4" => ("multicast IPv4: mDNS, SSDP…", "групповые — не уходят"),
+                "mcast6" => ("multicast IPv6", "групповые — не уходят"),
+                "denied" => ("запрещённые программы", "ядро отклоняет их отправку"),
+                "rest" => (
+                    "прочее",
+                    "не с адреса контейнера или не в туннель — отброшено",
+                ),
+                _ => continue,
+            };
+            s.rows.push(Row {
+                id: format!("{}:wall:{name}", inst.id),
+                group: group.clone(),
+                name: title.into(),
+                kind: Kind::Dropped,
+                from: senders.clone(),
+                hops: vec![hop(
+                    &wall,
+                    title,
+                    "IP-пакет",
+                    Sees::Machine,
+                    "только контейнер",
+                )],
+                end: End::Denied(format!("стена контейнера: {why} — {packets} пакет(ов)")),
+                count: usize::try_from(*packets).unwrap_or(usize::MAX),
+                out_bytes: 0,
+                in_bytes: 0,
+                observed: true,
+            });
+        }
+        // What is not there by design, said: no DHCP.
+        s.rows.push(Row {
+            id: format!("{}:dhcp", inst.id),
+            group: group.clone(),
+            name: "DHCP".into(),
+            kind: Kind::Service,
+            from: senders.clone(),
+            hops: vec![hop(&tap, "DHCP", "—", Sees::Machine, "только контейнер")],
+            end: End::Cut("DHCP нет: адрес и маршрут ставит пересылка".into()),
+            count: 0,
+            out_bytes: 0,
+            in_bytes: 0,
+            observed: false,
+        });
     }
     // The zones' own rows: the tunnel's handshake, the server's name.
     for zone in &facts.zones {
@@ -1007,7 +1163,65 @@ pub fn build(facts: &Facts) -> Scheme {
                 count: 0,
                 out_bytes: 0,
                 in_bytes: 0,
+                observed: true,
             });
+        }
+        // By design: the way out's own upkeep with pasta, and what comes in
+        // unasked through the tunnel.
+        let out = s.place(
+            &format!("out:{}", zone.name),
+            Layer::Uplink,
+            "Выход зоны",
+            "сокет туннеля + pasta",
+        );
+        s.rows.push(Row {
+            id: format!("{}:uplink-nd", zone.name),
+            group: group.clone(),
+            name: "ND/ARP выхода с pasta".into(),
+            kind: Kind::Service,
+            from: out.clone(),
+            hops: Vec::new(),
+            end: End::Answered("отвечает pasta сама; дальше не идёт".into()),
+            count: 0,
+            out_bytes: 0,
+            in_bytes: 0,
+            observed: false,
+        });
+        if zone.up {
+            let vpn = format!("vpn:{}", zone.name);
+            let tun = format!("tun:{}", zone.name);
+            if s.places.iter().any(|p| p.id == vpn) {
+                s.rows.push(Row {
+                    id: format!("{}:inbound", zone.name),
+                    group: group.clone(),
+                    name: "Входящее из интернета".into(),
+                    kind: Kind::Inbound,
+                    from: vpn,
+                    hops: vec![
+                        hop(
+                            &out,
+                            "подключение к программе",
+                            "внутри туннеля",
+                            Sees::Nobody,
+                            "никто",
+                        ),
+                        hop(
+                            &tun,
+                            "то же",
+                            "IP-пакет зоны",
+                            Sees::Machine,
+                            "только машина",
+                        ),
+                    ],
+                    end: End::Denied(
+                        "вход в зону не пробрасывает портов — ни до одной программы".into(),
+                    ),
+                    count: 0,
+                    out_bytes: 0,
+                    in_bytes: 0,
+                    observed: false,
+                });
+            }
         }
         for server in zone.servers.iter().filter(|v| v.named) {
             let from = s.place("hostdns", Layer::Host, "DNS хоста", "как его настроил хост");
@@ -1044,6 +1258,7 @@ pub fn build(facts: &Facts) -> Scheme {
                 count: 0,
                 out_bytes: 0,
                 in_bytes: 0,
+                observed: true,
             });
         }
     }
@@ -1071,7 +1286,73 @@ pub fn build(facts: &Facts) -> Scheme {
             count: 0,
             out_bytes: 0,
             in_bytes: 0,
+            observed: true,
         });
+    }
+    // By design, around every zone: the host's own talk with its link, and
+    // what comes in from it unasked. Not seen without the system's observer.
+    if let Some((dev, via)) = facts.default.clone() {
+        let lan_id = if via.is_some() {
+            format!("lan:{dev}")
+        } else {
+            format!("link:{dev}")
+        };
+        let ifc = format!("if:{dev}");
+        if s.places.iter().any(|p| p.id == lan_id) {
+            let service = |id: &str, name: &str, what: &str, end: End, from: &str, to: &str| Row {
+                id: id.into(),
+                group: "host".into(),
+                name: name.into(),
+                kind: Kind::Service,
+                from: from.into(),
+                hops: vec![hop(
+                    to,
+                    what,
+                    "кадры локальной сети",
+                    Sees::Stranger,
+                    "локальная сеть и шлюз",
+                )],
+                end,
+                count: 0,
+                out_bytes: 0,
+                in_bytes: 0,
+                observed: false,
+            };
+            s.rows.push(service(
+                "host:arp",
+                "ARP, ND с соседями",
+                "«у кого этот адрес?»",
+                End::Answered("соседи знают MAC и адрес машины".into()),
+                &ifc,
+                &lan_id,
+            ));
+            s.rows.push(service(
+                "host:dhcp",
+                "DHCP, RA",
+                "аренда адреса, маршрутизатор",
+                End::Answered("шлюз выдаёт адрес и DNS хоста".into()),
+                &ifc,
+                &lan_id,
+            ));
+            s.rows.push(service(
+                "host:mcast",
+                "mDNS, SSDP, LLMNR, broadcast",
+                "«кто тут есть?», имя машины",
+                End::Arrives("слышат все в локальной сети".into()),
+                &ifc,
+                &lan_id,
+            ));
+            let mut inbound = service(
+                "host:inbound",
+                "Входящее из локальной сети",
+                "подключение к машине",
+                End::Denied("в контейнеры маршрута нет; хосту — по его фаерволу".into()),
+                &lan_id,
+                &ifc,
+            );
+            inbound.kind = Kind::Inbound;
+            s.rows.push(inbound);
+        }
     }
     // The host's interfaces no way uses: there, and said.
     for i in facts.ifaces.iter().filter(|i| i.kind != "loopback") {
@@ -1213,7 +1494,7 @@ pub fn json(s: &Scheme) -> String {
                 .collect();
             format!(
                 "{{\"id\":{},\"group\":{},\"name\":{},\"kind\":{},\"from\":{},\"hops\":[{}],\
-                 \"end\":{{\"kind\":{},\"text\":{}}},\"count\":{},\"out_bytes\":{},\"in_bytes\":{}}}",
+                 \"end\":{{\"kind\":{},\"text\":{}}},\"count\":{},\"out_bytes\":{},\"in_bytes\":{},\"observed\":{}}}",
                 string(&r.id),
                 string(&r.group),
                 string(&r.name),
@@ -1224,7 +1505,8 @@ pub fn json(s: &Scheme) -> String {
                 string(r.end.text()),
                 r.count,
                 r.out_bytes,
-                r.in_bytes
+                r.in_bytes,
+                r.observed
             )
         })
         .collect();
@@ -1416,6 +1698,7 @@ mod tests {
                 container: Some("work".into()),
                 network: "nl".into(),
                 flows,
+                counters: vec![("bcast4".into(), 3), ("mcast6".into(), 0)],
             }],
             default: Some(("wlp2s0".into(), Some("192.168.1.1".into()))),
         }
@@ -1501,10 +1784,14 @@ mod tests {
                 flow(132, "198.51.100.1", 0, "Терминал", None),
             ],
         ));
-        let r = row(&s, "work-1:Терминал:denied");
-        assert_eq!(r.count, 2);
-        assert_eq!(r.hops.last().unwrap().to, "relay:work-1");
-        assert!(matches!(r.end, End::Denied(_)));
+        // Denied by its rule; dropped by the gate (another protocol): each
+        // its row, both at the gate.
+        for id in ["work-1:Терминал:denied", "work-1:Терминал:dropped"] {
+            let r = row(&s, id);
+            assert_eq!(r.count, 1, "{id}");
+            assert_eq!(r.hops.last().unwrap().to, "relay:work-1");
+            assert!(matches!(r.end, End::Denied(_)));
+        }
     }
 
     /// Names asked of a public resolver: past the server, in clear — a
@@ -1667,6 +1954,68 @@ mod tests {
             .iter()
             .any(|h| h.to.starts_with("vpn:") || h.to.starts_with("tun:")));
         assert_eq!(r.hops.last().unwrap().sees, Sees::Stranger);
+    }
+
+    /// Every kind of packet has its row: ARP answered by passt, what the
+    /// gate drops, the rules' counters with their packets, and what the
+    /// design says — drawn as not seen.
+    #[test]
+    fn every_kind_of_packet_has_its_row() {
+        let mut arp = flow(
+            crate::flows::NOT_IP,
+            "10.254.255.254",
+            crate::flows::ETHER_ARP,
+            "?",
+            None,
+        );
+        (arp.lport, arp.program) = (0, None);
+        let mut lldp = flow(crate::flows::NOT_IP, "0.0.0.0", 0x88cc, "?", None);
+        (lldp.lport, lldp.program) = (0, None);
+        let sctp = flow(132, "198.51.100.1", 0, "Firefox", None);
+        let s = build(&facts(
+            zone("amneziawg", "10.8.1.1", false),
+            vec![arp, lldp, sctp],
+        ));
+        let a = row(&s, "work-1:ядро контейнера:arp");
+        assert!(matches!(a.end, End::Answered(_)));
+        assert_eq!(a.hops.last().unwrap().to, "passt:work-1");
+        assert!(matches!(
+            row(&s, "work-1:кадры не IP:dropped").end,
+            End::Denied(_)
+        ));
+        assert!(matches!(
+            row(&s, "work-1:Firefox:dropped").end,
+            End::Denied(_)
+        ));
+        let b = row(&s, "work-1:wall:bcast4");
+        assert_eq!((b.count, b.observed), (3, true));
+        assert!(matches!(&b.end, End::Denied(t) if t.contains("3 пакет")));
+        assert_eq!(b.hops[0].to, "wall:work-1");
+        assert_eq!(row(&s, "work-1:wall:mcast6").count, 0);
+        for id in [
+            "work-1:dhcp",
+            "nl:uplink-nd",
+            "nl:inbound",
+            "host:arp",
+            "host:dhcp",
+            "host:mcast",
+            "host:inbound",
+        ] {
+            assert!(!row(&s, id).observed, "{id}");
+        }
+        assert!(json(&s).contains("\"observed\":false"));
+    }
+
+    /// `nft list counters`, read back.
+    #[test]
+    fn a_rulesets_counters_are_read() {
+        let text = "table inet vpnzone {\n\tcounter bcast4 {\n\t\tpackets 7 bytes 420\n\t}\n\
+                    \tcounter rest {\n\t\tpackets 0 bytes 0\n\t}\n}\n";
+        assert_eq!(
+            parse_counters(text),
+            [("bcast4".to_owned(), 7), ("rest".to_owned(), 0)]
+        );
+        assert!(parse_counters("").is_empty());
     }
 
     /// Facts read in an instance are told from the machine's.

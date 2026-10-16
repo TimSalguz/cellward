@@ -288,6 +288,14 @@ pub fn class(frame: &[u8], seen: Option<&crate::flows::Seen>) -> Class {
     if seen.fragment {
         return Class::Dropped;
     }
+    // Not IP: ARP with passt, the gateway's; anything else never goes.
+    if seen.key.proto == crate::flows::NOT_IP {
+        return if seen.key.rport == crate::flows::ETHER_ARP {
+            Class::Free
+        } else {
+            Class::Dropped
+        };
+    }
     let k = &seen.key;
     if gated(k) {
         Class::Gated
