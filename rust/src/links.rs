@@ -61,6 +61,23 @@ pub fn programs_for(
     scheme: &str,
     default: Option<&str>,
 ) -> Vec<Program> {
+    programs_of_type(dirs, home, state, &scheme_type(scheme), default)
+}
+
+/// A link scheme's content type: `x-scheme-handler/<scheme>`.
+pub fn scheme_type(scheme: &str) -> String {
+    format!("x-scheme-handler/{scheme}")
+}
+
+/// [`programs_for`] of any content type — a link's scheme's, or a file's
+/// (`text/html`, `inode/directory`): the entries whose `MimeType` names it.
+pub fn programs_of_type(
+    dirs: &[PathBuf],
+    home: &Path,
+    state: &Path,
+    content_type: &str,
+    default: Option<&str>,
+) -> Vec<Program> {
     let mut ids: BTreeSet<String> = BTreeSet::new();
     for dir in dirs {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -80,11 +97,12 @@ pub fn programs_for(
         let Some(entry) = crate::desktop::desktop_entry(&groups) else {
             continue;
         };
-        if entry.get("Hidden") == Some("true")
-            || !crate::desktop::claimed_schemes(entry)
-                .iter()
-                .any(|s| s == scheme)
-        {
+        let claims = entry
+            .get("MimeType")
+            .unwrap_or("")
+            .split(';')
+            .any(|m| m.trim().eq_ignore_ascii_case(content_type));
+        if entry.get("Hidden") == Some("true") || !claims {
             continue;
         }
         let name = entry
@@ -145,7 +163,11 @@ pub fn mimeapps_files(home: &Path) -> Vec<PathBuf> {
 /// `x-scheme-handler/<scheme>` of `[Default Applications]` in `files`, as a
 /// launcher id.
 pub fn distro_default(files: &[PathBuf], scheme: &str) -> Option<String> {
-    let key = format!("x-scheme-handler/{scheme}");
+    distro_default_of_type(files, &scheme_type(scheme))
+}
+
+/// [`distro_default`] of any content type.
+pub fn distro_default_of_type(files: &[PathBuf], key: &str) -> Option<String> {
     for file in files {
         let Ok(text) = fs::read_to_string(file) else {
             continue;
@@ -311,11 +333,33 @@ pub fn choose(
     if programs.is_empty() {
         return Choice::Unavailable(format!("нет программы для ссылок {scheme}:"));
     }
+    choose_of_type(
+        busctl,
+        kdialog,
+        &scheme_type(scheme),
+        uri,
+        programs,
+        deadline,
+    )
+}
+
+/// [`choose`] of any content type: `uri` the link, or the file's `file:` one.
+pub fn choose_of_type(
+    busctl: &Path,
+    kdialog: &Path,
+    content_type: &str,
+    uri: &str,
+    programs: &[Program],
+    deadline: Option<std::time::Duration>,
+) -> Choice {
+    if programs.is_empty() {
+        return Choice::Unavailable(format!("нет программы для {content_type}"));
+    }
     let started = std::time::Instant::now();
     let left = || deadline.map(|d| d.saturating_sub(started.elapsed()));
     let mut why = String::from("ни у одного бэкенда портала нет окна выбора программы");
     for backend in backends() {
-        match app_chooser(busctl, &backend, scheme, uri, programs, left()) {
+        match app_chooser(busctl, &backend, content_type, uri, programs, left()) {
             Ok(choice) => return choice,
             Err(e) => why = e,
         }
@@ -329,7 +373,7 @@ pub fn choose(
 fn app_chooser(
     busctl: &Path,
     backend: &str,
-    scheme: &str,
+    content_type: &str,
     uri: &str,
     programs: &[Program],
     deadline: Option<std::time::Duration>,
@@ -355,9 +399,7 @@ fn app_chooser(
     args.push("".into());
     args.push(programs.len().to_string().into());
     args.extend(programs.iter().map(|p| OsString::from(&p.id)));
-    let content_type = format!("x-scheme-handler/{scheme}");
-    let mut options: Vec<(&str, &str)> =
-        vec![("content_type", content_type.as_str()), ("uri", uri)];
+    let mut options: Vec<(&str, &str)> = vec![("content_type", content_type), ("uri", uri)];
     if let Some(first) = programs.first() {
         options.push(("last_choice", first.id.as_str()));
     }

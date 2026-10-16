@@ -274,6 +274,62 @@ let
     print(data)
   '';
 
+  # A raw session-bus client that asks the portal to open the file argv[1]
+  # (OpenURI.OpenFile, its descriptor passed with the call). Prints what came
+  # back.
+  rawOpenFile = pkgs.writeText "raw-open-file.py" ''
+    import array, os, socket, struct, sys
+    def pad(b, n):
+        return b + b"\0" * ((-len(b)) % n)
+    def s(v):
+        e = v.encode()
+        return struct.pack("<I", len(e)) + e + b"\0"
+    def msg(serial, path, iface, member, dest, sig="", body=b"", fds=0):
+        fields = b""
+        items = [(1, "o", path), (2, "s", iface), (3, "s", member), (6, "s", dest)]
+        if sig:
+            items.append((8, "g", sig))
+        if fds:
+            items.append((9, "u", fds))
+        for code, t, val in items:
+            fields = pad(fields, 8)
+            f = bytes([code, 1]) + t.encode() + b"\0"
+            if t == "g":
+                f += bytes([len(val)]) + val.encode() + b"\0"
+            elif t == "u":
+                f += struct.pack("<I", val)
+            else:
+                f += s(val)
+            fields += f
+        head = b"l" + bytes([1, 0, 1]) + struct.pack("<III", len(body), serial, len(fields))
+        return pad(head + fields, 8) + body
+    c = socket.socket(socket.AF_UNIX)
+    c.connect("/run/user/1000/bus")
+    c.sendall(b"\0AUTH EXTERNAL " + str(os.getuid()).encode().hex().encode() + b"\r\n")
+    assert c.recv(4096).startswith(b"OK")
+    c.sendall(b"NEGOTIATE_UNIX_FD\r\n")
+    assert c.recv(4096).startswith(b"AGREE_UNIX_FD")
+    c.sendall(b"BEGIN\r\n" + msg(1, "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello",
+                                 "org.freedesktop.DBus"))
+    body = pad(pad(s(""), 4) + struct.pack("<I", 0), 4) + struct.pack("<I", 0)
+    body = pad(body, 8)
+    call = msg(2, "/org/freedesktop/portal/desktop", "org.freedesktop.portal.OpenURI",
+               "OpenFile", "org.freedesktop.portal.Desktop", "sha{sv}", body, fds=1)
+    f = os.open(sys.argv[1], os.O_RDONLY)
+    c.sendmsg([call], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [f]))])
+    c.settimeout(5)
+    data = b""
+    try:
+        while b"/org/freedesktop/portal/desktop/request/" not in data:
+            d = c.recv(4096)
+            if not d:
+                break
+            data += d
+    except socket.timeout:
+        pass
+    print(data)
+  '';
+
   # A notification daemon that only listens: owns the name on the host's
   # session bus and writes whatever it is sent to argv[1], raw.
   fakeNotifyd = pkgs.writeText "fake-notifyd.py" ''
@@ -2417,6 +2473,29 @@ let
           machine.wait_until_succeeds("grep -q raw-begin /home/alice/opened-urls", timeout=30)
           ns, net = opened_in("https://example.test/raw-begin")
           assert net == "net=vmherm" and ns not in (host_ns, zone_ns), (ns, net, zone_ns)
+          # A file of the real home (LEAK-MODEL §2): the zone's own program
+          # asks the portal to open it, its descriptor with the call; the
+          # broker checks it on the host — in the home, not what runs — and
+          # its one program for the type opens it in the zone. The same file
+          # with an x bit: never.
+          alice("mkdir -p ~/.local/share/mime")
+          alice("printf '50:text/x-vmdoc:*.vmdoc\\n' > ~/.local/share/mime/globs2")
+          alice(
+              "printf '[Desktop Entry]\\nType=Application\\nName=VM Doc\\n"
+              "Exec=/home/alice/.local/share/vmurl/record %%f\\n"
+              "MimeType=text/x-vmdoc;\\n' > ~/.local/share/vmurl/vmdoc.desktop"
+          )
+          alice("ln -sfn ~/.local/share/vmurl/vmdoc.desktop ~/.local/share/applications/vmdoc.desktop")
+          alice("echo note > ~/note.vmdoc && echo run > ~/run.vmdoc && chmod 755 ~/run.vmdoc")
+          out = in_zone(hp, "${pkgs.python3}/bin/python3 ${rawOpenFile} /home/alice/note.vmdoc")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.wait_until_succeeds("grep -qx /home/alice/note.vmdoc /home/alice/opened-urls", timeout=30)
+          ns, net = opened_in("/home/alice/note.vmdoc")
+          assert net == "net=vmherm" and ns not in (host_ns, zone_ns), (ns, net, zone_ns)
+          out = in_zone(hp, "${pkgs.python3}/bin/python3 ${rawOpenFile} /home/alice/run.vmdoc")
+          assert "/org/freedesktop/portal/desktop/request/" in out, out
+          machine.sleep(3)
+          machine.fail("grep -q run.vmdoc /home/alice/opened-urls")
           # Links on behalf of a container (docs/PERMISSIONS.md §11.13): two
           # programs claim https now. A container's rule chooses one without
           # a window — the zone's filter says whose program's connection
