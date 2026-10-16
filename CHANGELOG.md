@@ -48,6 +48,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   3 but the status pipe at the exec, and `doctor` checks it (`inherited`).
 
 ### Added
+- **Every kind of packet in the scheme**: the relay notes ARP and other
+  frames that are not IP; the container's rules count each drop by name
+  (broadcast, IPv4 and IPv6 multicast, denied launches, the rest), read by
+  `cellward scheme` in the container's namespace; what the design says
+  happens (no DHCP in a container, a way out's ND with pasta, what comes in
+  unasked, the host's ARP, DHCP and mDNS with its link) is drawn as not
+  seen. A zone's real routes are read in it: a way around its tunnel is
+  shown as a leak.
 - **`cellward scheme [--json]`**: the network as places and flows — each
   place a packet passes (the program, its container's network and gate, the
   zone's way in, tunnel and way out, the host's interface, its gateway — or
