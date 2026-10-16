@@ -401,6 +401,11 @@ pub struct Place {
     pub gate: bool,
     /// What is inside is not known (the networks past the gateway).
     pub unknown: bool,
+    /// Takes the packets in on one side and makes them anew on the other —
+    /// the relay (frames to a stream), passt (frames to the zone's
+    /// connections), the encryptor (IP to encrypted UDP), pasta (the zone's
+    /// packets to the host's sockets) —, where one passes them through.
+    pub translates: bool,
 }
 
 /// Who can read a hop's contents.
@@ -564,6 +569,9 @@ impl Scheme {
                 tech: tech.to_owned(),
                 gate: false,
                 unknown: false,
+                translates: ["relay:", "passt:", "tun:", "out:"]
+                    .iter()
+                    .any(|k| id.starts_with(k)),
             });
         }
         id.to_owned()
@@ -1289,14 +1297,37 @@ pub fn build(facts: &Facts) -> Scheme {
         // From its way out on: the tunnel's own packets are born there.
         let at = way.hops.iter().position(|h| h.to.starts_with("out:"));
         if let (Some(at), None) = (at, &way.cut) {
-            let from = way.hops[at].to.clone();
+            // The VPN's client is a program too, and says so: the tunnel's
+            // device in the encryptor for WireGuard's kinds — its handshakes
+            // and keepalives leave by the way out —, the client process in
+            // the way out for OpenConnect.
+            let (from, hops, name) = if zone.kind == "openconnect" {
+                (
+                    way.hops[at].to.clone(),
+                    way.hops[at + 1..].to_vec(),
+                    format!("openconnect · клиент VPN зоны {}: TLS, DTLS", zone.name),
+                )
+            } else {
+                let mut hops = vec![way.hops[at].clone()];
+                hops[0].what = "рукопожатие и keepalive".into();
+                hops.extend(way.hops[at + 1..].iter().cloned());
+                (
+                    format!("tun:{}", zone.name),
+                    hops,
+                    format!(
+                        "{} · клиент VPN зоны {}: рукопожатие, keepalive",
+                        kind_word(zone.kind),
+                        zone.name
+                    ),
+                )
+            };
             s.rows.push(Row {
                 id: format!("{}:handshake", zone.name),
                 group: group.clone(),
-                name: "Туннель держит связь".into(),
+                name,
                 kind: Kind::Handshake,
                 from,
-                hops: way.hops[at + 1..].to_vec(),
+                hops,
                 end: End::Arrives("сервер VPN".into()),
                 count: 0,
                 out_bytes: 0,
@@ -1644,13 +1675,14 @@ pub fn json(s: &Scheme) -> String {
         .iter()
         .map(|p| {
             format!(
-                "{{\"id\":{},\"layer\":{},\"name\":{},\"tech\":{},\"gate\":{},\"unknown\":{}}}",
+                "{{\"id\":{},\"layer\":{},\"name\":{},\"tech\":{},\"gate\":{},\"unknown\":{},\"translates\":{}}}",
                 string(&p.id),
                 string(p.layer.word()),
                 string(&p.name),
                 string(&p.tech),
                 p.gate,
-                p.unknown
+                p.unknown,
+                p.translates
             )
         })
         .collect();
@@ -1948,7 +1980,7 @@ mod tests {
             .iter()
             .map(|h| h.to.as_str())
             .collect();
-        assert_eq!(to, ["if:wlp2s0", "link:wlp2s0", "vpn:nl"]);
+        assert_eq!(to, ["out:nl", "if:wlp2s0", "link:wlp2s0", "vpn:nl"]);
         assert!(s
             .places
             .iter()
@@ -2126,8 +2158,11 @@ mod tests {
         assert!(r.hops.iter().skip(1).all(|h| h.sees == Sees::Stranger));
         assert!(r.hops[1].what.contains("vpn.example.org"));
         assert!(matches!(&r.end, End::Answered(t) if t.contains("запомнен")));
+        // The VPN's client, its source: the tunnel's device, by the encryptor.
         let hs = row(&s, "nl:handshake");
-        assert_eq!(hs.from, "out:nl");
+        assert_eq!(hs.from, "tun:nl");
+        assert!(hs.name.contains("клиент VPN"), "{}", hs.name);
+        assert!(s.places.iter().any(|p| p.id == "out:nl" && p.translates));
         assert_eq!(hs.hops.last().unwrap().to, "vpn:nl");
     }
 
