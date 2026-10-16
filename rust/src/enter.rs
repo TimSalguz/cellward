@@ -417,7 +417,7 @@ fn become_the_launch(space: &OwnedFd, cmd: &[OsString], status_w: &OwnedFd) -> S
         return format!("cannot keep the instance's capabilities: {e}");
     }
     // Nothing of the launcher's past the standard three but the status
-    // pipe: a descriptor whoever ran `cellward run` left open — a shell's,
+    // pipe and the black camera's socket: a descriptor whoever ran `cellward run` left open — a shell's,
     // a terminal's or an editor's socket to the host — would be the
     // program's way out of the instance, which no path shows (`doctor`'s
     // `inherited`). Each one is closed at the exec, this process keeping
@@ -431,6 +431,18 @@ fn become_the_launch(space: &OwnedFd, cmd: &[OsString], status_w: &OwnedFd) -> S
             "cannot keep the launch's status pipe: {}",
             io::Error::last_os_error()
         );
+    }
+    // And what the launch hands its `profile-run` by design: the black
+    // camera's socket (`crate::camera`), named in the environment, checked
+    // there to be a socket and closed once used.
+    if let Some(fd) = std::env::var(crate::profile::ENV_CAMERA_FD)
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|fd| *fd > 2)
+    {
+        // SAFETY: fcntl on a number; one that is not open fails, which the
+        // launch then finds.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
     }
     let e = exec_command(cmd);
     format!("cannot start {}: {e}", cmd[0].to_string_lossy())
