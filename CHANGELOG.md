@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **The firewall's gate holds a ping and DNS too** (`FIREWALL.md` §9): a
+  program denied the network could still ping, carrying data in the pings,
+  and ask the container's DNS forwarder names, carrying it in the names.
+  Pings are flows by their identifier, owned by their ping socket; DNS to the
+  forwarder follows the program's rule ("ask" lets it, the connection after
+  is asked about). The gate drops fragments, other protocols, other ICMP
+  messages and frames that do not read, and reads IPv6's extension headers
+  through to the protocol (a TCP segment behind a destination option went by
+  undecided). Broadcast, the container's own subnet's included, and IPv6
+  multicast of any scope no longer go into the tunnel.
 - **The VPN server's name is resolved once** (`LEAK-MODEL.md` §5): its address
   is kept in the zone's directory and used at every later `up`, with no query
   to the host's resolver; `cellward endpoint <zone> [refresh]` shows it or

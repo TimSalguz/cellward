@@ -290,6 +290,12 @@ pub fn destination(key: &Key, names: &[crate::flows::Name]) -> String {
     } else {
         ""
     };
+    // A ping has no port: its address, and that it is one.
+    if key.proto == crate::flows::ICMP || key.proto == crate::flows::ICMP6 {
+        let host = crate::flows::name_of(names, &key.remote)
+            .map_or_else(|| key.remote.to_string(), str::to_owned);
+        return format!("{host} (ping)");
+    }
     match crate::flows::name_of(names, &key.remote) {
         Some(name) => format!("{name}:{}{proto}", key.rport),
         None => match key.remote {
@@ -508,5 +514,12 @@ mod tests {
             ..k
         };
         assert_eq!(destination(&v6, &[]), "[2001:db8::1]:443 (UDP)");
+        let ping = Key {
+            proto: crate::flows::ICMP,
+            lport: 7,
+            remote: "1.1.1.1".parse().unwrap(),
+            rport: u16::from(crate::flows::ECHO4),
+        };
+        assert_eq!(destination(&ping, &[]), "1.1.1.1 (ping)");
     }
 }

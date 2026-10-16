@@ -49,6 +49,7 @@ XF_HELPER = r'''
 import hashlib, http.server, os, select, socket, socketserver, struct, sys, urllib.parse
 
 GROUP4, GROUP6 = "224.0.0.167", "ff02::1"
+OWN_BROADCAST, GLOBAL6 = "10.254.255.255", "ff0e::1"
 
 
 def serve(port, root, log):
@@ -173,6 +174,11 @@ def announce(tag, lan_broadcast):
         send(f"{name} multicast [{GROUP6}]:53317", socket.AF_INET6, (GROUP6, 53317, 0, idx),
              (socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, idx))
     send(f"broadcast {lan_broadcast}:1716", socket.AF_INET, (lan_broadcast, 1716), bcast)
+    # A container's own subnet's broadcast, and IPv6 multicast past the
+    # link's scope: to passt, addresses like any (the gate's holes,
+    # 2026-10-16).
+    send(f"broadcast {OWN_BROADCAST}:1716", socket.AF_INET, (OWN_BROADCAST, 1716), bcast)
+    send(f"multicast [{GLOBAL6}]:53317", socket.AF_INET6, (GLOBAL6, 53317))
 
 
 def hold(host, port, log):
@@ -393,6 +399,19 @@ def xf_zone(zone, addr, addr6):
     )
     assert xf_peers("GET", f"/down.bin?from=fw-allowed-{zone}") == [addr], xf_log()
     XF_ROWS.append((f"{zone}: curl denied by the container's rule", "blocked", "-", "-"))
+    # Its names and its pings too (the gate's holes, 2026-10-16): a program
+    # denied the network asks the instance's forwarder nothing — names are a
+    # way out as well — and pings nobody; forgotten, both go.
+    for prog, cmd, ok in (
+        ("getent", "getent ahostsv4 leaktest.internal", "10.99.0.9"),
+        ("ping", "ping -c1 -W5 10.99.0.1", " 0% packet loss"),
+    ):
+        alice(f"cellward container net main deny {prog}")
+        alice(f"! {run} {cmd} </dev/null")
+        alice(f"cellward container net main forget {prog}")
+        out = alice(f"{run} {cmd} </dev/null")
+        assert ok in out, (prog, out)
+    XF_ROWS.append((f"{zone}: names and pings of a program denied", "blocked", "-", "-"))
     # The question (2026-09-29): with "ask" and no screen to ask on, a
     # program's new connection does not leave — a question that cannot be
     # shown is "no"; the template's "yes" again, it goes.
@@ -479,6 +498,11 @@ def xf_zone(zone, addr, addr6):
     # Multicast does not even go into the tunnel: an instance has an
     # unreachable route for it (zone.rs `instance_ground`, 2026-09-28).
     assert GROUP4_TEXT not in tunnel, f"{zone}'s multicast went into the tunnel:\n{tunnel}"
+    # Nor broadcast, the instance's subnet's or the world's, nor IPv6
+    # multicast of any scope: the instance's nft drops them (zone.rs
+    # `instance_ruleset`, 2026-10-16).
+    for what in ("255.255.255.255", "10.254.255.255", "ff0e::1"):
+        assert f" > {what}." not in tunnel, f"{zone}'s {what} went into the tunnel:\n{tunnel}"
 
     # And from the LAN, by the host's addresses — with the capture off: a
     # LAN flow by nature. The firewall lets the port in (the host's own

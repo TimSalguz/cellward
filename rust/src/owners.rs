@@ -3,7 +3,7 @@
 //! of flows (`crate::flows`), which knows no processes.
 //!
 //! **How.** From the host, as the user, nothing entered: the sockets of the
-//! instance's network namespace as `/proc/<pid>/net/{tcp,tcp6,udp,udp6}` of
+//! instance's network namespace as `/proc/<pid>/net/{tcp,udp,icmp}{,6}` of
 //! its space lists them — each with its ends and its inode —; the
 //! instance's processes, those whose `/proc/<pid>/ns/net` is the space's;
 //! which of them holds each inode (`/proc/<pid>/fd`); and, up its parents,
@@ -14,8 +14,9 @@
 //!
 //! **What it cannot say.** A socket closed by the time it is looked at, and a
 //! process gone, leave their flow without an owner: the record says so, and
-//! guesses nothing. ICMP (a ping socket) is not matched. Nothing here
-//! decides — the wall is the instance's rules.
+//! guesses nothing. A ping is matched by its ping socket — its identifier is
+//! the socket's port (`crate::flows::frame`); a raw socket's is not. Nothing
+//! here decides — the wall is the instance's rules.
 //!
 //! **At the first packet** ([`Keeper`]). The relay says a word on a pipe
 //! for every new flow it notes (`frame-relay --news-fd`); the instance's
@@ -31,7 +32,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use crate::flows::{Flow, Key, TCP, UDP};
+use crate::flows::{Flow, Key, ICMP, ICMP6, TCP, UDP};
 
 /// A socket of the instance's network namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,32 +112,41 @@ pub fn parse_net(text: &str, proto: u8) -> Vec<Sock> {
 
 /// The sockets of the network namespace of process `space`.
 fn sockets(space: i32) -> Vec<Sock> {
-    [("tcp", TCP), ("tcp6", TCP), ("udp", UDP), ("udp6", UDP)]
-        .iter()
-        .flat_map(|(file, proto)| {
-            fs::read_to_string(format!("/proc/{space}/net/{file}"))
-                .map(|text| parse_net(&text, *proto))
-                .unwrap_or_default()
-        })
-        .collect()
+    [
+        ("tcp", TCP),
+        ("tcp6", TCP),
+        ("udp", UDP),
+        ("udp6", UDP),
+        ("icmp", ICMP),
+        ("icmp6", ICMP6),
+    ]
+    .iter()
+    .flat_map(|(file, proto)| {
+        fs::read_to_string(format!("/proc/{space}/net/{file}"))
+            .map(|text| parse_net(&text, *proto))
+            .unwrap_or_default()
+    })
+    .collect()
 }
 
 /// The socket of `flow`: its protocol and the instance's port, and its other
-/// end — or, for UDP, none: an unconnected socket sends anywhere. A
-/// connected one first; a TCP listener is never one (its connections are
-/// sockets of their own).
+/// end — or, for UDP and a ping, none: an unconnected socket sends
+/// anywhere. A connected one first; a TCP listener is never one (its
+/// connections are sockets of their own). A ping socket's other end has no
+/// port: the flow's is the request's type.
 pub fn socket_of<'a>(socks: &'a [Sock], flow: &Flow) -> Option<&'a Sock> {
     let k = &flow.key;
+    let ping = k.proto == ICMP || k.proto == ICMP6;
     let ours = |s: &&Sock| s.proto == k.proto && s.lport == k.lport && k.lport != 0;
     socks
         .iter()
         .filter(ours)
-        .find(|s| s.remote == plain(k.remote) && s.rport == k.rport)
+        .find(|s| s.remote == plain(k.remote) && (s.rport == k.rport || ping))
         .or_else(|| {
             socks
                 .iter()
                 .filter(ours)
-                .find(|s| s.proto == UDP && s.remote.is_unspecified() && s.rport == 0)
+                .find(|s| (s.proto == UDP || ping) && s.remote.is_unspecified() && s.rport == 0)
         })
 }
 
@@ -708,6 +718,29 @@ mod tests {
             ..flow(8000, "8.8.8.8", 443)
         };
         assert_eq!(socket_of(&listening, &outbound), None);
+        // A ping: its socket by the identifier, connected or not — a ping
+        // socket's other end has no port.
+        let pings = [
+            Sock {
+                proto: ICMP,
+                ..sock(0x1234, "0.0.0.0", 0, 5)
+            },
+            Sock {
+                proto: ICMP6,
+                ..sock(7, "2001:db8::1", 0, 6)
+            },
+        ];
+        let ping = |proto, lport, remote: &str| Flow {
+            key: Key {
+                proto,
+                ..flow(lport, remote, u16::from(crate::flows::ECHO4)).key
+            },
+            ..flow(lport, remote, 0)
+        };
+        let of = |f: &Flow| socket_of(&pings, f).map(|s| s.inode);
+        assert_eq!(of(&ping(ICMP, 0x1234, "1.1.1.1")), Some(5));
+        assert_eq!(of(&ping(ICMP6, 7, "2001:db8::1")), Some(6));
+        assert_eq!(of(&ping(ICMP, 0x4321, "1.1.1.1")), None);
     }
 
     /// A socket nobody readable holds is a closed process's only when every
@@ -754,6 +787,7 @@ mod tests {
             outbound: true,
             len: 60,
             dns: None,
+            fragment: false,
         };
         assert!(table.note(&seen, 100), "a new flow");
         assert!(!table.note(&seen, 101), "the same flow again");
