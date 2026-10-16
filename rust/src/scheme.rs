@@ -575,11 +575,12 @@ fn host_way(
     };
     // No gateway: what it goes to is on the link itself — nothing between.
     let Some(via) = via else {
+        // Named by its interface: a host may be on two networks.
         let lan = s.place(
             &format!("link:{dev}"),
             Layer::Outside,
-            "Локальная сеть",
-            "без шлюза: адресат в ней",
+            &format!("Сеть {dev}"),
+            "адресат прямо в ней, без шлюза",
         );
         return vec![
             hop(&ifc, what, "IP-пакет хоста", Sees::Machine, "только машина"),
@@ -588,7 +589,12 @@ fn host_way(
     };
     // The gateway is what the host knows: the next hop of its route. A
     // router, a provider's box, a phone sharing its network — not known.
-    let lan = s.place(&format!("lan:{dev}"), Layer::Outside, "Шлюз", via);
+    let lan = s.place(
+        &format!("lan:{dev}"),
+        Layer::Outside,
+        &format!("Шлюз {via}"),
+        &format!("в сети {dev}"),
+    );
     let isp = s.place(
         &format!("isp:{dev}"),
         Layer::Outside,
@@ -1210,28 +1216,52 @@ pub fn build(facts: &Facts) -> Scheme {
             let vpn = format!("vpn:{}", zone.name);
             let tun = format!("tun:{}", zone.name);
             if s.places.iter().any(|p| p.id == vpn) {
+                // In by the way the tunnel goes out, backwards: the host's
+                // network and interface, then the zone's way out.
+                let host: Vec<String> = way
+                    .hops
+                    .iter()
+                    .map(|h| h.to.clone())
+                    .skip_while(|id| !id.starts_with("out:"))
+                    .skip(1)
+                    .take_while(|id| !id.starts_with("vpn:"))
+                    .collect();
+                let mut hops: Vec<Hop> = host
+                    .iter()
+                    .rev()
+                    .map(|id| {
+                        hop(
+                            id,
+                            "подключение к программе",
+                            "внутри туннеля",
+                            Sees::Nobody,
+                            "как туннель: адрес сервера, размер",
+                        )
+                    })
+                    .collect();
+                hops.extend([
+                    hop(
+                        &out,
+                        "подключение к программе",
+                        "внутри туннеля",
+                        Sees::Nobody,
+                        "никто",
+                    ),
+                    hop(
+                        &tun,
+                        "то же",
+                        "IP-пакет зоны",
+                        Sees::Machine,
+                        "только машина",
+                    ),
+                ]);
                 s.rows.push(Row {
                     id: format!("{}:inbound", zone.name),
                     group: group.clone(),
                     name: "Входящее из интернета".into(),
                     kind: Kind::Inbound,
                     from: vpn,
-                    hops: vec![
-                        hop(
-                            &out,
-                            "подключение к программе",
-                            "внутри туннеля",
-                            Sees::Nobody,
-                            "никто",
-                        ),
-                        hop(
-                            &tun,
-                            "то же",
-                            "IP-пакет зоны",
-                            Sees::Machine,
-                            "только машина",
-                        ),
-                    ],
+                    hops,
                     end: End::Denied(
                         "вход в зону не пробрасывает портов — ни до одной программы".into(),
                     ),
@@ -1318,19 +1348,31 @@ pub fn build(facts: &Facts) -> Scheme {
         };
         let ifc = format!("if:{dev}");
         if s.places.iter().any(|p| p.id == lan_id) {
-            let service = |id: &str, name: &str, what: &str, end: End, from: &str, to: &str| Row {
+            // From what sends them: the host's kernel (its own upkeep), or
+            // its neighbours (what comes in) — each row starts somewhere.
+            let kernel = s.place("hostkernel", Layer::Host, "Ядро хоста", "его служебное");
+            let peers = s.place(
+                &format!("peer:{dev}"),
+                Layer::Outside,
+                "Соседи и сети за ними",
+                &dev,
+            );
+            let service = |id: &str, name: &str, what: &str, end: End| Row {
                 id: id.into(),
                 group: "host".into(),
                 name: name.into(),
                 kind: Kind::Service,
-                from: from.into(),
-                hops: vec![hop(
-                    to,
-                    what,
-                    "кадры локальной сети",
-                    Sees::Stranger,
-                    "локальная сеть и шлюз",
-                )],
+                from: kernel.clone(),
+                hops: vec![
+                    hop(&ifc, what, "IP-пакет хоста", Sees::Machine, "только машина"),
+                    hop(
+                        &lan_id,
+                        what,
+                        "кадры локальной сети",
+                        Sees::Stranger,
+                        "локальная сеть и шлюз",
+                    ),
+                ],
                 end,
                 count: 0,
                 out_bytes: 0,
@@ -1342,35 +1384,41 @@ pub fn build(facts: &Facts) -> Scheme {
                 "ARP, ND с соседями",
                 "«у кого этот адрес?»",
                 End::Answered("соседи знают MAC и адрес машины".into()),
-                &ifc,
-                &lan_id,
             ));
             s.rows.push(service(
                 "host:dhcp",
                 "DHCP, RA",
                 "аренда адреса, маршрутизатор",
                 End::Answered("шлюз выдаёт адрес и DNS хоста".into()),
-                &ifc,
-                &lan_id,
             ));
             s.rows.push(service(
                 "host:mcast",
                 "mDNS, SSDP, LLMNR, broadcast",
                 "«кто тут есть?», имя машины",
                 End::Arrives("слышат все в локальной сети".into()),
-                &ifc,
-                &lan_id,
             ));
-            let mut inbound = service(
-                "host:inbound",
-                "Входящее из локальной сети",
-                "подключение к машине",
-                End::Denied("в контейнеры маршрута нет; хосту — по его фаерволу".into()),
-                &lan_id,
-                &ifc,
-            );
-            inbound.kind = Kind::Inbound;
-            s.rows.push(inbound);
+            s.rows.push(Row {
+                id: "host:inbound".into(),
+                group: "host".into(),
+                name: "Входящее из локальной сети".into(),
+                kind: Kind::Inbound,
+                from: peers,
+                hops: vec![
+                    hop(
+                        &lan_id,
+                        "подключение к машине",
+                        "кадры локальной сети",
+                        Sees::Stranger,
+                        "локальная сеть",
+                    ),
+                    hop(&ifc, "то же", "IP-пакет", Sees::Machine, "машина"),
+                ],
+                end: End::Denied("в контейнеры маршрута нет; хосту — по его фаерволу".into()),
+                count: 0,
+                out_bytes: 0,
+                in_bytes: 0,
+                observed: false,
+            });
         }
     }
     // The host's interfaces no way uses: there, and said.
@@ -1790,7 +1838,7 @@ mod tests {
         assert!(s
             .places
             .iter()
-            .any(|p| p.id == "link:wlp2s0" && p.name == "Локальная сеть"));
+            .any(|p| p.id == "link:wlp2s0" && p.name == "Сеть wlp2s0"));
     }
 
     /// A denied program ends at the gate; so does what the gate drops.
@@ -1936,6 +1984,22 @@ mod tests {
         assert_eq!(r.hops.last().unwrap().to, "tun:nl");
         assert!(matches!(r.end, End::Cut(_)));
         assert!(!s.rows.iter().any(|r| r.kind == Kind::Handshake));
+    }
+
+    /// What comes in unasked comes back along the tunnel's way: the host's
+    /// network and interface, the zone's way out, to its tunnel.
+    #[test]
+    fn what_comes_in_comes_by_the_tunnels_way() {
+        let s = build(&facts(zone("wireguard", "10.8.1.1", false), vec![]));
+        let to: Vec<&str> = row(&s, "nl:inbound")
+            .hops
+            .iter()
+            .map(|h| h.to.as_str())
+            .collect();
+        assert_eq!(
+            to,
+            ["isp:wlp2s0", "lan:wlp2s0", "if:wlp2s0", "out:nl", "tun:nl"]
+        );
     }
 
     /// A server by name: looked up through the host's resolver, in clear —
