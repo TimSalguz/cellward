@@ -2177,7 +2177,16 @@ fn up_instance(
         crate::instance::ask_network(&tools.state, id, zone_name)
             .map_err(|e| format!("контейнер {id}: не попросить сеть {zone_name} ({e})"))?;
         let unit = crate::instance::unit_name(id).unwrap_or_default();
-        let _ = cli::systemctl_unit(tools, "start", OsStr::new(&unit));
+        // One on its way out (its last program just ended) first waited
+        // for: its unit is active until its end, and a start of it then
+        // does nothing. Once more if systemd had not yet seen it end.
+        for _ in 0..2 {
+            crate::instance::wait_ending(&tools.state, id);
+            let _ = cli::systemctl_unit(tools, "start", OsStr::new(&unit));
+            if crate::instance::up(&tools.state, id).is_some() {
+                break;
+            }
+        }
         if crate::instance::up(&tools.state, id).is_none() {
             return Err(
                 format!("контейнер {id} не поднимается (journalctl --user -u '{unit}')").into(),

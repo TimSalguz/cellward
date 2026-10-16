@@ -331,6 +331,27 @@ pub fn up(state: &Path, id: &str) -> Option<i32> {
     space_pid(&dir)
 }
 
+/// An instance on its way out, waited for: its keeper holds the lock
+/// ([`LOCK`]) exclusively from its idle stop to its end (`zone::keep`), and
+/// meanwhile its space may be gone — not [`up`] — while its unit is still
+/// active, so that a `systemctl start` of it does nothing. A launch that
+/// found it not up takes the lock shared, and lets go, before it starts it.
+/// No lock (no directory): nothing to wait for.
+pub fn wait_ending(state: &Path, id: &str) {
+    use std::os::fd::AsRawFd;
+    let Ok(lock) = fs::File::open(dir(state, id).join(LOCK)) else {
+        return;
+    };
+    loop {
+        // SAFETY: flock(2) on a descriptor we hold.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_SH) } == 0
+            || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+        {
+            return;
+        }
+    }
+}
+
 /// The host pid of instance `id`'s space as [`up`] finds it, ready or not
 /// yet: for its keeper, which attaches the space's way out before it says
 /// the instance is ready.
@@ -967,5 +988,36 @@ mod tests {
         // A number whose process started otherwise is somebody else's.
         std::fs::write(d.join(START), "1 not-this-boot\n").unwrap();
         assert_eq!(up(&state, "work"), None);
+    }
+
+    #[test]
+    fn a_launch_waits_for_the_instance_on_its_way_out() {
+        use std::os::fd::AsRawFd;
+        let state = std::env::temp_dir().join(format!("cellward-ending-{}", std::process::id()));
+        let d = dir(&state, "c");
+        std::fs::create_dir_all(&d).unwrap();
+        // The keeper, ending: the lock exclusive.
+        let keeper = std::fs::File::create(d.join(LOCK)).unwrap();
+        assert_eq!(unsafe { libc::flock(keeper.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let (done_w, done_r) = std::sync::mpsc::channel();
+        let waiting = state.clone();
+        let launch = std::thread::spawn(move || {
+            wait_ending(&waiting, "c");
+            done_w.send(()).unwrap();
+        });
+        assert!(
+            done_r
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "went on while the instance was ending"
+        );
+        drop(keeper);
+        done_r
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("still waiting after the instance's end");
+        launch.join().unwrap();
+        // None there: nothing to wait for.
+        wait_ending(&state, "gone");
+        let _ = std::fs::remove_dir_all(&state);
     }
 }
