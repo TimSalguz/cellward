@@ -804,6 +804,10 @@ pub struct Attach {
     /// The epoch's wall its rules carry (stage 4, `crate::epoch`): none
     /// before the instance's first switch.
     pub wall: Option<Wall>,
+    /// The epoch's cgroup of launches denied the network
+    /// (`crate::epoch::DENIED`), whose sockets its rules drop: from the
+    /// first epoch on.
+    pub denied: Option<Wall>,
     /// The instance's counters' file (`crate::traffic`), which it counts
     /// every frame into; none, and it counts nothing.
     pub tally: Option<RawFd>,
@@ -933,6 +937,14 @@ impl Attach {
         if let Some(wall) = &self.wall {
             out.extend(wall.args());
         }
+        if let Some(denied) = &self.denied {
+            out.extend([
+                "--denied-level".into(),
+                denied.level.to_string().into(),
+                "--denied-cgroup".into(),
+                denied.cgroup.clone().into(),
+            ]);
+        }
         if let Some(tally) = self.tally {
             out.push("--tally-fd".into());
             out.push(tally.to_string().into());
@@ -965,6 +977,7 @@ impl Attach {
             (None, None, None);
         let (mut verdicts, mut gate): (Option<RawFd>, Option<RawFd>) = (None, None);
         let (mut wall_level, mut wall_cgroup): (Option<String>, Option<String>) = (None, None);
+        let (mut denied_level, mut denied_cgroup): (Option<String>, Option<String>) = (None, None);
         let mut rest = args;
         while let [flag, value, tail @ ..] = rest {
             let flag = flag.to_string_lossy();
@@ -1026,6 +1039,8 @@ impl Attach {
                 )?,
                 "--wall-level" => once(&mut wall_level, text.to_owned(), &flag)?,
                 "--wall-cgroup" => once(&mut wall_cgroup, text.to_owned(), &flag)?,
+                "--denied-level" => once(&mut denied_level, text.to_owned(), &flag)?,
+                "--denied-cgroup" => once(&mut denied_cgroup, text.to_owned(), &flag)?,
                 _ => return Err(format!("unknown argument {flag}")),
             }
             rest = tail;
@@ -1062,6 +1077,16 @@ impl Attach {
             );
         }
         let wall = Wall::from_flags(wall_level, wall_cgroup)?;
+        // The same checks as the wall's: an absolute path of plain
+        // components, its depth the level — and an epoch's DENIED.
+        let denied = Wall::from_flags(denied_level, denied_cgroup)
+            .map_err(|e| e.replace("--wall-", "--denied-"))?;
+        if denied
+            .as_ref()
+            .is_some_and(|d| !d.cgroup.ends_with(&format!("/{}", crate::epoch::DENIED)))
+        {
+            return Err("--denied-cgroup is no epoch's cgroup of denied launches".to_owned());
+        }
         Ok(Self {
             stream,
             ready,
@@ -1070,6 +1095,7 @@ impl Attach {
             ip,
             nft,
             wall,
+            denied,
             tally,
             flows,
             news,
@@ -1226,9 +1252,25 @@ fn configure(attach: &Attach) -> Result<(), String> {
 /// before would go out by the new tap.
 fn seal(attach: &Attach) -> Result<(), String> {
     let wall = attach.wall.as_ref().map(|w| (w.level, w.cgroup.as_str()));
-    let loaded = crate::zone::instance_ruleset(wall, attach.a4, attach.a6)
-        .map(|ruleset| crate::zone::replacing_table(&ruleset))
-        .and_then(|ruleset| crate::zone::feed_nft(&attach.nft, &ruleset));
+    let denied = attach.denied.as_ref().map(|d| (d.level, d.cgroup.as_str()));
+    let load = |denied| {
+        crate::zone::instance_ruleset(wall, denied, attach.a4, attach.a6)
+            .map(|ruleset| crate::zone::replacing_table(&ruleset))
+            .and_then(|ruleset| crate::zone::feed_nft(&attach.nft, &ruleset))
+    };
+    // The denied launches' drop needs `socket cgroupv2` (`nft_socket`) and
+    // the cgroup there: without either the rules load without it, and the
+    // gate alone holds a denied program back — said.
+    let loaded = match (load(denied), denied) {
+        (Err(e), Some(_)) => {
+            eprintln!(
+                "vpn-zone-core frame-relay: the instance's rules without the denied launches' \
+                 drop ({e}) — the gate alone holds them back"
+            );
+            load(None)
+        }
+        (loaded, _) => loaded,
+    };
     match loaded {
         Ok(()) => Ok(()),
         Err(e) if attach.wall.is_some() => Err(format!(
@@ -2165,6 +2207,7 @@ mod tests {
             ip: PathBuf::from("/nix/store/x-iproute2/bin/ip"),
             nft: PathBuf::from("/nix/store/x-nftables/bin/nft"),
             wall: None,
+            denied: None,
             tally: None,
             flows: None,
             news: None,
@@ -2199,7 +2242,19 @@ mod tests {
             })
         );
         let line = walled.args();
-        assert_eq!(Attach::parse(&line[1..]), Ok(walled));
+        assert_eq!(Attach::parse(&line[1..]), Ok(walled.clone()));
+        // With the denied launches' cgroup: there and back; never another.
+        let (level, cgroup) = epoch.denied();
+        let denied = Attach {
+            denied: Some(Wall { level, cgroup }),
+            ..walled
+        };
+        let line = denied.args();
+        assert_eq!(Attach::parse(&line[1..]), Ok(denied.clone()));
+        let mut other = line.clone();
+        let at = other.iter().position(|a| a == "--denied-cgroup").unwrap();
+        other[at + 1] = format!("{}/e2/x", epoch.unit()).into();
+        assert!(Attach::parse(&other[1..]).is_err(), "{other:?}");
         // With its counters: there and back; never one of its other
         // descriptors.
         let counted = Attach {
