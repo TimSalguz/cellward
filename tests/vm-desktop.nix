@@ -124,6 +124,13 @@ let
           pkgs.wtype
           pkgs.chromium
           pkgs.wl-clipboard
+          # X11 against a neighbour: a window, a look at the server, its
+          # selection, input sent to it.
+          pkgs.xorg.xmessage
+          pkgs.xorg.xwininfo
+          pkgs.xorg.xdpyinfo
+          pkgs.xclip
+          pkgs.xdotool
           # Quiet on its own: no first-run pages, studies or checks — the
           # connections the tests see are the ones they ask for.
           (pkgs.firefox.override {

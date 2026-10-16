@@ -310,9 +310,8 @@ test = "doctor x11"
 from = "x11-satellite"
 to = "other-container"
 kind = "connects"
-guard = ""
-test = ""
-known = "ROADMAP: X11 in a zone against an evil neighbour"
+guard = "an X server of each launch's own; no abstract socket; the selection through the launch's proxy"
+test = "tests/vm-desktop.py: X11 against a neighbour (local)"
 
 [[edge]]
 from = "program"
