@@ -9,7 +9,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **The machine's fingerprint in a container's sysfs** (`LEAK-MODEL.md` §10):
   an instance has a sysfs of its own network namespace (no host device, no
   hardware address of them), DMI and the firmware's tables covered, monitors'
-  EDID, disks' and USB serials and radios' addresses read as empty.
+  EDID, disks' and USB serials and radios' addresses read as empty; and a
+  machine-id of its own — kept for a container, new for a throwaway.
 - **A launcher's descriptors no longer reach a container's program**
   (`LEAK-MODEL.md` §15а): a socket left open by whatever ran `cellward run`
   was the program's way out; `container-enter` closes every descriptor from

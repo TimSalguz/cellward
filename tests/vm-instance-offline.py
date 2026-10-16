@@ -154,6 +154,11 @@ with subtest("the machine's fingerprint in sysfs is out of a container's sight")
     assert not in_c("vmia", "ls -A /sys/firmware").strip()
     # The GPU's and the rest's devices are still there for drivers.
     in_c("vmia", "test -d /sys/dev/char")
+    # Its own machine-id, another container's another, both kept.
+    host_id = machine.succeed("cat /etc/machine-id").strip()
+    a_id = in_c("vmia", "cat /etc/machine-id").strip()
+    b_id = in_c("vmib", "cat /etc/machine-id").strip()
+    assert len({host_id, a_id, b_id}) == 3 and len(a_id) == 32, (host_id, a_id, b_id)
 
 
 with subtest("a launch takes no descriptor of its launcher into the container"):

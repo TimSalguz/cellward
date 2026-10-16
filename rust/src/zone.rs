@@ -4172,6 +4172,71 @@ fn own_sysfs(zone: &Zone) {
     );
 }
 
+/// Below the state directory: each container's own machine-id, kept across
+/// its instance's starts, by the instance's key.
+const MACHINE_IDS: &str = ".machine-ids";
+
+/// An instance's own `/etc/machine-id` (`LEAK-MODEL.md` §10): the host's is
+/// the same in every container and network, and programs make it an id of
+/// theirs (telemetry, licences). A named container's and the real home's per
+/// network are kept and shown at each start; a throwaway's is new each time.
+/// Bound over the host's (and D-Bus's `/var/lib/dbus/machine-id`). Not fatal.
+fn own_machine_id(zone: &Zone) {
+    let Some(info) = &zone.instance else {
+        return;
+    };
+    let made = (|| -> Result<PathBuf, String> {
+        // The state directory: the instance's is `<state>/.instances/<key>`.
+        let state = zone.dir.parent().and_then(Path::parent);
+        let kept = match (crate::instance::who_of(&info.id), state) {
+            (crate::origin::Who::Unknown, _) | (_, None) => None,
+            (_, Some(state)) => Some(state.join(MACHINE_IDS).join(crate::instance::key(&info.id))),
+        };
+        let valid = |t: &str| t.len() == 32 && t.bytes().all(|b| b.is_ascii_hexdigit());
+        let id = match kept.as_ref().and_then(|p| fs::read_to_string(p).ok()) {
+            Some(t) if valid(t.trim()) => t.trim().to_owned(),
+            _ => {
+                let id = crate::fs_sandbox::new_machine_id().map_err(|e| e.to_string())?;
+                if let Some(p) = &kept {
+                    if let Some(dir) = p.parent() {
+                        let _ = fs::create_dir_all(dir);
+                    }
+                    let _ = fs::write(p, format!("{}\n", id.trim()));
+                }
+                id.trim().to_owned()
+            }
+        };
+        let shown = zone.dir.join("machine-id");
+        let _ = fs::remove_file(&shown);
+        fs::write(&shown, format!("{id}\n")).map_err(|e| e.to_string())?;
+        Ok(shown)
+    })();
+    let shown = match made {
+        Ok(shown) => shown,
+        Err(e) => {
+            eprintln!(
+                "instance {}: no machine-id of its own ({e}) — the host's stays",
+                zone.name()
+            );
+            return;
+        }
+    };
+    for target in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        let target = Path::new(target);
+        if !fs::symlink_metadata(target).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        if let Err(e) = sys::mount(shown.as_os_str(), target, "", libc::MS_BIND, "") {
+            eprintln!(
+                "instance {}: {} not covered ({e})",
+                zone.name(),
+                target.display()
+            );
+        }
+    }
+    println!("instance {}: a machine-id of its own", zone.name());
+}
+
 /// `/sys/fs/cgroup` covered in an instance, by an empty read-only tmpfs: it
 /// names every unit and scope of the user's (`vpn-zone@nl.service`,
 /// `app-firefox@….scope`), which zones and containers run and the programs
@@ -8322,6 +8387,8 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     if zone.hermetic && !zone.host_files_writable {
         protect_host_files(zone)?;
     }
+    // Its own machine-id, kept in the project's state: before that is hidden.
+    own_machine_id(zone);
     // The project's own state, last among the covers: from here on the zone's
     // directory is reached through a descriptor.
     let zone = &hide_project_state(zone)?;
