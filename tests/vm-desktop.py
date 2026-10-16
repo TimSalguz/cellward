@@ -398,7 +398,7 @@ if wanted(X11N):
             # Its home is its container's: what it says is read from its
             # unit's journal.
             script = (
-                "exec 2>&1; "
+                "{ "
                 "echo DISPLAY=$DISPLAY; ls -A /tmp/.X11-unix; "
                 # Its own first: the satellite starts its X server on the
                 # first client, which waits.
@@ -409,11 +409,12 @@ if wanted(X11N):
                 "xwininfo -root -tree | grep -c secretwin || true; "
                 "xdotool search --name secretwin || echo no-window; "
                 "timeout 3 xclip -o -selection clipboard || echo no-clipboard; "
-                "echo done; sleep 600"
+                f"echo done; }} 2>&1 | sed -u 's/^/{unit}: /'; sleep 600"
             )
             run(unit, f"{args} -- sh -c {shlex.quote(script)}", env=f"--setenv=VPN_ZONE_APPID={unit}")
-            # The user's units' lines are in the system's journal here.
-            journal = f"journalctl --no-pager -o cat _SYSTEMD_USER_UNIT={unit}.service"
+            # Its lines are its container's instance's in the journal: told by
+            # their mark.
+            journal = f"journalctl --no-pager -o cat | sed -n 's/^{unit}: //p'"
             machine.wait_until_succeeds(f"{journal} | grep -qx done", timeout=300)
             text = machine.succeed(journal)
             print(unit, text)
