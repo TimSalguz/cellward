@@ -1108,7 +1108,11 @@ pub fn build(facts: &Facts) -> Scheme {
         for (name, packets) in &inst.counters {
             let (title, why) = match name.as_str() {
                 "bcast4" => ("broadcast IPv4", "широковещательные — в туннель не уходят"),
-                "mcast4" => ("multicast IPv4: mDNS, SSDP…", "групповые — не уходят"),
+                "mcast4" => (
+                    "multicast IPv4: mDNS, SSDP…",
+                    "групповые с указанным интерфейсом — не уходят (без него маршрута нет: \
+                     ядро отказывает ещё до стены)",
+                ),
                 "mcast6" => ("multicast IPv6", "групповые — не уходят"),
                 "denied" => ("запрещённые программы", "ядро отклоняет их отправку"),
                 "rest" => (

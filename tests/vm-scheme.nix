@@ -232,8 +232,11 @@ let
           # drawn as not seen.
           ids = {r["id"]: r for r in rows}
           assert "main:nl:ядро контейнера:arp" in ids, sorted(ids)
-          for c in ("bcast4", "mcast4", "mcast6"):
+          # IPv4 multicast with no interface named is refused by the
+          # container's unreachable route before the rules: counted 0.
+          for c in ("bcast4", "mcast6"):
               assert ids[f"main:nl:wall:{c}"]["count"] >= 1, ids.get(f"main:nl:wall:{c}")
+          assert "main:nl:wall:mcast4" in ids, sorted(ids)
           for d in ("main:nl:dhcp", "nl:uplink-nd", "nl:inbound", "host:arp", "host:dhcp", "host:mcast", "host:inbound"):
               assert d in ids and ids[d]["observed"] is False, (d, ids.get(d))
           # The provider's network: a place, not known.
