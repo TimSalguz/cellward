@@ -299,7 +299,7 @@ if wanted('a link from another program into the Firefox already open: a tab ther
             "link-ask",
             "offline -- gdbus call --session --dest org.freedesktop.portal.Desktop "
             "--object-path /org/freedesktop/portal/desktop "
-            "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '{}'",
+            "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '@a{sv} {}'",
         )
         machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=60)
         machine.sleep(2)
