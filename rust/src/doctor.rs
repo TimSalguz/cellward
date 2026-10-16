@@ -1767,6 +1767,134 @@ pub fn programs_in_zone(zone_pid: i32, uid: u32) -> Vec<(i32, String)> {
     found
 }
 
+/// The sockets' inodes of a network namespace, from the tables of a process
+/// in it (`/proc/<pid>/net/*`): every socket made there is in one of them —
+/// unix, TCP, UDP, raw, netlink, packet.
+pub fn netns_sockets(pid: i32) -> HashSet<u64> {
+    // The inode's column in each table.
+    const TABLES: [(&str, usize); 10] = [
+        ("unix", 6),
+        ("tcp", 9),
+        ("tcp6", 9),
+        ("udp", 9),
+        ("udp6", 9),
+        ("udplite", 9),
+        ("raw", 9),
+        ("raw6", 9),
+        ("netlink", 9),
+        ("packet", 8),
+    ];
+    let mut out = HashSet::new();
+    for (table, column) in TABLES {
+        let text = fs::read_to_string(format!("/proc/{pid}/net/{table}")).unwrap_or_default();
+        out.extend(socket_inodes_in(&text, column));
+    }
+    out
+}
+
+/// The inodes of a `/proc/net` table, its header line skipped.
+pub fn socket_inodes_in(text: &str, column: usize) -> Vec<u64> {
+    text.lines()
+        .skip(1)
+        .filter_map(|l| l.split_whitespace().nth(column)?.parse().ok())
+        .filter(|i| *i != 0)
+        .collect()
+}
+
+/// The programs of an instance (`uid`'s processes in its epoch's cgroup —
+/// not its keeper's and helpers', in `infra` —, in the network namespace of
+/// `space`) that hold a socket made outside it, past the standard three
+/// descriptors: `(pid, name, fd)`. A socket made in the instance is in its
+/// namespace's tables ([`netns_sockets`]); one that is not came in with the
+/// launch — a way out no path shows (ROADMAP: the ways out as an
+/// invariant). The standard ones are the launcher's terminal or journal, by
+/// design.
+pub fn inherited_sockets(
+    space: i32,
+    uid: u32,
+    epoch: &crate::epoch::Epoch,
+) -> Vec<(i32, String, u32)> {
+    let net = |pid: i32| fs::read_link(format!("/proc/{pid}/ns/net")).ok();
+    let Some(ns) = net(space) else {
+        return Vec::new();
+    };
+    let own = netns_sockets(space);
+    let mut found = Vec::new();
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let mine = fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|t| {
+                t.lines()
+                    .find_map(|l| l.strip_prefix("Uid:"))
+                    .and_then(|v| v.split_whitespace().next()?.parse::<u32>().ok())
+            })
+            == Some(uid);
+        let program =
+            fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok_and(|t| epoch.holds(&t));
+        if !mine || !program || net(pid).as_ref() != Some(&ns) {
+            continue;
+        }
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for fd in fds.flatten() {
+            let Some(n) = fd.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+                continue;
+            };
+            let inode = fs::read_link(fd.path()).ok().and_then(|l| {
+                l.to_str()?
+                    .strip_prefix("socket:[")?
+                    .strip_suffix(']')?
+                    .parse::<u64>()
+                    .ok()
+            });
+            if let Some(inode) = inode.filter(|i| n > 2 && !own.contains(i)) {
+                // Made meanwhile: looked at once more before it is said.
+                if !netns_sockets(space).contains(&inode) {
+                    let name = fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .map(|c| c.trim().to_owned())
+                        .unwrap_or_default();
+                    found.push((pid, name, n));
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// [`inherited_sockets`] judged: none, or the programs that hold one.
+pub fn inherited_check(found: &[(i32, String, u32)]) -> Check {
+    if found.is_empty() {
+        return Check::new(
+            "inherited",
+            Level::Ok,
+            "у программ нет сокетов, сделанных вне контейнера",
+        );
+    }
+    let named: Vec<String> = found
+        .iter()
+        .take(PROGRAMS_NAMED)
+        .map(|(pid, name, fd)| format!("{} ({pid}, дескриптор {fd})", printable(name)))
+        .collect();
+    Check::new(
+        "inherited",
+        Level::Fail,
+        format!(
+            "программа держит сокет, сделанный вне контейнера, — выход наружу мимо всех \
+             проверок по пути: {}",
+            named.join(", ")
+        ),
+    )
+}
+
 /// An instance's way out as its keeper noted it (stage 2): through its
 /// zone; none by its network (`offline`); cut, and why — its programs have
 /// no way out meanwhile, which is what the person should know.
@@ -2110,6 +2238,14 @@ pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u
         &running.network,
     ));
     checks.push(live_switch_check(crate::epoch::read_live(&running.dir)));
+    checks.push(match crate::epoch::read(&running.dir) {
+        Some(epoch) => inherited_check(&inherited_sockets(running.pid, uid, &epoch)),
+        None => Check::new(
+            "inherited",
+            Level::Skip,
+            "у контейнера нет эпохи: программы не найти",
+        ),
+    });
     // What it came up with (`instance::SETTINGS`), which the probe judges by.
     let applied =
         fs::read_to_string(running.dir.join(crate::instance::SETTINGS)).unwrap_or_default();
@@ -2625,6 +2761,40 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 
 #[cfg(test)]
 mod tests {
+
+    /// A socket of a program is its namespace's when a table there has its
+    /// inode; one held past the standard descriptors and in no table is
+    /// said, by program.
+    #[test]
+    fn a_socket_made_outside_the_instance_is_found() {
+        let unix = "Num       RefCount Protocol Flags    Type St Inode Path\n\
+                    0000000000000000: 00000002 00000000 00010000 0001 01 4242 /run/x\n\
+                    0000000000000000: 00000003 00000000 00000000 0001 03 4343\n";
+        assert_eq!(socket_inodes_in(unix, 6), [4242, 4343]);
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+                   0: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 5151 1 0\n";
+        assert_eq!(socket_inodes_in(tcp, 9), [5151]);
+        assert_eq!(inherited_check(&[]).level, Level::Ok);
+        let check = inherited_check(&[(77, "evil".into(), 5)]);
+        assert_eq!(check.level, Level::Fail);
+        assert!(
+            check.detail.contains("evil (77, дескриптор 5)"),
+            "{}",
+            check.detail
+        );
+        // This process's own sockets are in its own namespace's tables.
+        let pair = std::os::unix::net::UnixStream::pair().unwrap();
+        let own = netns_sockets(std::process::id() as i32);
+        let link = fs::read_link(format!("/proc/self/fd/{}", pair.0.as_raw_fd())).unwrap();
+        let inode: u64 = link
+            .to_str()
+            .unwrap()
+            .trim_start_matches("socket:[")
+            .trim_end_matches(']')
+            .parse()
+            .unwrap();
+        assert!(own.contains(&inode));
+    }
 
     /// bubblewrap before 0.12.0 is a failure (CVE-2026-87766); one not to
     /// be read, a warning.
