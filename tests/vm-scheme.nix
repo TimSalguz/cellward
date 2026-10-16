@@ -159,7 +159,7 @@ let
           alice("cellward container net main deny curl")
           alice("! cellward run nl -- curl -sS -m 10 --connect-timeout 5 http://10.99.0.1:8080/")
           # A name of pub's: asked of 1.1.1.1 past the server, unanswered here.
-          alice("cellward run pub -- sh -c 'getent ahostsv4 example.org; true'")
+          alice("cellward run pub -- getent ahostsv4 example.org || true")
 
       with subtest("the scheme says each flow where it ends"):
           text = alice("cellward scheme")
@@ -195,6 +195,13 @@ let
           # Each zone's tunnel, and nl's server's name through the host.
           assert {r["id"] for r in rows if r["kind"] == "handshake"} == {"nl:handshake", "pub:handshake"}, rows
           assert any(r["kind"] == "server-name" and "vmvpn.test" in r["name"] for r in rows), rows
+          # Every flow of a container's has its program: the ping too (its
+          # socket, ping or raw); the kernel's own talk with passt is the
+          # kernel's.
+          unknown = [r for r in rows if r["name"] == "неизвестная программа"]
+          assert not unknown, unknown
+          assert any(r["kind"] == "ping" and r["name"] == "ping" for r in rows), rows
+          assert all(r["name"] == "ядро контейнера" for r in rows if r["kind"] == "local"), rows
           # The provider's network: a place, not known.
           assert any(p["unknown"] for p in places.values()), places
           assert "⚠→" in text, text

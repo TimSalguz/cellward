@@ -787,11 +787,15 @@ pub fn build(facts: &Facts) -> Scheme {
         // A program's flows, by kind: one row each.
         let mut by: Vec<((String, Kind), Vec<&Flow>)> = Vec::new();
         for f in &inst.flows {
-            let who = f
-                .program
-                .clone()
-                .unwrap_or_else(|| "неизвестная программа".into());
-            let k = (who, kind_of(f));
+            let kind = kind_of(f);
+            // ARP and neighbour discovery are the instance's kernel's own:
+            // no socket, no program — said as what they are.
+            let who = match (kind, &f.program) {
+                (Kind::Local, _) => "ядро контейнера".to_owned(),
+                (_, Some(p)) => p.clone(),
+                (_, None) => "неизвестная программа".to_owned(),
+            };
+            let k = (who, kind);
             match by.iter_mut().find(|(key, _)| *key == k) {
                 Some((_, list)) => list.push(f),
                 None => by.push((k, vec![f])),
@@ -1460,7 +1464,7 @@ mod tests {
                 flow(TCP, "198.51.100.1", 443, "Firefox", Some(Verdict::Allow)),
             ],
         ));
-        let r = row(&s, "work-1:Firefox:local");
+        let r = row(&s, "work-1:ядро контейнера:local");
         assert_eq!(r.hops.last().unwrap().to, "passt:work-1");
         assert!(matches!(r.end, End::Answered(_)));
         let j = json(&s);
