@@ -308,7 +308,8 @@ if wanted('a link from another program into the Firefox already open: a tab ther
             "--method org.freedesktop.portal.OpenURI.OpenURI '' 'https://link.test/' '@a{sv} {}'",
         )
         # The program: the menu of those that open links, Firefox first.
-        machine.wait_until_succeeds("pgrep -x kdialog", timeout=60)
+        # Nix's wrapper: the process is `.kdialog-wrapped`.
+        machine.wait_until_succeeds("pgrep -f 'kdialog .*--menu'", timeout=60)
         machine.sleep(3)
         shot("ff-link-program")
         alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
