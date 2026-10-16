@@ -122,10 +122,22 @@ fn counters_of(tools: &Tools, pid: i32) -> Vec<(String, u64)> {
         .arg(&tools.nft)
         .args(["list", "counters", "table", "inet", crate::zone::NFT_TABLE])
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .output()
-        .map(|o| parse_counters(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default()
+        .map(|o| {
+            if !o.status.success() {
+                // Said, not hidden: no counters is not "nothing dropped".
+                eprintln!(
+                    "scheme: the counters of instance {pid} not read ({}): {}",
+                    o.status,
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            parse_counters(&String::from_utf8_lossy(&o.stdout))
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("scheme: the counters of instance {pid} not read: {e}");
+            Vec::new()
+        })
 }
 
 /// A flow of an instance's.
