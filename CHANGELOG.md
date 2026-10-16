@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **A program denied the network is held back in the kernel**
+  (`FIREWALL.md` §9): its launch lives in its epoch's `denied` cgroup, and
+  the container's rules drop every packet of a socket made there, at the
+  send — the gate's look for its owner is no longer what stops it. A rule
+  changed for a running program moves its launches in or out at the keeper's
+  next round of new flows.
+- **A program too short to be found no longer passes its denial**
+  (`FIREWALL.md` §9): a flow whose program the keeper could not find — a
+  datagram sent and the program gone, a raw socket — took the container's
+  default, so with "yes" a denied program's datagram went out. Now such a
+  flow is denied where any program of the container is; a ping is also
+  found by its raw socket.
 - **The firewall's gate holds a ping and DNS too** (`FIREWALL.md` §9): a
   program denied the network could still ping, carrying data in the pings,
   and ask the container's DNS forwarder names, carrying it in the names.

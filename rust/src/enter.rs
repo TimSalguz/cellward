@@ -85,15 +85,21 @@ pub struct Args {
     /// `systemctl`, to start an instance that stopped between the launch's
     /// look and this one's. Without it such a launch is not started.
     pub systemctl: Option<PathBuf>,
+    /// `--net-rule deny`: the program is denied the network — its launch's
+    /// cgroup is its epoch's `denied` (`crate::epoch::DENIED`), whose sockets
+    /// the instance's rules drop.
+    pub denied: bool,
     pub cmd: Vec<OsString>,
 }
 
 impl Args {
-    /// `--instance <id> [--network <name>] [--systemctl <path>] -- cmd…`.
+    /// `--instance <id> [--network <name>] [--systemctl <path>]
+    /// [--net-rule deny] -- cmd…`.
     pub fn parse(argv: &[OsString]) -> Result<Self, String> {
         let mut instance = None;
         let mut network = None;
         let mut systemctl = None;
+        let mut denied = false;
         let mut rest = argv.iter();
         while let Some(flag) = rest.next() {
             if flag == "--" {
@@ -106,6 +112,7 @@ impl Args {
                     instance,
                     network,
                     systemctl,
+                    denied,
                     cmd,
                 });
             }
@@ -132,6 +139,8 @@ impl Args {
                     )
                 }
                 Some("--systemctl") => systemctl = Some(PathBuf::from(value)),
+                Some("--net-rule") if value == "deny" => denied = true,
+                Some("--net-rule") => return Err("--net-rule takes `deny`".to_owned()),
                 _ => return Err(format!("unknown flag {}", flag.to_string_lossy())),
             }
         }
@@ -630,7 +639,15 @@ pub fn run(args: &Args) -> u8 {
     // This process waits for the launch: its cgroup is named by it.
     // SAFETY: getpid takes nothing and cannot fail.
     let waiter = unsafe { libc::getpid() };
-    let leaf = crate::sys::start_time(waiter).map(|start| crate::epoch::leaf_name(waiter, start));
+    let leaf = crate::sys::start_time(waiter)
+        .map(|start| crate::epoch::leaf_name(waiter, start))
+        .map(|leaf| {
+            if args.denied {
+                crate::epoch::denied_leaf(&leaf)
+            } else {
+                leaf
+            }
+        });
     // The child's word: nothing (its exec closed the pipe) or why it could
     // not become the launch. And the main program's status, later.
     let pipes = crate::sys::pipe().and_then(|said| crate::sys::pipe().map(|status| (said, status)));
@@ -729,6 +746,26 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(a.network.as_deref(), Some("nl"));
+        assert!(!a.denied);
+        let a = Args::parse(&argv(&[
+            "--instance",
+            "work",
+            "--net-rule",
+            "deny",
+            "--",
+            "true",
+        ]))
+        .unwrap();
+        assert!(a.denied);
+        assert!(Args::parse(&argv(&[
+            "--instance",
+            "work",
+            "--net-rule",
+            "allow",
+            "--",
+            "true"
+        ]))
+        .is_err());
     }
 
     /// `profile-run`'s word (`profile::status_word`) is read back; anything

@@ -412,6 +412,63 @@ def xf_zone(zone, addr, addr6):
         out = alice(f"{run} {cmd} </dev/null")
         assert ok in out, (prog, out)
     XF_ROWS.append((f"{zone}: names and pings of a program denied", "blocked", "-", "-"))
+    # A program too short to be found (the owner, 2026-10-16): a datagram
+    # sent and the program gone before its keeper looks for its socket —
+    # denied all the same (`netrules::Rules::unknown`); forgotten, it goes.
+    got = f"/tmp/udpgot-{zone}"
+    server.succeed(
+        f"systemd-run --unit=udpgot-{zone} socat -u "
+        f"UDP-RECV:9999,bind=10.99.0.1,reuseaddr OPEN:{got},creat,append"
+    )
+    alice("cellward container net main deny socat")
+    alice(f"printf 'denied-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9999")
+    machine.sleep(3)
+    server.fail(f"grep -q denied-{zone} {got}")
+    alice("cellward container net main forget socat")
+    alice(f"printf 'allowed-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9999")
+    server.wait_until_succeeds(f"grep -q allowed-{zone} {got}", timeout=30)
+    # Launched as from the desktop — through the user's manager, into its
+    # launch's own cgroup —, a denied program is in its epoch's cgroup of
+    # denied launches (epoch::DENIED): the instance's rules drop its
+    # datagram in the kernel, before the relay, which never sees it.
+    placed = lambda cmd: (
+        "systemd-run --user --pipe --wait --quiet --collect -E PATH=\"$PATH\" -- "
+        + "sh -c " + shlex.quote(cmd)
+    )
+    server.succeed(
+        f"systemd-run --unit=udpgot2-{zone} socat -u "
+        f"UDP-RECV:9998,bind=10.99.0.1,reuseaddr OPEN:{got},creat,append"
+    )
+    alice("cellward container net main deny socat")
+    # The kernel refuses the send itself: the program hears EPERM.
+    alice(
+        placed(f"printf 'kernel-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9998")
+        + " 2>&1 | grep -q 'Operation not permitted'"
+    )
+    machine.sleep(3)
+    server.fail(f"grep -q kernel-{zone} {got}")
+    c = json.loads(alice("cellward traffic --connections --json"))
+    seen = [
+        f for i in c["instances"] if i["network"] == zone and i["connections"]
+        for f in i["connections"] if f["remote_port"] == 9998
+    ]
+    assert not seen, f"a denied launch's datagram reached the relay: {seen}"
+    alice("cellward container net main forget socat")
+    # A running program denied: moved into the denied launches' cgroup at
+    # its keeper's next round of new flows.
+    alice(f"systemd-run --user --unit=xfrg-{zone} {run} sleep 601")
+    machine.wait_until_succeeds("pgrep -u alice -f '^sleep 601$'", timeout=60)
+    pid = machine.succeed("pgrep -u alice -f '^sleep 601$' | head -1").strip()
+    assert "/denied/" not in machine.succeed(f"cat /proc/{pid}/cgroup")
+    alice("cellward container net main deny sleep")
+    alice(f"{run} getent ahostsv4 leaktest.internal")
+    machine.wait_until_succeeds(f"grep -q /denied/ /proc/{pid}/cgroup", timeout=30)
+    alice("cellward container net main forget sleep")
+    alice(f"{run} getent ahostsv4 leaktest.internal")
+    machine.wait_until_succeeds(f"! grep -q /denied/ /proc/{pid}/cgroup", timeout=30)
+    alice(f"systemctl --user stop xfrg-{zone}")
+    server.succeed(f"systemctl stop udpgot-{zone} udpgot2-{zone}")
+    XF_ROWS.append((f"{zone}: a denied program's datagram, the program gone", "blocked", "-", "-"))
     # The question (2026-09-29): with "ask" and no screen to ask on, a
     # program's new connection does not leave — a question that cannot be
     # shown is "no"; the template's "yes" again, it goes.

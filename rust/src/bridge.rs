@@ -1249,7 +1249,7 @@ fn spawn_relay(
     stream: &UnixStream,
     ready: &OwnedFd,
     plan: &GuestPlan,
-    wall: Option<crate::relay::Wall>,
+    (wall, denied): (Option<crate::relay::Wall>, Option<crate::relay::Wall>),
 ) -> io::Result<Child> {
     let (stream_fd, ready_fd) = (stream.as_raw_fd(), ready.as_raw_fd());
     let (tally, flows, news) = (tools.tally, tools.flows, tools.news);
@@ -1262,6 +1262,7 @@ fn spawn_relay(
         ip: tools.ip.to_path_buf(),
         nft: tools.nft.to_path_buf(),
         wall,
+        denied,
         tally,
         flows,
         news,
@@ -1397,8 +1398,9 @@ fn failed(what: &str, e: impl std::fmt::Display) -> NoLink {
 /// `previous`: the last attach's plan, whose addresses are not taken again.
 /// `expect`: the fingerprint the instance was carried by — a return, not the
 /// person's own ask; another one is [`NoLink::Changed`], and nothing is
-/// started. `wall`: the epoch's wall the relay loads the instance's rules
-/// with (stage 4, `crate::epoch`; none before the instance's first switch).
+/// started. `walls`: the epoch's wall the relay loads the instance's rules
+/// with (stage 4, `crate::epoch`; none before the instance's first switch),
+/// and its cgroup of launches denied the network (`epoch::DENIED`).
 /// `wake` and `stop`: the keeper's word to give up, heard while it waits
 /// (no clock: the zone answers once its passt is up, or refuses).
 #[allow(clippy::too_many_arguments)]
@@ -1408,7 +1410,7 @@ pub fn attach(
     space: &OwnedFd,
     previous: Option<GuestPlan>,
     expect: Option<u64>,
-    wall: Option<crate::relay::Wall>,
+    walls: (Option<crate::relay::Wall>, Option<crate::relay::Wall>),
     tools: &RelayTools<'_>,
     wake: Option<RawFd>,
     stop: &dyn Fn() -> bool,
@@ -1449,7 +1451,7 @@ pub fn attach(
         a6: asked.a6.filter(|_| v6),
     };
     let (ready_r, ready_w) = crate::sys::pipe().map_err(|e| failed("no pipe", e))?;
-    let mut relay = spawn_relay(tools, space, &ours, &ready_w, &plan, wall)
+    let mut relay = spawn_relay(tools, space, &ours, &ready_w, &plan, walls)
         .map_err(|e| failed("the relay did not start", e))?;
     // The relay's now: a copy here would keep its stream and its word open
     // past it.

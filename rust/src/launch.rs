@@ -1564,6 +1564,17 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         _ => Vec::new(),
     };
+    // Its program's network rule, as the instance's keeper reads it
+    // (`netrules`): a program denied runs in its epoch's cgroup of denied
+    // launches, whose packets the instance's rules drop at the send.
+    let net_denied = network == Network::Instance
+        && instance_id.as_deref().is_some_and(|id| {
+            let rules = match crate::zone::record_of(id) {
+                Some(record) => crate::netrules::Rules::load(&tools.config, &record),
+                None => crate::netrules::Rules::template_only(&tools.config),
+            };
+            rules.decide(Some(&appname.to_string_lossy())) == crate::netrules::Rule::Deny
+        });
     let exec = entry_argv(
         &Entry {
             unshare: &tools.unshare,
@@ -1593,6 +1604,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             black_camera: camera_mode.black(),
             devices: &device_args,
             storage: storage_dir.as_deref(),
+            net_denied,
         },
         cmd,
     );
@@ -1697,6 +1709,10 @@ pub struct Entry<'a> {
     /// The devices its container is given, as `profile-run --device` takes
     /// them (`devices::Pass::arg`): bound into its own mount namespace.
     pub devices: &'a [String],
+    /// Its program is denied the network by its container's rules: the
+    /// launch's cgroup is its epoch's `denied` (`container-enter --net-rule
+    /// deny`, `crate::epoch::DENIED`), whose sockets the instance drops.
+    pub net_denied: bool,
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -1762,6 +1778,10 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
             exec.push(entry.zone.into());
             exec.push("--systemctl".into());
             exec.push(entry.systemctl.into());
+            if entry.net_denied {
+                exec.push("--net-rule".into());
+                exec.push("deny".into());
+            }
             exec.push("--".into());
         }
         Network::Unconfined if container => {
@@ -4297,6 +4317,7 @@ mod tests {
             camera: false,
             black_camera: false,
             devices: &[],
+            net_denied: false,
         }
     }
 

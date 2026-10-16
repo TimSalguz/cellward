@@ -124,6 +124,8 @@ let
           pkgs.wtype
           pkgs.chromium
           pkgs.wl-clipboard
+          # gdbus: a program asking the portal to open a link.
+          pkgs.glib.bin
           # X11 against a neighbour: a window, a look at the server, its
           # selection, input sent to it.
           pkgs.xorg.xmessage
