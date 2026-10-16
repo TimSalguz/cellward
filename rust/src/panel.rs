@@ -20,7 +20,13 @@
 //! program⇥<container>⇥<program, for a person>⇥<out bytes>⇥<in bytes>
 //! setting⇥<default|default-profile|mode|wayland-sandbox>⇥<value>⇥<nix|local|default>
 //! pin⇥<program's key>⇥<its name>⇥<the container it goes to, or empty>
+//! task⇥<instance id>⇥<launch>⇥<its program, for a person, or empty>⇥<paused: 0|1>⇥<resident KiB>⇥<CPU ticks>⇥<ticks a second>
+//! tproc⇥<instance id>⇥<launch>⇥<pid>⇥<comm>⇥<resident KiB>⇥<CPU ticks>
 //! ```
+//!
+//! A `task` is a launch of an instance by its cgroup, a `tproc` one of its
+//! processes (`crate::tasks`); the window makes CPU use of two readings'
+//! ticks.
 //!
 //! `<tunnel>`: what the tunnel watch last found (`crate::watch`): `alive`,
 //! `idle`, `dead`, `suspect`, `unknown`, or `-` — not looked at (a zone that
@@ -198,6 +204,33 @@ pub fn data(tools: &Tools) -> String {
             let mut all = vec!["flow"];
             all.extend(fields.iter().map(String::as_str));
             line(&all);
+        }
+    }
+    let hz = crate::tasks::ticks_per_second().to_string();
+    for i in crate::tasks::snapshot(tools) {
+        for l in &i.launches {
+            let name = l.label.as_deref().or(l.program.as_deref()).unwrap_or("");
+            line(&[
+                "task",
+                &i.id,
+                &l.leaf,
+                name,
+                if l.frozen { "1" } else { "0" },
+                &l.rss_kib().to_string(),
+                &l.ticks().to_string(),
+                &hz,
+            ]);
+            for p in &l.procs {
+                line(&[
+                    "tproc",
+                    &i.id,
+                    &l.leaf,
+                    &p.pid.to_string(),
+                    &p.comm,
+                    &p.rss_kib.to_string(),
+                    &p.ticks.to_string(),
+                ]);
+            }
         }
     }
     for (kind, days) in [("today", 1), ("month", 30)] {

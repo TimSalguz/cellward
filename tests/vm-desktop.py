@@ -1037,6 +1037,66 @@ for home in ["overlay", "private"]:
             alice(f"systemctl --user stop {unit}", check=False)
             machine.sleep(3)
 
+# --- 10b. The task manager: the cellward window's «Задачи» -------------------
+
+TASKS = "The task manager: a container's launches in the cellward window, paused from it"
+
+if wanted(TASKS):
+    with scenario(TASKS):
+        alice("cellward container create tkbox --home private")
+        alice("install -Dm600 /dev/null /home/alice/.config/vpn-zones/containers/tkbox/perms")
+        run("tk-prog", "offline --container tkbox -- sh -c 'while :; do :; done'",
+            env="--setenv=VPN_ZONE_APPID=tk-prog")
+        machine.wait_until_succeeds(
+            "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward tasks --json' | grep -q tkbox",
+            timeout=60,
+        )
+        real = alice("readlink -f $(command -v cellward)").strip()
+        tools = alice(f"grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' {real}").strip()
+        win = machine.succeed(f"grep -o '\"window\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
+        pointer("move", 5, 5)
+        alice(
+            f"systemd-run --user --unit=vmtasks --setenv=WAYLAND_DISPLAY={nested} "
+            f"{win} panel --cellward {real} --tab tasks"
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q '\"cellward\"'",
+            timeout=60,
+        )
+        tk_win = next(w for w in windows() if w["app_id"] == "cellward")
+        alice(f"{NIRI_MSG} action focus-window --id {tk_win['id']}")
+        machine.sleep(4)
+        shot("tasks")
+
+        def tk_frozen():
+            t = json.loads(alice("cellward tasks --json"))
+            i = next(i for i in t["instances"] if i["id"] == "tkbox")
+            return [l["frozen"] for l in i["launches"]]
+
+        assert tk_frozen() and not any(tk_frozen()), tk_frozen()
+        # ↓ chooses the first launch, Space pauses it.
+        alice(f"WAYLAND_DISPLAY={nested} wtype -s 300 -k Down -k space")
+        machine.wait_until_succeeds(
+            "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward tasks --json' | grep -q '\"frozen\":true'",
+            timeout=30,
+        )
+        machine.sleep(2)
+        shot("tasks-paused")
+        # Space again: resumed. Delete: asked, nothing ended yet.
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k space")
+        machine.wait_until_succeeds(
+            "! su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 cellward tasks --json' | grep -q '\"frozen\":true'",
+            timeout=30,
+        )
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Delete")
+        machine.sleep(2)
+        shot("tasks-end-asked")
+        assert unit_active("tk-prog"), "ended before it was confirmed"
+        alice(f"WAYLAND_DISPLAY={nested} wtype -k Escape")
+    alice("systemctl --user stop vmtasks tk-prog", check=False)
+    machine.sleep(2)
+
+
 # --- 11. The cellward window's connections, a tree ------------------------------
 
 TREE = "The cellward window's connections: a tree by program, a site blocked from its row"

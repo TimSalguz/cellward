@@ -8,7 +8,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 - **`cellward tasks`**: each container's instance, its launches (by their
   cgroups) and their processes — memory, CPU, paused or not; `pause`,
-  `resume` and `kill` a launch whole. The task manager's window is next.
+  `resume` and `kill` a launch whole. In the cellward window, the tab
+  «Задачи»: each container's launches with their memory, CPU and processes;
+  chosen by a click or ↑/↓ (more with Ctrl), paused with Space, ended with
+  Delete once confirmed.
 - **A connection's program by its socket's cgroup** (`docs/FIREWALL.md` §3):
   the instance's keeper asks the kernel which launch's cgroup each socket was
   made in, so a program whose processes close their descriptors (Chromium,
