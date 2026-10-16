@@ -1152,13 +1152,28 @@ let
           )
 
       with subtest("cellward add vmreal: config with DNS= and a live endpoint"):
+          # The endpoint by a name (LEAK-MODEL §5): resolved once, in the
+          # host's network, and kept — a second up asks no resolver.
+          machine.succeed(
+              "cp --remove-destination $(readlink -f /etc/hosts) /etc/hosts && "
+              f"echo '{server_ip} vmvpn.test' >> /etc/hosts"
+          )
           alice(
               f"printf '[Interface]\\nPrivateKey = {cpriv}\\nAddress = 10.99.0.2/32, fd99::2/128\\n"
               f"DNS = 10.99.0.1, fd99::1\\n\\n[Peer]\\nPublicKey = {spub}\\n"
-              f"AllowedIPs = 0.0.0.0/0, ::/0\\nEndpoint = {server_ip}:51820\\n' "
+              f"AllowedIPs = 0.0.0.0/0, ::/0\\nEndpoint = vmvpn.test:51820\\n' "
               "> /tmp/vmreal.conf"
           )
           alice("cellward add vmreal /tmp/vmreal.conf")
+          alice("cellward up vmreal")
+          kept = alice("cellward endpoint vmreal")
+          assert f"vmvpn.test → {server_ip}" in kept, kept
+          machine.succeed("sed -i '/vmvpn.test/d' /etc/hosts")
+          alice("cellward down vmreal && cellward up vmreal")
+          # Forgotten: the name has to resolve again, and does not now.
+          alice("cellward down vmreal && cellward endpoint vmreal refresh")
+          alice("! cellward up vmreal")
+          machine.succeed(f"echo '{server_ip} vmvpn.test' >> /etc/hosts")
           alice("cellward up vmreal")
 
       # The capture starts BEFORE any traffic, so the handshake itself is

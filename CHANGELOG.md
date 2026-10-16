@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- **The VPN server's name is resolved once** (`LEAK-MODEL.md` §5): its address
+  is kept in the zone's directory and used at every later `up`, with no query
+  to the host's resolver; `cellward endpoint <zone> [refresh]` shows it or
+  forgets it.
 - **Editors' settings and the desktop shell's scripts are among what the host
   runs**: `~/.config/Code/User` (and VSCodium's, Cursor's, Code OSS's), Zed's,
   JetBrains', lazygit's, KWin's scripts and Plasma's widgets are read-only in
