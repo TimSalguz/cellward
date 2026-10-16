@@ -159,7 +159,14 @@ let
           assert "peer=10.99.0.2" in out, out
           out = alice("cellward run nl -- getent ahostsv4 leaktest.internal")
           assert "10.99.0.9" in out, out
-          alice("cellward run nl -- ping -c1 -W5 10.99.0.1")
+          # As from the desktop — through the user's manager, into its
+          # launch's own cgroup —: ping's process, file capabilities and all,
+          # is its launch's by its cgroup even where its descriptors are
+          # closed to the user.
+          alice(
+              'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- '
+              "cellward run nl -- ping -c1 -W5 10.99.0.1"
+          )
           alice("cellward container net main deny curl")
           alice("! cellward run nl -- curl -sS -m 10 --connect-timeout 5 http://10.99.0.1:8080/")
           # A name of pub's: asked of 1.1.1.1 past the server, unanswered here.

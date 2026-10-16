@@ -768,6 +768,12 @@ fn kind_of(f: &Flow) -> Kind {
     if f.proto == ICMP6 && f.lport == 0 && [133, 135, 136].contains(&f.rport) {
         return Kind::Local;
     }
+    // Not the gate's, and nothing sent: what came in to the instance's
+    // kernel — an ICMP error from passt, an unreachable resolver's —, no
+    // program's and nothing denied.
+    if !crate::relay::gated(&key) && f.out_bytes == 0 {
+        return Kind::Local;
+    }
     if !crate::relay::gated(&key) || f.verdict == Some(crate::verdicts::Verdict::Deny) {
         return Kind::Denied;
     }
@@ -884,7 +890,7 @@ pub fn build(facts: &Facts) -> Scheme {
             );
             let what = match kind {
                 Kind::Dns => "DNS-запрос к 10.254.255.253",
-                Kind::Local => "служебное: ARP, соседи IPv6",
+                Kind::Local => "служебное ядра: соседи IPv6, ICMP",
                 Kind::Ping => "ping",
                 _ => "соединение программы",
             };
@@ -1689,6 +1695,11 @@ mod tests {
             ],
         ));
         let r = row(&s, "work-1:ядро контейнера:local");
+        // An ICMP error that came in, nothing sent: the kernel's too.
+        let mut err = flow(ICMP6, "fd63::1", 1, "?", None);
+        (err.lport, err.out_bytes, err.program) = (0, 0, None);
+        let e = build(&facts(zone("amneziawg", "1.1.1.1", false), vec![err]));
+        assert_eq!(row(&e, "work-1:ядро контейнера:local").count, 1);
         assert_eq!(r.hops.last().unwrap().to, "passt:work-1");
         assert!(matches!(r.end, End::Answered(_)));
         let j = json(&s);
