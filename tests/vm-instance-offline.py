@@ -142,6 +142,34 @@ with subtest("an instance's programs are in its epoch; one from a login session 
     machine.succeed("pkill -xf 'sleep 4343'")
     live_switch_is("vmia", True, None)
 
+with subtest("a launch takes no descriptor of its launcher into the container"):
+    # A socket the launcher left open (fd 5, as a shell's or an editor's
+    # would be): the program in the container never has it, and the doctor
+    # finds none made outside the instance (`inherited`).
+    machine.succeed(
+        "cat > /tmp/inherit.py <<'PY'\n"
+        "import os, socket, subprocess, time\n"
+        "a, b = socket.socketpair()\n"
+        "os.dup2(b.fileno(), 5)\n"
+        "subprocess.Popen(['cellward', 'run', 'offline', '--container', 'vmia', '--',"
+        " 'sleep', '7171'], pass_fds=(5,))\n"
+        "time.sleep(3600)\n"
+        "PY\n"
+        "chmod 644 /tmp/inherit.py"
+    )
+    py = FAKE_BUS_OWNER.split()[0]
+    alice(f"systemd-run --user --unit=inherit -E PATH=\"$PATH\" {py} /tmp/inherit.py")
+    machine.wait_until_succeeds("pgrep -xf 'sleep 7171'", timeout=30)
+    sleeper = machine.succeed("pgrep -xf 'sleep 7171'").strip()
+    machine.fail(f"test -e /proc/{sleeper}/fd/5")
+    out = json.loads(alice("cellward doctor --json"))
+    i = next(i for i in out["instances"] if i["id"] == "vmia")
+    inherited = next(c for c in i["checks"] if c["id"] == "inherited")
+    assert inherited["level"] == "ok", inherited
+    alice("systemctl --user stop inherit")
+    machine.succeed("pkill -xf 'sleep 7171' || true")
+
+
 with subtest("the task manager: an instance's launches, paused, resumed, ended"):
     alice(
         "systemd-run --user --collect --unit=tk-sleep cellward run offline --container vmia "

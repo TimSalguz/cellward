@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **A launcher's descriptors no longer reach a container's program**
+  (`LEAK-MODEL.md` §15а): a socket left open by whatever ran `cellward run`
+  was the program's way out; `container-enter` closes every descriptor from
+  3 but the status pipe at the exec, and `doctor` checks it (`inherited`).
+
 ### Added
 - **Open a file or a folder from the real home** (`LEAK-MODEL.md` §2): the
   portal's `OpenFile`/`OpenDirectory` of a program of the real home goes to

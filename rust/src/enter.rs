@@ -346,6 +346,36 @@ fn place(id: &str, epoch: &crate::epoch::Epoch, leaf: Option<&str>) {
     }
 }
 
+/// Every descriptor from 3 on marked close-on-exec: `close_range(2)` with
+/// `CLOSE_RANGE_CLOEXEC` (Linux 5.11), else one by one from `/proc/self/fd`.
+fn cloexec_from_three() -> io::Result<()> {
+    const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
+    // SAFETY: close_range takes numbers and flags; with this flag it only
+    // marks.
+    let marked = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_uint,
+            libc::c_uint::MAX,
+            CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if marked == 0 {
+        return Ok(());
+    }
+    let fds: Vec<i32> = std::fs::read_dir("/proc/self/fd")?
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse().ok())
+        .filter(|fd| *fd > 2)
+        .collect();
+    for fd in fds {
+        // SAFETY: fcntl on a number; one closed meanwhile (the directory's
+        // own) fails, which is nothing.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    Ok(())
+}
+
 /// The child: the instance's mount namespace, a copy of it of its own, the
 /// capabilities kept, the command. Returns only when something failed —
 /// what, for the waiter to say.
@@ -385,6 +415,22 @@ fn become_the_launch(space: &OwnedFd, cmd: &[OsString], status_w: &OwnedFd) -> S
     }
     if let Err(e) = raise_ambient() {
         return format!("cannot keep the instance's capabilities: {e}");
+    }
+    // Nothing of the launcher's past the standard three but the status
+    // pipe: a descriptor whoever ran `cellward run` left open — a shell's,
+    // a terminal's or an editor's socket to the host — would be the
+    // program's way out of the instance, which no path shows (`doctor`'s
+    // `inherited`). Each one is closed at the exec, this process keeping
+    // what it holds until then.
+    if let Err(e) = cloexec_from_three() {
+        return format!("cannot close the launcher's descriptors: {e}");
+    }
+    // SAFETY: fcntl on a descriptor we hold.
+    if unsafe { libc::fcntl(status_w.as_raw_fd(), libc::F_SETFD, 0) } != 0 {
+        return format!(
+            "cannot keep the launch's status pipe: {}",
+            io::Error::last_os_error()
+        );
     }
     let e = exec_command(cmd);
     format!("cannot start {}: {e}", cmd[0].to_string_lossy())
