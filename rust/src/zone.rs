@@ -3971,26 +3971,16 @@ impl Transport {
         if uniform.is_some() {
             return;
         }
-        // By each flow's program — asked about where its rule says so. A
-        // flow the gate does not hold (DNS to the forwarder, not TCP or UDP)
-        // is not asked about: it went.
+        // By each flow's program — asked about where its rule says so
+        // (`netrules::Rules::of_flow`).
         let names = crate::flows::read(&self.dir)
             .map(|(_, names)| names)
             .unwrap_or_default();
         let mut decided = Vec::new();
         for (f, owner) in fresh.iter().zip(&owners) {
-            if !crate::relay::gated(&f.key) {
-                decided.push((f.key, crate::verdicts::Verdict::Allow));
-                continue;
-            }
-            // A destination blocked for the container: no, whoever's it is
-            // (`netrules::Block`), before the program's rule.
-            if rules.blocked(crate::flows::name_of(&names, &f.key.remote), &f.key.remote) {
-                decided.push((f.key, crate::verdicts::Verdict::Deny));
-                continue;
-            }
             let program = owner.as_ref().and_then(|o| o.program.clone());
-            match rules.decide(program.as_deref()).verdict() {
+            let name = crate::flows::name_of(&names, &f.key.remote);
+            match rules.of_flow(&f.key, name, program.as_deref()) {
                 Some(verdict) => decided.push((f.key, verdict)),
                 None => match self.asker.as_mut() {
                     Some(asker) => {
@@ -9768,9 +9758,18 @@ pub fn instance_ruleset(
             format!(" socket cgroupv2 level {level} \"{relative}\"")
         }
     };
+    // Broadcast and multicast never go (the gate's holes, 2026-10-16): to
+    // passt they are addresses like any, sent from the zone into its
+    // tunnel — what a program says to its "network" (an announcement, a
+    // search for devices) would be the VPN's provider's to read. The
+    // instance's own subnet's broadcast too: ALL of 10.254.0.0/16 is the
+    // instance's link. Neighbour discovery, multicast as well, goes first.
+    let broadcast = std::net::Ipv4Addr::from(u32::from(a4) | (u32::MAX >> crate::bridge::PREFIX4));
     let mut rules = vec![
         "oifname \"lo\" accept".to_string(),
         NDP_RULE.to_string(),
+        format!("ip daddr {{ 224.0.0.0/4, 255.255.255.255, {broadcast} }} drop"),
+        "ip6 daddr ff00::/8 drop".to_string(),
         format!("oifname \"{TUN_IFACE}\" ip saddr {a4}{cgroup} accept"),
     ];
     // Stage 4: `epoch` goes with a live switch, and a switch's epoch is
@@ -11283,6 +11282,8 @@ networks:  files
                 "\t\ttype filter hook output priority filter; policy drop;\n",
                 "\t\toifname \"lo\" accept\n",
                 "\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n",
+                "\t\tip daddr { 224.0.0.0/4, 255.255.255.255, 10.254.255.255 } drop\n",
+                "\t\tip6 daddr ff00::/8 drop\n",
                 "\t\toifname \"awg0\" ip saddr 10.254.3.4 accept\n",
                 "\t}\n",
                 "}\n",
@@ -11298,6 +11299,8 @@ networks:  files
                 "\t\ttype filter hook output priority filter; policy drop;\n",
                 "\t\toifname \"lo\" accept\n",
                 "\t\ticmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n",
+                "\t\tip daddr { 224.0.0.0/4, 255.255.255.255, 10.254.255.255 } drop\n",
+                "\t\tip6 daddr ff00::/8 drop\n",
                 "\t\toifname \"awg0\" ip saddr 10.254.3.4 socket cgroupv2 level 6 ",
                 "\"user.slice/user-1000.slice/user@1000.service/app.slice/",
                 "vpn-zone-container@work\\x2d2.service/e3\" accept\n",

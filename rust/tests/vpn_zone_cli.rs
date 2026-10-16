@@ -2412,6 +2412,7 @@ fn traffic_connections_says_whom_an_instance_reached() {
             outbound,
             len,
             dns: None,
+            fragment: false,
         };
         table.note(&seen, flows::now());
     }
@@ -2429,6 +2430,7 @@ fn traffic_connections_says_whom_an_instance_reached() {
         outbound: false,
         len: 90,
         dns: Some(&answer),
+        fragment: false,
     };
     table.note(&dns, flows::now());
     let json = stdout(&home.run(&["traffic", "--connections", "--json"]));

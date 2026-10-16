@@ -83,6 +83,9 @@ pub struct Seen<'a> {
     pub len: usize,
     /// The payload of a UDP datagram to or from port 53.
     pub dns: Option<&'a [u8]>,
+    /// A part of a datagram (IPv4's fragment, IPv6's fragment header): of
+    /// no ports, of no flow but its protocol's.
+    pub fragment: bool,
 }
 
 fn u16_at(b: &[u8], at: usize) -> Option<u16> {
@@ -93,10 +96,32 @@ fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
+/// IPv6's extension headers a packet may carry before its protocol's: read
+/// past, each by its own length, to the protocol's header — a TCP segment
+/// behind a destination option is TCP.
+const HOP_BY_HOP: u8 = 0;
+const ROUTING: u8 = 43;
+const FRAGMENT: u8 = 44;
+const DEST_OPTIONS: u8 = 60;
+/// The most extension headers read past; a packet with more is of no
+/// protocol the gate knows.
+const MAX_EXTENSIONS: usize = 8;
+
+/// ICMP's echo request and reply, and ICMPv6's: a ping.
+pub const ECHO4: u8 = 8;
+const ECHO_REPLY4: u8 = 0;
+pub const ECHO6: u8 = 128;
+const ECHO_REPLY6: u8 = 129;
+
 /// An Ethernet frame's flow; `None` for one that is not IPv4 or IPv6, or
 /// does not read.
+///
+/// A ping is a flow by its identifier — the ping socket's own "port", as
+/// `/proc/net/icmp` lists it — with the request's type for the other end's
+/// port, its reply's the same flow. Another ICMP message is the instance's
+/// port 0 and its type.
 pub fn frame(buf: &[u8], outbound: bool) -> Option<Seen<'_>> {
-    let (proto, src, dst, payload, whole) = match u16_at(buf, 12)? {
+    let (proto, src, dst, payload, fragment) = match u16_at(buf, 12)? {
         0x0800 => {
             let ip = buf.get(14..)?;
             let ihl = usize::from(*ip.first()? & 0x0f) * 4;
@@ -105,33 +130,66 @@ pub fn frame(buf: &[u8], outbound: bool) -> Option<Seen<'_>> {
             }
             let src = IpAddr::V4(Ipv4Addr::from(u32_at(ip, 12)?));
             let dst = IpAddr::V4(Ipv4Addr::from(u32_at(ip, 16)?));
-            // A fragment after the first has no ports.
-            let first = u16_at(ip, 6)? & 0x1fff == 0;
-            (ip[9], src, dst, ip.get(ihl..)?, first)
+            // More fragments, or an offset: a part of a datagram.
+            let fragment = u16_at(ip, 6)? & 0x3fff != 0;
+            (ip[9], src, dst, ip.get(ihl..)?, fragment)
         }
         0x86dd => {
             let ip = buf.get(14..)?;
             let src: [u8; 16] = ip.get(8..24)?.try_into().ok()?;
             let dst: [u8; 16] = ip.get(24..40)?.try_into().ok()?;
+            let (mut next, mut at, mut fragment) = (*ip.get(6)?, 40, false);
+            for _ in 0..MAX_EXTENSIONS {
+                match next {
+                    HOP_BY_HOP | ROUTING | DEST_OPTIONS => {
+                        let header = ip.get(at..at + 2)?;
+                        next = header[0];
+                        at += (usize::from(header[1]) + 1) * 8;
+                    }
+                    FRAGMENT => {
+                        next = *ip.get(at)?;
+                        fragment = true;
+                        at += 8;
+                    }
+                    _ => break,
+                }
+            }
             (
-                ip[6],
+                next,
                 IpAddr::V6(Ipv6Addr::from(src)),
                 IpAddr::V6(Ipv6Addr::from(dst)),
-                ip.get(40..)?,
-                true,
+                ip.get(at..)?,
+                fragment,
             )
         }
         _ => return None,
     };
     let remote = if outbound { dst } else { src };
     let (sport, dport, dns) = match proto {
-        TCP | UDP if whole => {
+        TCP | UDP if !fragment => {
             let sport = u16_at(payload, 0)?;
             let dport = u16_at(payload, 2)?;
             let dns = (proto == UDP && (sport == 53 || dport == 53))
                 .then(|| payload.get(8..))
                 .flatten();
             (sport, dport, dns)
+        }
+        ICMP | ICMP6 if !fragment => {
+            let kind = *payload.first()?;
+            let echo = match (proto, kind) {
+                (ICMP, ECHO4 | ECHO_REPLY4) => Some(ECHO4),
+                (ICMP6, ECHO6 | ECHO_REPLY6) => Some(ECHO6),
+                _ => None,
+            };
+            let (own, other) = match echo {
+                Some(request) => (u16_at(payload, 4)?, u16::from(request)),
+                None => (0, u16::from(kind)),
+            };
+            if outbound {
+                (own, other, None)
+            } else {
+                (other, own, None)
+            }
         }
         _ => (0, 0, None),
     };
@@ -150,6 +208,7 @@ pub fn frame(buf: &[u8], outbound: bool) -> Option<Seen<'_>> {
         outbound,
         len: buf.len(),
         dns,
+        fragment,
     })
 }
 
@@ -1044,7 +1103,99 @@ mod tests {
         let mut frag = ipv4(UDP, [10, 254, 0, 2], [1, 1, 1, 1], &ports(1, 2, &[]));
         frag[14 + 6] = 0x00;
         frag[14 + 7] = 0x10;
-        assert_eq!(frame(&frag, true).unwrap().key.lport, 0);
+        let later = frame(&frag, true).unwrap();
+        assert_eq!((later.key.lport, later.fragment), (0, true));
+        assert!(!s.fragment);
+    }
+
+    /// An IPv6 packet: its fixed header from `fd63::2` to `2001:db8::1`, the
+    /// next header `next`, then `rest`.
+    fn ipv6(next: u8, rest: &[u8]) -> Vec<u8> {
+        let mut ip6 = vec![0x60, 0, 0, 0];
+        ip6.extend_from_slice(&(rest.len() as u16).to_be_bytes());
+        ip6.extend_from_slice(&[next, 64]);
+        ip6.extend_from_slice(&"fd63::2".parse::<Ipv6Addr>().unwrap().octets());
+        ip6.extend_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+        ip6.extend_from_slice(rest);
+        eth(0x86dd, &ip6)
+    }
+
+    /// What `frame` reads of an outbound IPv6 packet, kept past its bytes.
+    struct Read6 {
+        key: Key,
+        fragment: bool,
+    }
+
+    fn read6(next: u8, rest: &[u8]) -> Option<Read6> {
+        let f = ipv6(next, rest);
+        frame(&f, true).map(|s| Read6 {
+            key: s.key,
+            fragment: s.fragment,
+        })
+    }
+
+    /// A TCP segment behind IPv6's extension headers is TCP, to its port —
+    /// not a protocol of the header's number the gate would let by; a
+    /// fragment, first or later, is a fragment.
+    #[test]
+    fn ipv6s_extension_headers_are_read_past() {
+        // A destination option of 8 bytes, then TCP.
+        let mut rest = vec![TCP, 0, 1, 4, 0, 0, 0, 0];
+        rest.extend_from_slice(&ports(40000, 443, &[0; 12]));
+        let s = read6(DEST_OPTIONS, &rest).unwrap();
+        assert_eq!(
+            (s.key.proto, s.key.lport, s.key.rport, s.fragment),
+            (TCP, 40000, 443, false)
+        );
+        // Hop-by-hop, then routing, then UDP.
+        let mut rest = vec![ROUTING, 0, 1, 4, 0, 0, 0, 0];
+        rest.extend_from_slice(&[UDP, 0, 0, 0, 0, 0, 0, 0]);
+        rest.extend_from_slice(&ports(5000, 53, &[]));
+        let s = read6(HOP_BY_HOP, &rest).unwrap();
+        assert_eq!((s.key.proto, s.key.rport), (UDP, 53));
+        // The first fragment carries the ports, and is a fragment still.
+        let mut rest = vec![UDP, 0, 0, 1, 0, 0, 0, 7];
+        rest.extend_from_slice(&ports(5000, 4433, &[]));
+        let s = read6(FRAGMENT, &rest).unwrap();
+        assert_eq!((s.key.proto, s.fragment), (UDP, true));
+        // Headers past the most read: of no protocol known.
+        let mut rest = Vec::new();
+        for _ in 0..=MAX_EXTENSIONS {
+            rest.extend_from_slice(&[DEST_OPTIONS, 0, 1, 4, 0, 0, 0, 0]);
+        }
+        rest.extend_from_slice(&ports(1, 2, &[0; 12]));
+        assert_eq!(read6(DEST_OPTIONS, &rest).unwrap().key.proto, DEST_OPTIONS);
+        // One cut short does not read.
+        assert!(read6(DEST_OPTIONS, &[TCP, 4]).is_none());
+    }
+
+    /// A ping is a flow by its identifier, its reply the same flow; another
+    /// ICMP message is port 0 and its type.
+    #[test]
+    fn a_ping_is_a_flow_by_its_identifier() {
+        let request = ipv4(
+            ICMP,
+            [10, 254, 0, 2],
+            [1, 1, 1, 1],
+            &[ECHO4, 0, 0, 0, 0x12, 0x34, 0, 1],
+        );
+        let s = frame(&request, true).unwrap();
+        assert_eq!(
+            (s.key.proto, s.key.lport, s.key.rport),
+            (ICMP, 0x1234, u16::from(ECHO4))
+        );
+        let reply = ipv4(
+            ICMP,
+            [1, 1, 1, 1],
+            [10, 254, 0, 2],
+            &[ECHO_REPLY4, 0, 0, 0, 0x12, 0x34, 0, 1],
+        );
+        assert_eq!(frame(&reply, false).unwrap().key, s.key);
+        let v6 = read6(ICMP6, &[ECHO6, 0, 0, 0, 0, 7, 0, 1]).unwrap();
+        assert_eq!((v6.key.lport, v6.key.rport), (7, u16::from(ECHO6)));
+        // A router solicitation: port 0, type 133.
+        let rs = read6(ICMP6, &[133, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!((rs.key.lport, rs.key.rport), (0, 133));
     }
 
     #[test]

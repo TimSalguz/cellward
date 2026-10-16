@@ -310,6 +310,35 @@ impl Rules {
         !self.open && self.blocks.iter().any(|(b, _)| b.covers(name, addr))
     }
 
+    /// A new flow's verdict, `key` to the address a DNS answer named `name`,
+    /// of `program` (`None`: not found): what the keeper writes for the
+    /// relay's gate — `None`, the person is asked. A flow the gate does not
+    /// hold went already. DNS to the instance's forwarder is its program's
+    /// rule's, "ask" let — the question is the connection's that follows —;
+    /// a program denied the network asks no names either (the gate's
+    /// holes, 2026-10-16: names are a way out too). A destination blocked
+    /// for the container: no, whoever's it is, before the program's rule.
+    pub fn of_flow(
+        &self,
+        key: &crate::flows::Key,
+        name: Option<&str>,
+        program: Option<&str>,
+    ) -> Option<Verdict> {
+        if !crate::relay::gated(key) {
+            return Some(Verdict::Allow);
+        }
+        if crate::relay::to_forwarder(key) {
+            return Some(match self.decide(program) {
+                Rule::Deny => Verdict::Deny,
+                Rule::Allow | Rule::Ask => Verdict::Allow,
+            });
+        }
+        if self.blocked(name, &key.remote) {
+            return Some(Verdict::Deny);
+        }
+        self.decide(program).verdict()
+    }
+
     /// The rule for `program` (`None`: not found — the default).
     pub fn decide(&self, program: Option<&str>) -> Rule {
         if self.open {
@@ -601,6 +630,56 @@ mod tests {
         let rules = Rules::load(&config, "c");
         let _ = std::fs::remove_dir_all(&root);
         rules
+    }
+
+    /// A new flow: DNS to the forwarder by its program's rule, "ask" let
+    /// and "deny" not; a ping as any flow; a blocked destination no,
+    /// whoever's; what the gate does not hold, yes.
+    #[test]
+    fn a_flows_verdict_is_its_programs_and_its_destinations() {
+        use crate::flows::{Key, ECHO4, ICMP, ICMP6, TCP, UDP};
+        let r = rules(
+            "",
+            "net_deny = curl\nnet_allow = firefox\nnet_block = datadoghq.com\n",
+        );
+        let key = |proto, remote: &str, rport| Key {
+            proto,
+            lport: 40000,
+            remote: remote.parse().unwrap(),
+            rport,
+        };
+        let dns = key(UDP, "10.254.255.253", 53);
+        let dns6 = key(TCP, &crate::bridge::D6.to_string(), 53);
+        assert_eq!(r.of_flow(&dns, None, Some("curl")), Some(Verdict::Deny));
+        assert_eq!(r.of_flow(&dns6, None, Some("curl")), Some(Verdict::Deny));
+        assert_eq!(r.of_flow(&dns, None, Some("firefox")), Some(Verdict::Allow));
+        // Not found, the default asks: its names are let, its connections asked.
+        assert_eq!(r.decide(None), Rule::Ask);
+        assert_eq!(r.of_flow(&dns, None, None), Some(Verdict::Allow));
+        let ping = key(ICMP, "1.1.1.1", u16::from(ECHO4));
+        assert_eq!(r.of_flow(&ping, None, Some("curl")), Some(Verdict::Deny));
+        assert_eq!(
+            r.of_flow(&ping, None, Some("firefox")),
+            Some(Verdict::Allow)
+        );
+        assert_eq!(r.of_flow(&ping, None, None), None);
+        // DNS elsewhere is a connection like any.
+        assert_eq!(r.of_flow(&key(UDP, "9.9.9.9", 53), None, None), None);
+        let tcp = key(TCP, "203.0.113.7", 443);
+        assert_eq!(
+            r.of_flow(&tcp, Some("api.datadoghq.com"), Some("firefox")),
+            Some(Verdict::Deny)
+        );
+        assert_eq!(
+            r.of_flow(&tcp, Some("example.org"), Some("firefox")),
+            Some(Verdict::Allow)
+        );
+        // A router solicitation is not the gate's.
+        let rs = Key {
+            lport: 0,
+            ..key(ICMP6, "ff02::2", 133)
+        };
+        assert_eq!(r.of_flow(&rs, None, Some("curl")), Some(Verdict::Allow));
     }
 
     /// A program's line, the record's default without one, the template's

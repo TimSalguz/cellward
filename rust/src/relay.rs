@@ -219,7 +219,11 @@ impl Notes<'_> {
             }
         }
         match (self.gate.as_mut(), outbound) {
-            (Some(gate), true) => gate.outbound(seen.as_ref().map(|s| &s.key), frame),
+            (Some(gate), true) => match class(frame, seen.as_ref()) {
+                Class::Free => true,
+                Class::Dropped => false,
+                Class::Gated => seen.is_some_and(|s| gate.outbound(&s.key, frame)),
+            },
             _ => true,
         }
     }
@@ -251,17 +255,71 @@ impl Notes<'_> {
     }
 }
 
-/// Whether the flow `key` is the gate's to hold ([`Gate`]) — and its
-/// keeper's to decide: TCP and UDP, but DNS to the instance's forwarder.
-pub fn gated(key: &crate::flows::Key) -> bool {
-    use crate::flows::{TCP, UDP};
-    if key.proto != TCP && key.proto != UDP {
-        return false;
+/// What the gate does with an outbound frame of the instance's programs
+/// (the gate's holes, 2026-10-16: a ping, DNS to the forwarder, a fragment
+/// and any other protocol went by it undecided).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Class {
+    /// Goes undecided: ARP and neighbour discovery with passt, which
+    /// answers them as the gateway and lets them no further.
+    Free,
+    /// A flow the keeper decides: TCP, UDP, a ping.
+    Gated,
+    /// Never goes: a fragment — the parts after the first have no ports,
+    /// no flow to be decided by, and a tap's MTU leaves the instance
+    /// nothing it must fragment —; another protocol; a frame that does
+    /// not read; another of ICMP's messages.
+    Dropped,
+}
+
+const ETHERTYPE_ARP: u16 = 0x0806;
+/// ICMPv6's router solicitation, neighbour solicitation and advertisement
+/// (the instance's nft lets these and no other ICMPv6 type by, `zone::NDP_RULE`).
+const NEIGHBOURS: [u16; 3] = [133, 135, 136];
+
+/// The class of an outbound `frame`, read as `seen` (`None`: it did not
+/// read as IPv4 or IPv6).
+pub fn class(frame: &[u8], seen: Option<&crate::flows::Seen>) -> Class {
+    use crate::flows::ICMP6;
+    let Some(seen) = seen else {
+        let arp = frame.get(12..14) == Some(&ETHERTYPE_ARP.to_be_bytes()[..]);
+        return if arp { Class::Free } else { Class::Dropped };
+    };
+    if seen.fragment {
+        return Class::Dropped;
     }
-    let forwarder = key.rport == 53
+    let k = &seen.key;
+    if gated(k) {
+        Class::Gated
+    } else if k.proto == ICMP6 && k.lport == 0 && NEIGHBOURS.contains(&k.rport) {
+        Class::Free
+    } else {
+        Class::Dropped
+    }
+}
+
+/// Whether the flow `key` is the gate's to hold ([`Gate`]) — and its
+/// keeper's to decide: TCP, UDP — DNS to the instance's forwarder too —
+/// and a ping.
+pub fn gated(key: &crate::flows::Key) -> bool {
+    use crate::flows::{ECHO4, ECHO6, ICMP, ICMP6, TCP, UDP};
+    match key.proto {
+        TCP | UDP => true,
+        ICMP => key.rport == u16::from(ECHO4),
+        ICMP6 => key.rport == u16::from(ECHO6),
+        _ => false,
+    }
+}
+
+/// Whether the flow `key` is DNS to the instance's constant forwarder
+/// (`crate::bridge::D4`, `D6`): decided by its program's rule alone, never
+/// asked about — the question is the connection's that follows.
+pub fn to_forwarder(key: &crate::flows::Key) -> bool {
+    use crate::flows::{TCP, UDP};
+    (key.proto == TCP || key.proto == UDP)
+        && key.rport == 53
         && (key.remote == std::net::IpAddr::V4(crate::bridge::D4)
-            || key.remote == std::net::IpAddr::V6(crate::bridge::D6));
-    !forwarder
+            || key.remote == std::net::IpAddr::V6(crate::bridge::D6))
 }
 
 /// Frames the gate holds at most, and their bytes: past these a frame of a
@@ -275,8 +333,9 @@ const MAX_HELD_BYTES: usize = 1 << 20;
 /// keeper has decided it (`crate::verdicts`, `crate::netrules`) — the keeper
 /// is woken by the relay's word on a new flow and wakes the relay back on
 /// `wake`; a flow allowed goes, a flow denied is dropped, frame by frame.
-/// DNS to the instance's constant forwarder is not held: it is where the
-/// names are noted. Frames that are not TCP or UDP are not held either.
+/// DNS to the instance's constant forwarder is held as well, and decided by
+/// its program's rule ([`to_forwarder`]); a ping is held; what is neither a
+/// flow nor the gateway's neighbour talk is dropped ([`class`]).
 /// What the gate has read of a flow's decision it keeps while the flow is
 /// in the flows' table ([`Gate::forget`]): a flow pushed out of it and seen
 /// again is new again, and decided again.
@@ -312,12 +371,9 @@ impl<'a> Gate<'a> {
         Some(allow)
     }
 
-    /// An outbound frame of flow `key` (none: not a flow the table knows):
-    /// whether it goes now. Held — kept here — while its flow is undecided.
-    fn outbound(&mut self, key: Option<&crate::flows::Key>, frame: &[u8]) -> bool {
-        let Some(key) = key.filter(|k| gated(k)) else {
-            return true;
-        };
+    /// An outbound frame of flow `key` ([`Class::Gated`]): whether it goes
+    /// now. Held — kept here — while its flow is undecided.
+    fn outbound(&mut self, key: &crate::flows::Key, frame: &[u8]) -> bool {
         match self.decision(key) {
             Some(allow) => allow,
             None => {
@@ -1788,7 +1844,7 @@ mod tests {
     /// The gate (`docs/FIREWALL.md` §9): a new flow's frame waits for its
     /// keeper's decision — let go when allowed, dropped when denied, and a
     /// frame of a flow decided before goes at once; DNS to the instance's
-    /// forwarder is not held.
+    /// forwarder is held too, another protocol dropped.
     #[test]
     fn the_gate_holds_a_new_flow_until_it_is_decided() {
         use crate::verdicts::Verdict;
@@ -1862,19 +1918,103 @@ mod tests {
         wake();
         send_packet(&tap_peer, &denied).unwrap();
         assert_eq!(read_frame(&mut stream_peer), None, "dropped");
-        // DNS to the forwarder goes undecided.
+        // DNS to the forwarder is held as well: a program denied the
+        // network asks no names (the gate's holes, 2026-10-16).
         let dns = packet(17, [10, 254, 255, 253], 5353, 53);
         send_packet(&tap_peer, &dns).unwrap();
+        assert_eq!(read_frame(&mut stream_peer), None, "the forwarder, held");
+        decide.put(
+            crate::flows::Key {
+                proto: crate::flows::UDP,
+                ..key([10, 254, 255, 253], 5353, 53)
+            },
+            Verdict::Allow,
+        );
+        wake();
         assert_eq!(
             read_frame(&mut stream_peer).as_ref(),
             Some(&dns),
-            "the forwarder"
+            "the forwarder, let go"
         );
+        // Another protocol never goes.
+        let other = packet(132, [203, 0, 113, 7], 1, 2);
+        send_packet(&tap_peer, &other).unwrap();
+        assert_eq!(read_frame(&mut stream_peer), None, "SCTP dropped");
         drop(stream_peer);
         assert_eq!(pump.join().unwrap().unwrap(), End::StreamClosed);
         decide.close();
         drop(news_r);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// What the gate does with each kind of frame: TCP, UDP, DNS to the
+    /// forwarder and a ping decided; ARP and neighbour discovery free; a
+    /// fragment, another protocol, another ICMP message and a frame that
+    /// does not read dropped.
+    #[test]
+    fn each_kind_of_frame_has_its_class() {
+        let eth = |ethertype: u16, ip: &[u8]| {
+            let mut f = vec![0u8; 12];
+            f.extend_from_slice(&ethertype.to_be_bytes());
+            f.extend_from_slice(ip);
+            f
+        };
+        let v4 = |proto: u8, flags: [u8; 2], dst: [u8; 4], rest: &[u8]| {
+            let mut ip = vec![0x45, 0, 0, 0, 0, 0, flags[0], flags[1], 64, proto, 0, 0];
+            ip.extend_from_slice(&[10, 254, 0, 2]);
+            ip.extend_from_slice(&dst);
+            ip.extend_from_slice(rest);
+            eth(0x0800, &ip)
+        };
+        let v6 = |next: u8, rest: &[u8]| {
+            let mut ip = vec![0x60, 0, 0, 0, 0, rest.len() as u8, next, 255];
+            ip.extend_from_slice(&[0xfd; 16]);
+            ip.extend_from_slice(&[0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+            ip.extend_from_slice(rest);
+            eth(0x86dd, &ip)
+        };
+        let of = |f: &[u8]| class(f, crate::flows::frame(f, true).as_ref());
+        let ports = [
+            0x9c, 0x40, 0, 53, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(of(&v4(6, [0x40, 0], [1, 1, 1, 1], &ports)), Class::Gated);
+        assert_eq!(
+            of(&v4(17, [0, 0], [10, 254, 255, 253], &ports)),
+            Class::Gated
+        );
+        assert_eq!(
+            of(&v4(1, [0, 0], [1, 1, 1, 1], &[8, 0, 0, 0, 0, 1, 0, 1])),
+            Class::Gated
+        );
+        assert_eq!(of(&v6(58, &[128, 0, 0, 0, 0, 1, 0, 1])), Class::Gated);
+        assert_eq!(of(&eth(0x0806, &[0; 28])), Class::Free);
+        for nd in [133u8, 135, 136] {
+            assert_eq!(of(&v6(58, &[nd, 0, 0, 0, 0, 0, 0, 0])), Class::Free, "{nd}");
+        }
+        // An echo's reply sent is its ping's flow, decided as it.
+        assert_eq!(of(&v6(58, &[129, 0, 0, 0, 0, 1, 0, 1])), Class::Gated);
+        // MLD, a redirect, a port unreachable: no.
+        for kind in [143u8, 137, 1] {
+            assert_eq!(
+                of(&v6(58, &[kind, 0, 0, 0, 0, 0, 0, 0])),
+                Class::Dropped,
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            of(&v4(1, [0, 0], [1, 1, 1, 1], &[3, 3, 0, 0, 0, 0, 0, 0])),
+            Class::Dropped
+        );
+        // A first fragment and a later one; IPv6's fragment header.
+        assert_eq!(of(&v4(17, [0x20, 0], [1, 1, 1, 1], &ports)), Class::Dropped);
+        assert_eq!(of(&v4(17, [0, 0x10], [1, 1, 1, 1], &ports)), Class::Dropped);
+        let mut frag = vec![17, 0, 0, 1, 0, 0, 0, 1];
+        frag.extend_from_slice(&ports);
+        assert_eq!(of(&v6(44, &frag)), Class::Dropped);
+        // SCTP; a frame cut short; another ethertype.
+        assert_eq!(of(&v4(132, [0, 0], [1, 1, 1, 1], &ports)), Class::Dropped);
+        assert_eq!(of(&v4(6, [0, 0], [1, 1, 1, 1], &[0])), Class::Dropped);
+        assert_eq!(of(&eth(0x88cc, &[0; 30])), Class::Dropped);
     }
 
     /// A stream that takes nothing stops the reading of the tap — the
