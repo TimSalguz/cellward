@@ -1194,6 +1194,11 @@ fn serve_uplink(
     interface: &str,
     mut fds: Vec<OwnedFd>,
 ) -> Result<Vec<u8>, String> {
+    if !system::direct_route_allowed(zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     let user = zone_owner(uid)?;
     if user.uid == 0 {
         return Err("root's services go into a system zone directly".to_owned());
@@ -1469,6 +1474,11 @@ fn serve_key(uid: u32, key: &str) -> Result<Done, String> {
 /// two devices with one key, and they knock each other off.
 fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
     let zone = request.zone.as_str();
+    if !system::direct_route_allowed(zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     if uid == 0 {
         return Err("root adds a zone by declaring it".to_owned());
     }
@@ -1560,6 +1570,11 @@ fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
 
 /// Bring a zone up for one of its users.
 fn serve_up(uid: u32, zone: &str) -> Result<Done, String> {
+    if !system::direct_route_allowed(zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     let settings =
         system::settings(zone).ok_or_else(|| format!("there is no system zone {zone}"))?;
     let user = user_of(uid)?;
@@ -1575,6 +1590,11 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
     let request = Request::decode(data)?;
     let zone = request.zone.clone();
     check_name(&zone)?;
+    if !system::direct_route_allowed(&zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     if system::settings(&zone).is_none() {
         return Err(format!("there is no system zone {zone}"));
     }

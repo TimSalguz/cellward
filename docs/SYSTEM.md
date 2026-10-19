@@ -29,6 +29,15 @@ PipeWire policy, the home-manager module for every user — but not this tier:
 Stages 1–3 carry WireGuard/AmneziaWG zones only. OpenConnect and host-interface configs are
 refused with a message; they need the uplink to be a namespace of its own and come later.
 
+For a pool containing VPN configs that must not dial directly, set
+`services.cellward.system.directRoutes = [ "nl" "home" ];`. This is a strict
+allowlist of system zones allowed to make a host-side tunnel; `null` keeps
+the legacy behavior. An omitted zone must have `autoStart = false`, and its
+holder refuses a manual or diagnostic start too. Applying a new strict list
+stops already running system tunnels omitted from it: programs in their
+namespaces keep running without network. User-zone route publication is a
+separate list (`cellward routes`, `docs/CHAIN-ROUTES.md`).
+
 ### 1a. Plain zones
 
 `zones.<name>.kind = "plain"`: the same namespace, no tunnel. pasta attaches to it and
