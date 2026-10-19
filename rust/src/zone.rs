@@ -959,6 +959,17 @@ pub fn run(args: Args) -> u8 {
         let verify = || -> Result<(), String> {
             let raw = fs::read(zone.path(CONFIG)).map_err(|e| e.to_string())?;
             let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+            if zone.name() != crate::launch::HOST
+                && !crate::chain::published(
+                    zone.dir.parent().ok_or("zone has no state directory")?,
+                    &zone.name(),
+                    &ini,
+                )?
+            {
+                return Err(
+                    "route is not published in .routes — cellward routes allow <zone>".to_owned(),
+                );
+            }
             crate::chain::refuse_user_shortcut(
                 zone.dir.parent().ok_or("zone has no state directory")?,
                 &zone.name(),
@@ -3639,6 +3650,11 @@ impl Transport {
         }
         let dir = self.state.join(to);
         if !crate::instance::valid_network(to) || !dir.join(CONFIG).is_file() {
+            return Target::Unknown;
+        }
+        if to != crate::launch::HOST
+            && !crate::chain::published_zone(&self.state, to).unwrap_or(false)
+        {
             return Target::Unknown;
         }
         Target::Zone {

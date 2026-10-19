@@ -360,6 +360,13 @@ impl Steps for Real<'_> {
 /// session's autostart, and it was a refusal. `Err`: why it is not up, for
 /// the person.
 pub fn bring_up(tools: &Tools, zone: &str, wants: Wants<'_>) -> Result<(), NotUp> {
+    if zone != crate::launch::HOST {
+        match crate::chain::published_zone(&tools.state, zone) {
+            Ok(true) => {}
+            Ok(false) => return Err(format!("маршрут {zone} не разрешён в .routes").into()),
+            Err(e) => return Err(format!("маршрут {zone}: {e}").into()),
+        }
+    }
     bring_up_with(tools, zone, wants, &Real(tools))
 }
 

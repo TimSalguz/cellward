@@ -2165,6 +2165,7 @@ fn zone_names(state: &Path) -> Vec<String> {
         // offered: choosing it would launch unconfined. (`vpn-zone doctor`
         // names it.)
         .filter(|name| !crate::launch::is_unconfined_name(name))
+        .filter(|name| crate::chain::published_zone(state, name).unwrap_or(false))
         .collect()
 }
 

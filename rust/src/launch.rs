@@ -2026,6 +2026,15 @@ fn up_instance(
         }
     }
     if zone_name != OFFLINE {
+        if zone_name != HOST {
+            match crate::chain::published_zone(&tools.state, zone_name) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!("маршрут {zone_name} не разрешён в .routes").into())
+                }
+                Err(e) => return Err(format!("маршрут {zone_name}: {e}").into()),
+            }
+        }
         let mut pid = cli::zone_up(&tools.state, zone);
         if pid.is_none() {
             // Asked where the network asks, its login taken where it asks
