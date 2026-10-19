@@ -66,6 +66,19 @@ struct Net {
     route: String,
 }
 
+/// The route represented by a zone, including the namespace boundary where
+/// an inner tunnel's encrypted transport leaves for the outer VPN.
+fn route_path(net: &Net, who: &str) -> String {
+    match net.route.as_str() {
+        "chain" => format!(
+            "{who} → VPN {} (awg0) → uplink (hostif) → системная зона {} → Интернет",
+            net.name, net.upstream
+        ),
+        "system" => format!("{who} → системная зона {} (awg0) → Интернет", net.upstream),
+        _ => format!("{who} → {} → Интернет", network_text(&net.name)),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Inst {
     id: String,
@@ -1073,35 +1086,43 @@ impl Panel {
 
     fn view_network(&self) -> Element<'_, Msg> {
         let mut paths = column![text("Путь трафика").size(17)].spacing(4);
-        if self.data.instances.is_empty() {
-            paths = paths.push(text("появится, когда контейнер будет запущен").size(13));
-        }
-        for i in &self.data.instances {
-            let who = if i.container == "-" {
-                &i.id
+        let has_paths = self.data.networks.iter().any(|n| !n.route.is_empty())
+            || !self.data.instances.is_empty();
+        let configured = self.data.networks.iter().filter(|n| !n.route.is_empty());
+        for net in configured {
+            let users: Vec<&str> = self
+                .data
+                .instances
+                .iter()
+                .filter(|i| i.network == net.name)
+                .map(|i| {
+                    if i.container == "-" {
+                        i.id.as_str()
+                    } else {
+                        i.container.as_str()
+                    }
+                })
+                .collect();
+            let who = if users.is_empty() {
+                "Приложение".to_owned()
             } else {
-                &i.container
+                users.join(", ")
             };
-            let network = self.data.networks.iter().find(|n| n.name == i.network);
-            let path = match network.map(|n| (n.route.as_str(), n.upstream.as_str())) {
-                Some(("chain", outer)) => format!(
-                    "{who}  →  VPN {} (awg0)  →  uplink (hostif)  →  системная зона {}  →  Интернет",
-                    i.network, outer
-                ),
-                Some(("system", outer)) => format!(
-                    "{who}  →  системная зона {} (awg0)  →  Интернет",
-                    outer
-                ),
-                _ => format!("{who}  →  {}  →  Интернет", network_text(&i.network)),
+            let state = if net.up {
+                "поднята"
+            } else {
+                "опущена"
             };
             paths = paths.push(
                 row![
-                    text("●").size(14).color(self.color_of_instance(i)),
-                    text(path).size(14)
+                    text("●")
+                        .size(14)
+                        .color(net.color.unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88))),
+                    text(format!("{} ({state})", route_path(net, &who))).size(14)
                 ]
                 .spacing(8),
             );
-            if network.is_some_and(|n| n.route == "chain") {
+            if net.route == "chain" {
                 paths = paths.push(
                     text(
                         "Провайдер видит внешний VPN; внешний VPN — адрес внутреннего сервера; \
@@ -1111,6 +1132,30 @@ impl Panel {
                     .size(12),
                 );
             }
+        }
+        for i in self.data.instances.iter().filter(|i| {
+            !self
+                .data
+                .networks
+                .iter()
+                .any(|n| n.name == i.network && !n.route.is_empty())
+        }) {
+            let who = if i.container == "-" {
+                &i.id
+            } else {
+                &i.container
+            };
+            paths = paths.push(
+                row![
+                    text("●").size(14).color(self.color_of_instance(i)),
+                    text(format!("{who} → {} → Интернет", network_text(&i.network))).size(14)
+                ]
+                .spacing(8),
+            );
+        }
+        if !has_paths {
+            paths =
+                paths.push(text("появится после добавления сети или запуска контейнера").size(13));
         }
         let mut now = column![text("Сейчас").size(17)].spacing(4);
         if self.data.instances.is_empty() {
@@ -2011,6 +2056,9 @@ mod tests {
         assert_eq!(d.networks.len(), 3);
         assert!(d.networks[2].upstream.is_empty());
         assert!(d.networks[0].up && !d.networks[0].locked);
+        assert_eq!(d.networks[0].route, "chain");
+        assert!(route_path(&d.networks[0], "work")
+            .contains("work → VPN nl (awg0) → uplink (hostif) → системная зона corp"));
         assert!(d.networks[1].locked);
         assert_eq!(tunnel_text(&d.networks[0]), "поднята · туннель жив");
         assert_eq!(
