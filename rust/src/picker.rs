@@ -715,8 +715,8 @@ fn row(tag: &str, text: impl Into<String>) -> Row {
     (tag.to_owned(), text.into())
 }
 
-/// The network menu: every choice once "for this launch", then the same list
-/// again as "Всегда: …".
+/// The network menu: each choice once "for this launch", then bindable
+/// choices again as "Всегда: …". Full-host mode has nothing to bind.
 ///
 /// One dialog rather than two steps, because pinning is worth exactly one
 /// click. `current_container` is the label of the container that WOULD be used
@@ -748,6 +748,12 @@ pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Ve
 
     let mut menu = nets.clone();
     for (tag, text) in &nets {
+        // The full-host launch has no container/network binding to pin.
+        // Showing an "always" row here would promise a setting we cannot
+        // actually keep without silently reusing a different container.
+        if tag == launch::UNCONFINED {
+            continue;
+        }
         menu.push((format!("pin:{tag}"), format!("Всегда: {text}")));
     }
     menu.push(row(
@@ -1135,6 +1141,18 @@ fn ask_window(
 
     remember(&tools.state, ".last", key, &reply.net);
 
+    // This is a top-level launch mode, not a network to combine with the
+    // previous container. In particular, do not turn a stale container pin
+    // or its preset offers into a second, hidden choice.
+    if reply.net == launch::UNCONFINED {
+        let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(key));
+        let container = Container {
+            profile: crate::container::OPEN_RECORD.to_owned(),
+            ..Container::default()
+        };
+        return Some(Some((reply.net, container)));
+    }
+
     if !reply.pin_container && !memory.pinned_profile.is_empty() {
         let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(key));
     }
@@ -1200,6 +1218,9 @@ fn settle_network(
     shared: bool,
 ) -> Container {
     use crate::container::{Home, Network, Source};
+    if net == launch::UNCONFINED {
+        return container;
+    }
     if !always
         || container.is_throwaway_container()
         || (container.fs_sandbox && container.sandbox.is_empty())
@@ -1767,6 +1788,25 @@ pub fn main() -> ExitCode {
     );
     let container = match chosen {
         Some(always) => {
+            if zone_choice == launch::UNCONFINED && launch::has_display() {
+                // The person selected the top-level "no isolation" action.
+                // Older saved pins and autostart bindings still retain their
+                // container: changing them silently on upgrade would expose
+                // a previously isolated program to the real home.
+                let open = Container {
+                    profile: crate::container::OPEN_RECORD.to_owned(),
+                    ..Container::default()
+                };
+                return launch_asked(
+                    &tools,
+                    &key,
+                    &label,
+                    &zone_choice,
+                    &open,
+                    &args.cmd,
+                    &memory,
+                );
+            }
             let shared = shared_default(&memory, &container, reprofile.as_deref());
             settle_network(&tools, &key, container, &zone_choice, always, shared)
         }
@@ -2740,16 +2780,10 @@ fn launch_argv(
     // sandbox permissions are keyed by. (`docs/GOTCHAS.md` §6, §7)
     std::env::set_var(launch::ENV_APPID, key);
 
-    // "unconfined" (once "direct") is NOT special here any more, and must not
-    // become special again.
-    // The picker used to become the command itself for it, and everything
-    // `vpn-zone run` adds on the way was lost without a word: the container or
-    // sandbox that had just been chosen (or pinned, or set as the default), the
-    // compositor restriction and the registry record. "🔒 Своя песочница" with
-    // "Прямой интернет" started the program with the whole home in reach, and
-    // from inside a LOCKED zone the systemd-run it used went straight past the
-    // lock. `vpn-zone run unconfined` does all of it — delegation out of a zone
-    // (§13) and the lock included. (`docs/GOTCHAS.md` §10)
+    // Keep `vpn-zone run` in charge even without isolation: it records the
+    // launch and enforces the locked-zone guard. Saved pre-existing
+    // unconfined+container bindings retain their home on upgrade; an explicit
+    // top-level choice is normalized by the picker before it gets here.
     let zone = match crate::launch::network_name(zone_choice) {
         "offline" => {
             launch::ensure_offline_zone(&tools.state);
@@ -3494,7 +3528,7 @@ mod tests {
     // --- THE MENUS -----------------------------------------------------------
 
     #[test]
-    fn the_network_menu_offers_every_choice_twice_once_as_a_pin() {
+    fn the_network_menu_does_not_offer_an_illusory_full_host_pin() {
         let zone = |name: &str| MenuZone {
             name: name.to_owned(),
             ..MenuZone::default()
@@ -3508,7 +3542,6 @@ mod tests {
                 "host",
                 "de",
                 "nl",
-                "pin:unconfined",
                 "pin:offline",
                 "pin:host",
                 "pin:de",

@@ -429,7 +429,7 @@ fn the_default_container_is_not_bound_from_one_program() {
     home.zone("nl");
     home.profile("work");
     home.write("config/default-profile", "work");
-    home.answers(&["pin:unconfined"]);
+    home.answers(&["unconfined"]);
     let out = home.run(&pick("telegram"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(
@@ -438,7 +438,7 @@ fn the_default_container_is_not_bound_from_one_program() {
             "run",
             "unconfined",
             "--container",
-            "work",
+            "open",
             "--",
             "firefox",
             "%u"
@@ -840,6 +840,8 @@ fn the_unconfined_choice_goes_through_run_like_any_other_network() {
         vec![vec![
             "run",
             "unconfined",
+            "--container",
+            "open",
             "--",
             "/bin/sh",
             "-c",
@@ -850,9 +852,8 @@ fn the_unconfined_choice_goes_through_run_like_any_other_network() {
 }
 
 #[test]
-fn a_container_chosen_for_unconfined_is_not_dropped() {
-    // The loss of isolation this used to be: a sandbox set as the default (or
-    // pinned) plus "Прямой интернет" started the program with the whole home.
+fn explicit_no_isolation_ignores_the_previous_container_but_saved_bindings_survive() {
+    // A new explicit choice means exactly what the window says: no container.
     let home = Home::new("unconfined-sandbox");
     home.write("config/default-profile", "own");
     home.answers(&["unconfined"]);
@@ -863,8 +864,8 @@ fn a_container_chosen_for_unconfined_is_not_dropped() {
         [
             "run",
             "unconfined",
-            "--sandbox",
-            "app-firefox",
+            "--container",
+            "open",
             "--",
             "firefox",
             "%u"
@@ -1309,6 +1310,39 @@ fn the_launch_window_asks_both_questions_at_once() {
     assert_eq!(home.read("state/.pinned/firefox"), None);
     assert_eq!(home.read("state/.last/firefox").as_deref(), Some("nl"));
     assert_eq!(home.read("state/.pinnedprofile/firefox"), None);
+}
+
+#[test]
+fn the_window_no_isolation_action_clears_a_stale_container_choice() {
+    let home = Home::new("window-open-host");
+    home.profile("work");
+    home.write("state/.pinnedprofile/firefox", "work");
+    home.write("state/.lastprofile/firefox", "work");
+    // Even if a stale or faulty window sends its previous container, the
+    // picker treats an explicit full-host choice as one indivisible mode.
+    home.window(
+        "net\tunconfined\ncontainer\twork\npin-net\t1\npin-container\t1\n",
+        0,
+    );
+    let out = home.run(&pick("firefox"), &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(
+        home.launched()[0],
+        [
+            "run",
+            "unconfined",
+            "--container",
+            "open",
+            "--",
+            "firefox",
+            "%u"
+        ]
+    );
+    assert_eq!(home.read("state/.pinnedprofile/firefox"), None);
+    assert_eq!(
+        home.read("state/.lastprofile/firefox").as_deref(),
+        Some("work")
+    );
 }
 
 #[test]
