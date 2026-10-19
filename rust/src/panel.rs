@@ -11,7 +11,7 @@
 //! ```text
 //! container⇥<name>⇥<home: private|layer|main>⇥<network|ask>⇥<#rrggbb>
 //! path⇥<container>⇥<path>⇥<until: unix seconds, 0 for ever>
-//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>
+//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>⇥<upstream>⇥<route: chain|system|->
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
@@ -63,6 +63,25 @@ fn zones(state: &Path) -> Vec<String> {
         .collect();
     out.sort();
     out
+}
+
+/// The outer system zone, for either a tunnel chain (`[Chain]`) or a user
+/// zone that directly borrows a system tunnel (`[SystemZone]`).
+fn upstream(state: &Path, zone: &str) -> (String, &'static str) {
+    let raw = match std::fs::read(state.join(zone).join("config.conf")) {
+        Ok(raw) => raw,
+        Err(_) => return (String::new(), ""),
+    };
+    let ini = match crate::config::WgConfig::parse(&crate::cli::strip_cr(&raw)) {
+        Ok(ini) => ini,
+        Err(_) => return (String::new(), ""),
+    };
+    if let Some(chain) = crate::chain::ChainConfig::from_ini(&ini).ok().flatten() {
+        return (chain.via, "chain");
+    }
+    crate::sysuplink::SysUplinkConfig::from_ini(&ini)
+        .ok()
+        .map_or_else(|| (String::new(), ""), |s| (s.zone, "system"))
 }
 
 /// The panel's lines (see the module's words).
@@ -127,6 +146,7 @@ pub fn data(tools: &Tools) -> String {
     };
     for zone in zones(&tools.state) {
         let up = crate::cli::zone_pid(&tools.state, OsStr::new(&zone)).is_some();
+        let (upstream, route) = upstream(&tools.state, &zone);
         line(&[
             "network",
             &zone,
@@ -135,6 +155,8 @@ pub fn data(tools: &Tools) -> String {
             &color(&zone),
             locked(&zone),
             tunnel(&zone, up),
+            &upstream,
+            route,
         ]);
     }
     line(&[
@@ -145,6 +167,8 @@ pub fn data(tools: &Tools) -> String {
         &color(crate::launch::OFFLINE),
         locked(crate::launch::OFFLINE),
         "-",
+        "",
+        "",
     ]);
     {
         let up = crate::cli::zone_pid(&tools.state, OsStr::new(crate::launch::HOST)).is_some();
@@ -156,6 +180,8 @@ pub fn data(tools: &Tools) -> String {
             &color(crate::launch::HOST),
             locked(crate::launch::HOST),
             "-",
+            "",
+            "",
         ]);
     }
     line(&[
@@ -166,6 +192,8 @@ pub fn data(tools: &Tools) -> String {
         &color(crate::launch::UNCONFINED),
         "0",
         "-",
+        "",
+        "",
     ]);
     let procs = crate::owners::Procs::scan();
     for i in crate::instance::running(&tools.state) {

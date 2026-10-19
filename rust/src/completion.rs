@@ -209,6 +209,8 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
             "hermetic" if pos == 2 && prefix.starts_with('-') => strs(&mut out, &["--default"]),
             v if ZONE_VERBS.contains(&v) && pos == 2 => owned(&mut out, &snap.zones),
             "add" if pos == 3 => return vec![FILES.to_string()],
+            "add" if pos == 4 => strs(&mut out, &["--via"]),
+            "add" if pos == 5 && word(4) == "--via" => owned(&mut out, &snap.zones),
             "x11" if pos == 3 => strs(&mut out, &["on", "off"]),
             // The default first; `default` only where it follows something.
             "nix-daemon" if pos == 3 => strs(&mut out, &["off", "on"]),
@@ -660,6 +662,14 @@ mod tests {
             ["org.telegram.desktop"]
         );
         assert_eq!(complete(&["vpn-zone", "add", "name", ""], 4), [FILES]);
+        assert_eq!(
+            complete(&["vpn-zone", "add", "name", "inner.conf", ""], 5),
+            ["--via"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "add", "name", "inner.conf", "--via", ""], 6),
+            ["nl", "ru"]
+        );
     }
 
     #[test]

@@ -106,6 +106,7 @@ pub mod build;
 pub mod bus_filter;
 pub mod camask;
 pub mod camera;
+pub mod chain;
 pub mod cli;
 pub mod completion;
 pub mod config;

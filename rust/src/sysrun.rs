@@ -795,9 +795,13 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     if let Some(body) = data.strip_prefix(UP_MAGIC) {
         return serve_up(uid, &decode_up(body)?).map(|d| answer_done(&d));
     }
+    if let Some(body) = data.strip_prefix(CHAIN_UPLINK_MAGIC) {
+        let (zone, pid, interface) = decode_uplink(body, true)?;
+        return serve_uplink(sock, uid, &zone, pid, &interface, fds);
+    }
     if let Some(body) = data.strip_prefix(UPLINK_MAGIC) {
-        let (zone, pid) = decode_uplink(body)?;
-        return serve_uplink(sock, uid, &zone, pid, fds);
+        let (zone, pid, interface) = decode_uplink(body, false)?;
+        return serve_uplink(sock, uid, &zone, pid, &interface, fds);
     }
     if let Some(body) = data.strip_prefix(KEY_MAGIC) {
         let key = std::str::from_utf8(body).map_err(|_| "the key is not UTF-8")?;
@@ -814,9 +818,13 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
 // the zone letting go of it takes pasta down, and pasta ending is said on it.
 
 /// `VZP1\0`, the system zone, a NUL, the pid of the zone's app namespace, a
-/// NUL; two descriptors: that process's user and network namespaces. Answered
-/// `OK <resolvers>` once pasta runs, and `EXIT <code>` when it has ended.
+/// NUL; two descriptors: that process's user and network namespaces. VZP1 is
+/// deliberately unchanged for generation compatibility and always creates
+/// `awg0`. VZP2 adds a third, interface-name field for a chained tunnel's
+/// uplink. Answered `OK <resolvers>` once pasta runs, and `EXIT <code>` when
+/// it has ended.
 const UPLINK_MAGIC: &[u8] = b"VZP1\0";
+const CHAIN_UPLINK_MAGIC: &[u8] = b"VZP2\0";
 /// `VZK1\0` and a private key: which system zone holds it.
 const KEY_MAGIC: &[u8] = b"VZK1\0";
 /// How the module names pasta for the service.
@@ -835,16 +843,24 @@ const NS_GET_USERNS: libc::c_ulong = 0xb701;
 const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
 const NS_GET_OWNER_UID: libc::c_ulong = 0xb704;
 
-pub fn encode_uplink(zone: &str, pid: i32) -> Vec<u8> {
-    let mut out = UPLINK_MAGIC.to_vec();
+pub fn encode_uplink(zone: &str, pid: i32, interface: &str) -> Vec<u8> {
+    let mut out = if interface == crate::zone::TUN_IFACE {
+        UPLINK_MAGIC.to_vec()
+    } else {
+        CHAIN_UPLINK_MAGIC.to_vec()
+    };
     out.extend_from_slice(zone.as_bytes());
     out.push(0);
     out.extend_from_slice(pid.to_string().as_bytes());
     out.push(0);
+    if interface != crate::zone::TUN_IFACE {
+        out.extend_from_slice(interface.as_bytes());
+        out.push(0);
+    }
     out
 }
 
-pub fn decode_uplink(body: &[u8]) -> Result<(String, i32), String> {
+pub fn decode_uplink(body: &[u8], chained: bool) -> Result<(String, i32, String), String> {
     let mut parts = body.split(|&b| b == 0);
     let zone = std::str::from_utf8(parts.next().unwrap_or_default())
         .map_err(|_| "the zone's name is not UTF-8")?
@@ -856,7 +872,22 @@ pub fn decode_uplink(body: &[u8]) -> Result<(String, i32), String> {
         .and_then(|p| p.parse::<i32>().ok())
         .filter(|&p| p > 1)
         .ok_or("a bad pid in the request")?;
-    Ok((zone, pid))
+    let interface = if chained {
+        parts
+            .next()
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .filter(|p| !p.is_empty())
+            .ok_or("no interface in a chained uplink request")?
+            .to_owned()
+    } else {
+        crate::zone::TUN_IFACE.to_owned()
+    };
+    if !crate::hostif::valid_interface_name(&interface)
+        || ![crate::zone::TUN_IFACE, crate::zone::PASTA_IFACE].contains(&interface.as_str())
+    {
+        return Err("a bad interface in the uplink request".to_owned());
+    }
+    Ok((zone, pid, interface))
 }
 
 pub fn encode_key(key: &str) -> Vec<u8> {
@@ -878,7 +909,11 @@ pub fn request_key_owner(key: &str) -> Result<Option<String>, String> {
 /// process `pid` (the zone's app namespace). Returns the connection — keep it
 /// open for as long as the zone wants its way out, and read the end from it
 /// with [`wait_uplink`] — and the system zone's resolvers.
-pub fn request_uplink(zone: &str, pid: i32) -> Result<(OwnedFd, Vec<String>), String> {
+pub fn request_uplink(
+    zone: &str,
+    pid: i32,
+    interface: &str,
+) -> Result<(OwnedFd, Vec<String>), String> {
     let userns = File::open(format!("/proc/{pid}/ns/user"))
         .map_err(|e| format!("cannot open the zone's user namespace: {e}"))?;
     let netns = File::open(format!("/proc/{pid}/ns/net"))
@@ -891,7 +926,7 @@ pub fn request_uplink(zone: &str, pid: i32) -> Result<(OwnedFd, Vec<String>), St
     })?;
     sys::send_with_fds(
         sock.as_raw_fd(),
-        &encode_uplink(zone, pid),
+        &encode_uplink(zone, pid, interface),
         &[userns.as_raw_fd(), netns.as_raw_fd()],
     )
     .map_err(|e| format!("cannot send the request: {e}"))?;
@@ -922,11 +957,15 @@ pub fn uplink_main(args: &[OsString]) -> u8 {
             .and_then(|a| a.to_str())
             .and_then(|p| p.parse::<i32>().ok()),
     ) else {
-        eprintln!("usage: vpn-zone-core system-uplink <system zone> <pid>");
+        eprintln!("usage: vpn-zone-core system-uplink <system zone> <pid> [interface]");
         return 2;
     };
+    let interface = args
+        .get(2)
+        .and_then(|a| a.to_str())
+        .unwrap_or(crate::zone::TUN_IFACE);
     let mut out = io::stdout();
-    match request_uplink(zone, pid) {
+    match request_uplink(zone, pid, interface) {
         Ok((sock, resolvers)) => {
             let _ = writeln!(out, "OK {}", resolvers.join(" "));
             let _ = out.flush();
@@ -1044,6 +1083,7 @@ fn spawn_uplink_pasta(
     netns: &OwnedFd,
     pid: i32,
     user: &User,
+    interface: &str,
     pid_file: Option<&Path>,
     ipv6: bool,
 ) -> Result<std::process::Child, String> {
@@ -1076,7 +1116,7 @@ fn spawn_uplink_pasta(
         .arg(&user_path)
         .arg("--netns")
         .arg(&net_path)
-        .args(["--config-net", "-q", "-I", zone::TUN_IFACE, "-f"])
+        .args(["--config-net", "-q", "-I", interface, "-f"])
         // IPv6 when the system zone's network carries it (`system::IPV6_MARK`):
         // pasta's sockets are in that network, whose only way out is its
         // tunnel (or a plain zone's one interface), so IPv6 has nowhere else
@@ -1151,6 +1191,7 @@ fn serve_uplink(
     uid: u32,
     zone: &str,
     pid: i32,
+    interface: &str,
     mut fds: Vec<OwnedFd>,
 ) -> Result<Vec<u8>, String> {
     let user = zone_owner(uid)?;
@@ -1226,8 +1267,16 @@ fn serve_uplink(
     let pid_file =
         Path::new(system::PASTA_PID_DIR).join(format!("sysrun-{}.pid", std::process::id()));
     let ipv6 = system::run_dir(zone).join(system::IPV6_MARK).is_file();
-    let mut pasta =
-        spawn_uplink_pasta(&sysnet, &userns, &netns, pid, &user, Some(&pid_file), ipv6)?;
+    let mut pasta = spawn_uplink_pasta(
+        &sysnet,
+        &userns,
+        &netns,
+        pid,
+        &user,
+        interface,
+        Some(&pid_file),
+        ipv6,
+    )?;
     // The namespace pasta was started in: the one to follow if it changes.
     let mut serving = file_ns_id(&sysnet);
     drop(sysnet);
@@ -1326,7 +1375,8 @@ fn serve_uplink(
                     return Ok(answer_exit(1));
                 }
                 let ipv6 = system::run_dir(zone).join(system::IPV6_MARK).is_file();
-                match spawn_uplink_pasta(&file, &userns, &netns, pid, &user, None, ipv6) {
+                match spawn_uplink_pasta(&file, &userns, &netns, pid, &user, interface, None, ipv6)
+                {
                     Ok(child) => {
                         pasta = Some(child);
                         serving = Some(id);
@@ -2638,6 +2688,21 @@ mod tests {
             parse_users("alice\n\n bob \nroot\nBad\n../x\n_svc\nw.x-y\n"),
             ["alice", "bob", "root", "_svc", "w.x-y"]
         );
+    }
+
+    #[test]
+    fn an_uplink_request_names_the_interface_and_reads_the_old_shape() {
+        let new = encode_uplink("outer", 123, crate::zone::PASTA_IFACE);
+        assert_eq!(
+            decode_uplink(new.strip_prefix(CHAIN_UPLINK_MAGIC).unwrap(), true),
+            Ok(("outer".to_owned(), 123, "hostif".to_owned()))
+        );
+        let old = encode_uplink("outer", 123, crate::zone::TUN_IFACE);
+        assert_eq!(
+            decode_uplink(old.strip_prefix(UPLINK_MAGIC).unwrap(), false),
+            Ok(("outer".to_owned(), 123, "awg0".to_owned()))
+        );
+        assert!(decode_uplink(b"outer\0\x31\x32\x33\0eth0\0", true).is_err());
     }
 
     #[test]

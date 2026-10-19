@@ -78,9 +78,11 @@ Usage:
         table and lifts the restriction — the emergency key; `apply` puts it
         back.
 
-  vpn-zone-core system-uplink <system zone> <pid>
+  vpn-zone-core system-uplink <system zone> <pid> [interface]
         A user zone's way out through a system zone (docs/SYSTEM.md §7b),
-        asked for the namespaces of <pid> — what the zone's holder runs. Prints
+        asked for the namespaces of <pid> — what the zone's holder runs. The
+        optional interface is `hostif` for an inner tunnel's uplink (`awg0`
+        for a zone borrowing the system tunnel directly). Prints
         `OK <resolvers>` or `ERR <why>`, then holds the way out until pasta
         ends or this is stopped. Not meant to be run by hand.
 

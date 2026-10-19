@@ -222,7 +222,7 @@ pub(crate) const TUN_IFACE: &str = "awg0";
 /// because pasta otherwise copies the name of the host's outbound interface —
 /// and if the host is itself under a VPN and that interface is called `awg0`,
 /// the name would collide with the zone's own tunnel. (`docs/GOTCHAS.md` §2)
-const PASTA_IFACE: &str = "hostif";
+pub(crate) const PASTA_IFACE: &str = "hostif";
 /// wg-quick's default, used when the config carries no `MTU`.
 pub(crate) const DEFAULT_MTU: u32 = 1420;
 /// The IPv4 address and gateway a host-interface zone gets on its side of
@@ -4144,11 +4144,11 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // Read the config and resolve its endpoints HERE: this is the last place
     // with the host's network and the host's resolver. An offline zone has no
     // config at all — and no uplink, and no pasta.
-    let (cfg, config_seed) = if zone.is_offline() {
-        (None, 0)
+    let (cfg, config_seed, chain) = if zone.is_offline() {
+        (None, 0, None)
     } else {
-        let (backend, seed) = prepare(zone)?;
-        (Some(backend), seed)
+        let (backend, seed, chain) = prepare(zone)?;
+        (Some(backend), seed, chain)
     };
     // A host-interface zone's pasta is in the host's network, and so is the
     // pasta of the host's own: the host's own addresses, taken here where
@@ -4397,7 +4397,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             kill_and_reap(zone_pid);
             return Err(e);
         }
-        match start_system_uplink(&sys.zone, zone_pid) {
+        match start_system_uplink(&sys.zone, zone_pid, TUN_IFACE) {
             Ok((child, resolvers)) => {
                 PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
                 pasta = Some(child);
@@ -4463,45 +4463,73 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         drop(ready);
 
         let netns = format!("/proc/{pid}/ns/net");
-        // Its word that it is done (`PastaWord`), passed on to the uplink as
-        // `PASTA_DONE` (`wait_for_default_route`).
         let _ = fs::remove_file(zone.path(PASTA_DONE));
-        let word = PastaWord::new();
-        match word
-            .as_ref()
-            .map_err(|e| io::Error::other(format!("no directory for its pid file: {e}")))
-            .and_then(|word| {
-                Command::new(&zone.tools.pasta)
-                    .arg("--netns")
-                    .arg(&netns)
-                    .args(["--config-net", "-q", "-I", PASTA_IFACE, "-f"])
-                    .arg("-P")
-                    .arg(word.path())
-                    .args(PASTA_CLOSED)
-                    .spawn()
-            }) {
-            Ok(mut child) => {
-                PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
-                // Ended first: `wait_any` below sees it, and takes the zone
-                // down.
-                if word.as_ref().is_ok_and(|word| word.wait(&mut child)) {
+        if let Some(chain) = chain.as_ref() {
+            // The outer system zone's pasta is attached to the INNER tunnel's
+            // uplink, not to its app namespace. Thus only the encrypted
+            // transport of this tunnel crosses the outer one. The watcher is
+            // supervised exactly like local pasta: either hop ending takes
+            // the inner zone down, with no fallback to the host network.
+            match start_system_uplink(&chain.via, pid, PASTA_IFACE) {
+                Ok((child, _resolvers)) => {
+                    PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
+                    pasta = Some(child);
                     if let Err(e) = touch(&zone.path(PASTA_DONE)) {
                         eprintln!(
-                            "zone {}: cannot tell the uplink pasta is done: {e}",
+                            "zone {}: cannot tell the chained uplink it is ready: {e}",
                             zone.name()
                         );
                     }
                 }
-                pasta = Some(child);
+                Err(e) => {
+                    kill_and_reap(pid);
+                    kill_and_reap(zone_pid);
+                    return Err(format!(
+                        "no way out through the outer system zone {} — {e}",
+                        chain.via
+                    ));
+                }
             }
-            Err(e) => {
-                // The uplink waits for pasta's route as long as it takes:
-                // without pasta that is for ever, so the zone goes now.
-                kill_and_reap(pid);
-                kill_and_reap(zone_pid);
-                return Err(format!(
-                    "cannot start pasta ({e}) — the zone has no way out"
-                ));
+        } else {
+            // Its word that it is done (`PastaWord`), passed on to the uplink as
+            // `PASTA_DONE` (`wait_for_default_route`).
+            let word = PastaWord::new();
+            match word
+                .as_ref()
+                .map_err(|e| io::Error::other(format!("no directory for its pid file: {e}")))
+                .and_then(|word| {
+                    Command::new(&zone.tools.pasta)
+                        .arg("--netns")
+                        .arg(&netns)
+                        .args(["--config-net", "-q", "-I", PASTA_IFACE, "-f"])
+                        .arg("-P")
+                        .arg(word.path())
+                        .args(PASTA_CLOSED)
+                        .spawn()
+                }) {
+                Ok(mut child) => {
+                    PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
+                    // Ended first: `wait_any` below sees it, and takes the zone
+                    // down.
+                    if word.as_ref().is_ok_and(|word| word.wait(&mut child)) {
+                        if let Err(e) = touch(&zone.path(PASTA_DONE)) {
+                            eprintln!(
+                                "zone {}: cannot tell the uplink pasta is done: {e}",
+                                zone.name()
+                            );
+                        }
+                    }
+                    pasta = Some(child);
+                }
+                Err(e) => {
+                    // The uplink waits for pasta's route as long as it takes:
+                    // without pasta that is for ever, so the zone goes now.
+                    kill_and_reap(pid);
+                    kill_and_reap(zone_pid);
+                    return Err(format!(
+                        "cannot start pasta ({e}) — the zone has no way out"
+                    ));
+                }
             }
         }
     } else {
@@ -4554,12 +4582,51 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
 /// the note on `getaddrinfo` in the module docs. A name that does not resolve
 /// is fatal on purpose — the alternative is `wg setconf` retrying DNS for a
 /// minute and a half inside a namespace that has none, and then failing anyway.
-fn prepare(zone: &Zone) -> Result<(Backend, u64), String> {
+fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfig>), String> {
     let raw = fs::read(zone.path(CONFIG)).map_err(|e| format!("cannot read {CONFIG}: {e}"))?;
     // The config as this run reads it, for the zone's fingerprint
     // (`bridge::fingerprint`): the very bytes it comes up with.
     let seed = crate::bridge::config_seed(&raw);
-    prepare_backend(zone, &raw).map(|backend| (backend, seed))
+    let ini = WgConfig::parse(&raw).map_err(|e| format!("{CONFIG}: {e}"))?;
+    let chain = crate::chain::ChainConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
+    // Resolving an inner gateway with the host resolver would disclose the
+    // destination outside the chain before the chain exists. Until the system
+    // bridge grows a resolver request of its own, chained endpoints are
+    // literals: inconvenient, but honest and leak-free.
+    if chain.is_some() {
+        if openconnect::is_openconnect(&ini) {
+            let oc = OcConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
+            if oc.server_literal().is_none() {
+                return Err(format!(
+                    "{CONFIG}: a chained OpenConnect Server must be a literal IP address; resolving its name through the host would bypass the outer zone"
+                ));
+            }
+        } else {
+            for entry in ini.sections.iter().flat_map(|s| &s.entries) {
+                if entry.key.eq_ignore_ascii_case("Endpoint")
+                    && crate::config::Endpoint::parse(&entry.value)
+                        .is_some_and(|e| matches!(e.host, EndpointHost::Name(_)))
+                {
+                    return Err(format!(
+                        "{CONFIG}: chained Endpoint on line {} must be a literal IP address; resolving its name through the host would bypass the outer zone",
+                        entry.line
+                    ));
+                }
+            }
+        }
+    }
+    let backend = prepare_backend(zone, &raw)?;
+    if chain.is_some()
+        && matches!(
+            backend,
+            Backend::HostIf(_) | Backend::HostNet | Backend::SysZone(_)
+        )
+    {
+        return Err(format!(
+            "{CONFIG}: [Chain] is for a zone with its own WireGuard/AmneziaWG or OpenConnect tunnel"
+        ));
+    }
+    Ok((backend, seed, chain))
 }
 
 /// [`prepare`] of the config's bytes.
@@ -7139,11 +7206,16 @@ fn wait_for_pasta_link(zone: &Zone) -> Result<(), String> {
 /// (docs/SYSTEM.md §7b). The asking is done by our own binary, `system-uplink`,
 /// which then holds the connection for as long as it runs: its first line
 /// says whether the way out is there, and with it the system zone's resolvers.
-fn start_system_uplink(system: &str, zone_pid: i32) -> Result<(Child, Vec<String>), String> {
+fn start_system_uplink(
+    system: &str,
+    zone_pid: i32,
+    interface: &str,
+) -> Result<(Child, Vec<String>), String> {
     let mut child = Command::new("/proc/self/exe")
         .arg("system-uplink")
         .arg(system)
         .arg(zone_pid.to_string())
+        .arg(interface)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .spawn()

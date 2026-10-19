@@ -378,6 +378,24 @@ system zone they may not use is a refusal, never a second tunnel behind its back
 - **Not yet.** IPv6 through such a zone: pasta is started with `-4`, so the zone has no IPv6
   route and its programs fall back to IPv4 at once.
 
+### An inner tunnel through it
+
+`cellward add inner inner.conf --via outer` keeps the inner user zone's own
+tunnel and attaches the system zone's pasta to the inner **uplink** namespace
+as `hostif` (the direct borrowing above attaches it to the app namespace as
+`awg0`). The topology is therefore:
+
+```text
+container → inner awg0 → inner uplink/hostif → outer awg0 → Internet
+```
+
+Only the inner tunnel transport reaches `outer`; the container never gets an
+interface beside its inner `awg0`. The same watcher owns the bridge, so a dead
+outer hop ends the inner zone instead of rerouting it. The system request is
+`VZP2` and names the target interface; the existing `VZP1` shape stays intact
+and always means `awg0`, so a new user generation cannot silently attach a
+chain to the wrong interface through an old system generation.
+
 ## 7a. The TTY console
 
 `services.cellward.system.console = { enable = true; zone = "nl"; fallback = "direct"; }` —

@@ -30,6 +30,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   starts again. No timer. The setting is still accepted and shown.
 
 ### Added
+- **VPN-over-VPN chains**: `cellward add <inner> <config> --via <outer>` sends
+  the inner WireGuard/AmneziaWG/OpenConnect transport through an allowed
+  system zone. Either hop ending closes the inner zone; there is no host-route
+  fallback. The panel draws the route and status JSON exposes `upstream`.
+  Chained gateway addresses are literals for now, so setup cannot leak their
+  DNS lookup through the host.
 - **`cellward-oc-auth`: the OpenConnect login as its gateway asks it**
   (2026-09-30, docs/PERMISSIONS.md §11.17, step 1 of the step-by-step
   network): the one binary linked with libopenconnect. It reads a request

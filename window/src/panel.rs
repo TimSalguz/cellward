@@ -59,6 +59,11 @@ struct Net {
     /// What the tunnel watch last found: `alive`, `idle`, `dead`,
     /// `suspect`, `unknown`; `-` not looked at.
     tunnel: String,
+    /// The outer system zone carrying this network, if it has one.
+    upstream: String,
+    /// `chain`: this network has an inner tunnel; `system`: it borrows the
+    /// outer tunnel directly.
+    route: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -141,6 +146,21 @@ fn parse(text: &str) -> Data {
                     c.paths.push(((*path).to_owned(), num(until)));
                 }
             }
+            ["network", name, kind, up, color, locked, tunnel, upstream, route] => {
+                d.networks.push(Net {
+                    name: (*name).to_owned(),
+                    kind: (*kind).to_owned(),
+                    up: *up == "1",
+                    color: color_of(color),
+                    locked: *locked == "1",
+                    tunnel: (*tunnel).to_owned(),
+                    upstream: (*upstream).to_owned(),
+                    route: (*route).to_owned(),
+                })
+            }
+            // A panel backend from the previous generation, while a
+            // home-manager switch replaces the window and backend in either
+            // order. It has no chain field, but its networks must not vanish.
             ["network", name, kind, up, color, locked, tunnel] => d.networks.push(Net {
                 name: (*name).to_owned(),
                 kind: (*kind).to_owned(),
@@ -148,6 +168,8 @@ fn parse(text: &str) -> Data {
                 color: color_of(color),
                 locked: *locked == "1",
                 tunnel: (*tunnel).to_owned(),
+                upstream: String::new(),
+                route: String::new(),
             }),
             ["setting", name, value, source] => d.settings.push((
                 (*name).to_owned(),
@@ -1050,6 +1072,36 @@ impl Panel {
     }
 
     fn view_network(&self) -> Element<'_, Msg> {
+        let mut paths = column![text("Путь трафика").size(17)].spacing(4);
+        if self.data.instances.is_empty() {
+            paths = paths.push(text("появится, когда контейнер будет запущен").size(13));
+        }
+        for i in &self.data.instances {
+            let who = if i.container == "-" {
+                &i.id
+            } else {
+                &i.container
+            };
+            let network = self.data.networks.iter().find(|n| n.name == i.network);
+            let path = match network.map(|n| (n.route.as_str(), n.upstream.as_str())) {
+                Some(("chain", outer)) => format!(
+                    "{who}  →  VPN {} (awg0)  →  uplink (hostif)  →  системная зона {}  →  Интернет",
+                    i.network, outer
+                ),
+                Some(("system", outer)) => format!(
+                    "{who}  →  системная зона {} (awg0)  →  Интернет",
+                    outer
+                ),
+                _ => format!("{who}  →  {}  →  Интернет", network_text(&i.network)),
+            };
+            paths = paths.push(
+                row![
+                    text("●").size(14).color(self.color_of_instance(i)),
+                    text(path).size(14)
+                ]
+                .spacing(8),
+            );
+        }
         let mut now = column![text("Сейчас").size(17)].spacing(4);
         if self.data.instances.is_empty() {
             now = now.push(text("ни один контейнер сейчас не работает").size(13));
@@ -1080,6 +1132,7 @@ impl Panel {
             );
         }
         let page = column![
+            paths,
             now,
             self.view_flows(),
             self.view_programs(),
@@ -1639,7 +1692,7 @@ impl Panel {
                 "host" => "host (сеть хоста, без VPN)".to_owned(),
                 _ => n.name.clone(),
             };
-            let state = if n.kind == "offline" {
+            let mut state = if n.kind == "offline" {
                 if n.locked {
                     "заперта".to_owned()
                 } else {
@@ -1648,6 +1701,9 @@ impl Panel {
             } else {
                 tunnel_text(n)
             };
+            if !n.upstream.is_empty() {
+                state.push_str(&format!(" · через {}", n.upstream));
+            }
             let mut buttons = row![].spacing(6);
             if n.kind == "zone" || n.kind == "host" {
                 if n.up {
@@ -1915,9 +1971,9 @@ mod tests {
         path\twork\t/home/a/share\t0\n\
         path\tnobody\t/x\t0\n\
         container\tbank\tprivate\task\t#808080\n\
-        network\tnl\tzone\t1\t#3366ff\t0\talive\n\
-        network\toffline\toffline\t1\t#808080\t1\t-\n\
-        network\told\tzone\t1\t#808080\n\
+        network\tnl\tzone\t1\t#3366ff\t0\talive\tcorp\tchain\n\
+        network\toffline\toffline\t1\t#808080\t1\t-\t\t\n\
+        network\told\tzone\t1\t#808080\t0\tunknown\n\
         setting\tdefault\toffline\tdefault\n\
         pin\tfirefox\tFirefox\twork\n\
         instance\twork\twork\tnl\t1500\t3000\t1790000000\n\
@@ -1939,8 +1995,11 @@ mod tests {
             d.containers[0].color,
             Some(Color::from_rgb8(0x33, 0x66, 0xff))
         );
-        // A network line of the old shape is skipped, not misread.
-        assert_eq!(d.networks.len(), 2);
+        // The previous generation's seven-field network line stays readable
+        // while a home-manager switch replaces backend and window in either
+        // order; it simply has no upstream yet.
+        assert_eq!(d.networks.len(), 3);
+        assert!(d.networks[2].upstream.is_empty());
         assert!(d.networks[0].up && !d.networks[0].locked);
         assert!(d.networks[1].locked);
         assert_eq!(tunnel_text(&d.networks[0]), "поднята · туннель жив");

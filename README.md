@@ -413,10 +413,30 @@ Such a zone does **not** encrypt anything: `status --json` calls it
 `host-interface`. The zone's side of it is `10.255.255.253/30`, whatever the
 host's addresses are.
 
+### A VPN chain
+
+A user zone's own tunnel can use a system zone as its outer transport:
+
+```sh
+cellward add inner ./inner.conf --via outer
+```
+
+The path is `program → VPN inner → system zone outer → Internet`. The inner
+tunnel's encrypted transport, rather than its applications, is attached to
+`outer`; losing either hop takes `inner` down, with no fallback to the host
+network. The cellward window shows this path on the Network tab, and
+`status --json` exposes the outer hop as `upstream`.
+
+For now the outer hop must be a system zone and the inner VPN server must be
+a literal IPv4/IPv6 address: resolving its name through the host before the
+chain exists would leak around `outer`. A SOCKS/HTTP hop still depends on the
+planned proxy-zone backend.
+
 Then just launch programs from the launcher. The same from the terminal:
 
 ```sh
 cellward add <zone> <file.conf>                # a zone from an AmneziaWG/WireGuard/OpenConnect config
+cellward add <zone> <file.conf> --via <system zone>  # an inner VPN through an outer one
 cellward add <zone> --system <system zone>     # a zone through a system zone's tunnel
 cellward list                                  # zones and their state
 cellward up <zone> / down <zone>
