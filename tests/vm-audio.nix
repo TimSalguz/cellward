@@ -26,6 +26,9 @@
 #   ./vm-audio-driver/bin/nixos-test-driver
 {
   system ? builtins.currentSystem,
+  # Supply an installed Helium store path with --arg helium /nix/store/… .
+  # It is intentionally optional: Helium is not in this test's pinned nixpkgs.
+  helium ? null,
 }:
 
 let
@@ -35,6 +38,19 @@ let
     config = { };
     overlays = [ ];
   };
+
+  testVideo = pkgs.runCommand "cellward-audio-test-video" { nativeBuildInputs = [ pkgs.ffmpeg ]; } ''
+    mkdir -p "$out"
+    ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=black:s=16x16:r=1 \
+      -f lavfi -i sine=frequency=440:sample_rate=48000 -t 30 \
+      -filter:a volume=0.01 -c:v libvpx -b:v 10k -c:a libopus -b:a 16k \
+      "$out/tone.webm"
+  '';
+  testPage = pkgs.writeTextDir "index.html" ''
+    <!doctype html><meta charset="utf-8">
+    <video autoplay loop controls src="${testVideo}/tone.webm"></video>
+  '';
+  heliumUrl = if helium == null then "" else "file://${testPage}/index.html";
 
   # A null device as the daemon itself makes it: owned by no client.
   # `priority`: which one WirePlumber takes as the default.
@@ -84,6 +100,7 @@ let
         services.pipewire = {
           enable = true;
           pulse.enable = true;
+          alsa.enable = true;
           wireplumber.enable = true;
           extraConfig.pipewire."90-vm-devices" = {
             "context.objects" = [
@@ -108,7 +125,10 @@ let
         home-manager.useGlobalPkgs = true;
         home-manager.useUserPackages = true;
         home-manager.users.alice.home.stateVersion = "26.05";
-        virtualisation.memorySize = 1536;
+        environment.systemPackages =
+          [ pkgs.pulseaudio pkgs.alsa-utils ]
+          ++ pkgs.lib.optionals (helium != null) [ helium pkgs.sway ];
+        virtualisation.memorySize = if helium == null then 1536 else 3072;
       };
 
     testScript = ''
@@ -294,6 +314,94 @@ let
           objs = host_dump()
           assert "vm-sink" in nodes(objs), "the zone destroyed the sink"
           assert not linked(objs, "vm-sink", "vz-player"), "the zone made a link"
+
+      with subtest("a real PulseAudio playback client in a container reaches the sink"):
+          alice(
+              "systemd-run --user --collect --unit=vz-pulse-play "
+              "cellward run offline -- "
+              "pacat --raw --format=s16le --rate=48000 --channels=2 /dev/zero"
+          )
+          try:
+              machine.wait_until_succeeds(
+                  "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 pactl list sink-inputs' "
+                  "| grep -q pacat",
+                  timeout=30,
+              )
+          except Exception:
+              print("pulse unit", alice_any("systemctl --user --no-pager status vz-pulse-play.service"))
+              print("sink inputs", alice_any("pactl list sink-inputs"))
+              print("pulse in container", alice_any("cellward run offline -- pactl info"))
+              logs()
+              raise
+          alice("systemctl --user stop vz-pulse-play.service || true")
+
+      with subtest("an ALSA PipeWire playback client in a container reaches the sink"):
+          alice(
+              "systemd-run --user --unit=vz-alsa-play cellward run offline -- "
+              "aplay -q -f S16_LE -r 48000 -c 2 /dev/zero"
+          )
+          try:
+              machine.wait_until_succeeds(
+                  "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 pactl list sink-inputs' "
+                  "| grep -q aplay",
+                  timeout=20,
+              )
+          except Exception:
+              print("alsa unit", alice_any("systemctl --user --no-pager status vz-alsa-play.service"))
+              print("alsa logs", alice_any("journalctl --user --no-pager -u vz-alsa-play.service -n 80"))
+              logs()
+              raise
+          finally:
+              alice("systemctl --user stop vz-alsa-play.service || true")
+
+      if ${if helium == null then "False" else "True"}:
+          with subtest("Helium plays a local video through the isolated audio socket"):
+              alice(
+                  "systemd-run --user --unit=vz-sway "
+                  "--setenv=XDG_RUNTIME_DIR=/run/user/1000 "
+                  "--setenv=WLR_BACKENDS=headless --setenv=WLR_HEADLESS_OUTPUTS=1 "
+                  "--setenv=WLR_RENDERER=pixman --setenv=WLR_LIBINPUT_NO_DEVICES=1 "
+                  "sway --unsupported-gpu -c /dev/null"
+              )
+              try:
+                  machine.wait_until_succeeds(
+                      "find /run/user/1000 -maxdepth 1 -type s -name 'wayland-*' | grep -q .",
+                      timeout=30,
+                  )
+              except Exception:
+                  print("sway unit", alice_any("systemctl --user --no-pager status vz-sway.service"))
+                  print("sway logs", alice_any("journalctl --user --no-pager -u vz-sway.service -n 100"))
+                  raise
+              wayland = machine.succeed(
+                  "find /run/user/1000 -maxdepth 1 -type s -name 'wayland-*' -printf '%f\\n' | head -1"
+              ).strip()
+              before = {line.split()[0] for line in alice("pactl list sink-inputs short").splitlines()}
+              try:
+                  alice(
+                      "systemd-run --user --unit=vz-helium "
+                      "--setenv=XDG_RUNTIME_DIR=/run/user/1000 "
+                      f"--setenv=WAYLAND_DISPLAY={wayland} "
+                      "cellward run offline -- helium --ozone-platform=wayland "
+                      "--disable-gpu --no-first-run --no-default-browser-check "
+                      "--autoplay-policy=no-user-gesture-required "
+                      "--enable-logging=stderr --vmodule='*audio*=2' "
+                      "--user-data-dir=/tmp/cw-helium-audio "
+                      "${heliumUrl}"
+                  )
+                  for _ in range(45):
+                      after = {line.split()[0] for line in alice("pactl list sink-inputs short").splitlines()}
+                      if after - before:
+                          break
+                      machine.sleep(1)
+                  else:
+                      print("helium unit", alice_any("systemctl --user --no-pager status vz-helium.service"))
+                      print("helium logs", alice_any("journalctl --user --no-pager -u vz-helium.service -n 150"))
+                      print("sway logs", alice_any("journalctl --user --no-pager -u vz-sway.service -n 100"))
+                      print("sink inputs", alice_any("pactl list sink-inputs"))
+                      logs()
+                      raise Exception("Helium did not create a playback stream")
+              finally:
+                  alice("systemctl --user stop vz-helium.service vz-sway.service || true")
 
       with subtest("a sink's monitor records nothing"):
           out = zone(
