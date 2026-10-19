@@ -11,7 +11,7 @@
 //! ```text
 //! container⇥<name>⇥<home: private|layer|main>⇥<network|ask>⇥<#rrggbb>
 //! path⇥<container>⇥<path>⇥<until: unix seconds, 0 for ever>
-//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>⇥<upstream>⇥<route: chain|system|->⇥<published: 0|1>
+//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>⇥<upstream>⇥<route: chain|chain-user|system|->⇥<published: 0|1>
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
@@ -65,8 +65,7 @@ fn zones(state: &Path) -> Vec<String> {
     out
 }
 
-/// The outer system zone, for either a tunnel chain (`[Chain]`) or a user
-/// zone that directly borrows a system tunnel (`[SystemZone]`).
+/// The immediate upstream, system or user, of this zone.
 fn upstream(state: &Path, zone: &str) -> (String, &'static str) {
     let raw = match crate::chain::read_zone_config(state, zone) {
         Ok(raw) => raw,
@@ -77,7 +76,7 @@ fn upstream(state: &Path, zone: &str) -> (String, &'static str) {
         Err(_) => return (String::new(), ""),
     };
     if let Some(chain) = crate::chain::ChainConfig::from_ini(&ini).ok().flatten() {
-        return (chain.via, "chain");
+        return (chain.via, if chain.user { "chain-user" } else { "chain" });
     }
     crate::sysuplink::SysUplinkConfig::from_ini(&ini)
         .ok()

@@ -1,9 +1,9 @@
 //! A tunnel whose transport goes through another network.
 //!
-//! The first supported upstream is a system zone: its privileged bridge starts
-//! pasta inside that zone and attaches it to the inner tunnel's uplink
-//! namespace.  The inner tunnel therefore sees the outer tunnel as its only
-//! route; if either hop dies, the inner zone dies too.
+//! The upstream is a system VPN or another user VPN route. The broker starts
+//! pasta inside its network namespace and attaches it to the inner tunnel's
+//! uplink namespace. Every user hop can itself have an upstream; the inner
+//! tunnel sees the preceding hop as its only route, never the host network.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -51,7 +51,13 @@ pub fn validate_node(ini: &WgConfig) -> Result<(), String> {
     }
     if openconnect::is_openconnect(ini) {
         OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
-    } else if ini.interface().and_then(|i| i.get("PrivateKey")).is_none() {
+    } else if ini
+        .interface()
+        .and_then(|i| i.get("PrivateKey"))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
         return Err("a pooled WireGuard node needs PrivateKey".to_owned());
     }
     Ok(())
@@ -126,41 +132,51 @@ const ROUTES_ENABLED: &str = ".routes-enabled";
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Route {
     pub zone: String,
-    pub via: Option<String>,
+    pub prefix: Vec<String>,
+    /// One edge per prefix: false is a system VPN, true a user VPN route.
+    pub user_edges: Vec<bool>,
     pub borrowed: bool,
 }
 
 impl Route {
     fn parse(line: &str) -> Result<Self, String> {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        let route = match parts.as_slice() {
-            [zone] => Self {
-                zone: (*zone).to_owned(),
-                via: None,
-                borrowed: false,
-            },
-            [via, ">", zone] => Self {
-                zone: (*zone).to_owned(),
-                via: Some((*via).to_owned()),
-                borrowed: false,
-            },
-            [via, "=>", zone] => Self {
-                zone: (*zone).to_owned(),
-                via: Some((*via).to_owned()),
-                borrowed: true,
-            },
-            _ => {
-                return Err(format!(
-                    "invalid route {line:?}: use 'zone', 'outer > inner' or 'system => user-zone'"
-                ))
-            }
+        let borrowed = parts.len() == 3 && parts[1] == "=>";
+        if parts.is_empty()
+            || parts.len() % 2 == 0
+            || (!borrowed
+                && parts
+                    .iter()
+                    .skip(1)
+                    .step_by(2)
+                    .any(|op| ![">", ">>"].contains(op)))
+            || (!borrowed && parts.iter().skip(3).step_by(2).any(|op| *op != ">>"))
+        {
+            return Err(format!("invalid route {line:?}: use 'zone', 'system > user', 'user >> user' or 'system => user-zone'"));
+        }
+        let route = Self {
+            zone: parts[parts.len() - 1].to_owned(),
+            prefix: parts
+                .iter()
+                .step_by(2)
+                .take(parts.len() / 2)
+                .map(|s| (*s).to_owned())
+                .collect(),
+            user_edges: parts
+                .iter()
+                .skip(1)
+                .step_by(2)
+                .map(|op| *op == ">>")
+                .collect(),
+            borrowed,
         };
         if !crate::cli::safe_zone_name(std::ffi::OsStr::new(&route.zone))
             || route
-                .via
-                .as_deref()
-                .is_some_and(|v| crate::system::check_name(v).is_err())
-            || route.via.as_deref() == Some(route.zone.as_str())
+                .prefix
+                .iter()
+                .any(|v| !crate::cli::safe_zone_name(std::ffi::OsStr::new(v)))
+            || route.prefix.iter().any(|v| v == &route.zone)
+            || route.prefix.iter().collect::<BTreeSet<_>>().len() != route.prefix.len()
         {
             return Err(format!("invalid route {line:?}"));
         }
@@ -168,10 +184,21 @@ impl Route {
     }
 
     pub fn text(&self) -> String {
-        match &self.via {
-            Some(via) if self.borrowed => format!("{via} => {}", self.zone),
-            Some(via) => format!("{via} > {}", self.zone),
-            None => self.zone.clone(),
+        if self.borrowed {
+            format!("{} => {}", self.prefix[0], self.zone)
+        } else if self.prefix.is_empty() {
+            self.zone.clone()
+        } else {
+            let mut path = self.prefix[0].clone();
+            for (index, user) in self.user_edges.iter().enumerate() {
+                path.push_str(if *user { " >> " } else { " > " });
+                path.push_str(if index + 1 == self.prefix.len() {
+                    &self.zone
+                } else {
+                    &self.prefix[index + 1]
+                });
+            }
+            path
         }
     }
 
@@ -187,9 +214,54 @@ impl Route {
         }
         Ok(Self {
             zone: zone.to_owned(),
-            via: chain.map(|c| c.via).or_else(|| system.clone()),
+            user_edges: chain
+                .as_ref()
+                .map(|c| vec![c.user])
+                .or_else(|| system.as_ref().map(|_| vec![false]))
+                .unwrap_or_default(),
+            prefix: chain
+                .map(|c| vec![c.via])
+                .or_else(|| system.clone().map(|s| vec![s]))
+                .unwrap_or_default(),
             borrowed: system.is_some(),
         })
+    }
+
+    pub fn from_ini_in(state: &Path, zone: &str, ini: &WgConfig) -> Result<Self, String> {
+        Self::from_ini_in_inner(state, zone, ini, &mut BTreeSet::new(), &mut BTreeSet::new())
+    }
+
+    fn from_ini_in_inner(
+        state: &Path,
+        zone: &str,
+        ini: &WgConfig,
+        seen: &mut BTreeSet<String>,
+        identities: &mut BTreeSet<TunnelIdentity>,
+    ) -> Result<Self, String> {
+        if !seen.insert(zone.to_owned()) {
+            return Err(format!("cycle in VPN route at {zone}"));
+        }
+        if identity(ini)?.is_some_and(|id| !identities.insert(id)) {
+            return Err(format!("the same VPN appears twice in the route to {zone}"));
+        }
+        let mut route = Self::from_ini(zone, ini)?;
+        if let Some(chain) = ChainConfig::from_ini(ini)?.filter(|c| c.user) {
+            let raw = read_zone_config(state, &chain.via)?;
+            let upstream = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+            if identity(&upstream)?.is_none() {
+                return Err(format!(
+                    "upstream user zone {} has no VPN tunnel",
+                    chain.via
+                ));
+            }
+            let parent = Self::from_ini_in_inner(state, &chain.via, &upstream, seen, identities)?;
+            route.prefix = parent.prefix;
+            route.prefix.push(parent.zone);
+            route.user_edges = parent.user_edges;
+            route.user_edges.push(true);
+        }
+        seen.remove(zone);
+        Ok(route)
     }
 }
 
@@ -225,20 +297,73 @@ pub fn routes(state: &Path) -> Result<Option<BTreeSet<Route>>, String> {
 pub fn published(state: &Path, zone: &str, ini: &WgConfig) -> Result<bool, String> {
     match routes(state)? {
         None => Ok(true),
-        Some(allowed) => Ok(allowed.contains(&Route::from_ini(zone, ini)?)),
+        Some(allowed) => Ok(allowed.contains(&Route::from_ini_in(state, zone, ini)?)),
     }
 }
 
 pub fn published_zone(state: &Path, zone: &str) -> Result<bool, String> {
-    if routes(state)?.is_none() {
-        return Ok(true);
-    }
+    let strict = routes(state)?.is_some();
     let path = state.join(zone).join("config.conf");
     let raw = read_zone_config(state, zone)
         .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
     let ini =
         WgConfig::parse(&raw).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
-    published(state, zone, &ini)
+    if strict && !published(state, zone, &ini)? {
+        return Ok(false);
+    }
+    user_upstreams(state, zone, &ini)?;
+    Ok(true)
+}
+
+/// Every user-owned prefix required by a route, from the outermost one inward.
+/// A missing, unpublished, non-tunnel or cyclic prefix is a refusal before
+/// any new inner transport can connect.
+pub fn user_upstreams(state: &Path, zone: &str, ini: &WgConfig) -> Result<Vec<String>, String> {
+    let mut seen = BTreeSet::new();
+    let mut current = zone.to_owned();
+    let mut config = ini.clone();
+    let mut reverse = Vec::new();
+    loop {
+        if !seen.insert(current.clone()) {
+            return Err(format!("cycle in VPN route at {current}"));
+        }
+        let Some(chain) = ChainConfig::from_ini(&config)?.filter(|c| c.user) else {
+            break;
+        };
+        let raw = read_zone_config(state, &chain.via)?;
+        let upstream = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+        if identity(&upstream)?.is_none() {
+            return Err(format!(
+                "upstream user zone {} has no VPN tunnel",
+                chain.via
+            ));
+        }
+        if !published(state, &chain.via, &upstream)? {
+            return Err(format!(
+                "upstream user route {} is not published",
+                chain.via
+            ));
+        }
+        reverse.push(chain.via.clone());
+        current = chain.via;
+        config = upstream;
+    }
+    reverse.reverse();
+    Ok(reverse)
+}
+
+/// Recheck the actual immediate source after systemd reported it ready. The
+/// route may have been edited while an outer zone was starting; a plain zone
+/// must never be accepted as the carrier of an inner VPN.
+pub fn validate_user_source(state: &Path, zone: &str) -> Result<(), String> {
+    let raw = read_zone_config(state, zone)?;
+    let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+    if identity(&ini)?.is_none() || !published_zone(state, zone)? {
+        return Err(format!(
+            "upstream user route {zone} is not a published VPN tunnel"
+        ));
+    }
+    Ok(())
 }
 
 /// Atomic rewrite of the user's publication list. `routes enable` first
@@ -281,8 +406,10 @@ pub fn write_routes(state: &Path, allowed: &BTreeSet<Route>) -> Result<(), Strin
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainConfig {
-    /// The system zone carrying the inner tunnel's encrypted transport.
+    /// The zone carrying the inner tunnel's encrypted transport.
     pub via: String,
+    /// True for a user VPN route; false for a system VPN zone.
+    pub user: bool,
 }
 
 impl ChainConfig {
@@ -290,19 +417,47 @@ impl ChainConfig {
         let Some(section) = ini.section(SECTION) else {
             return Ok(None);
         };
-        let via = section
-            .get("Via")
+        if ini
+            .sections
+            .iter()
+            .filter(|s| s.name.eq_ignore_ascii_case(SECTION))
+            .count()
+            != 1
+        {
+            return Err(format!("[{SECTION}] may occur only once"));
+        }
+        let system = section.get("Via").map(str::trim).filter(|s| !s.is_empty());
+        let user = section
+            .get("ViaUser")
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if system.is_some() == user.is_some() || section.entries.len() != 1 {
+            return Err(format!("[{SECTION}] needs exactly one Via or ViaUser"));
+        }
+        let via = system
+            .or(user)
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| format!("[{SECTION}] needs Via = <system zone>"))?;
-        crate::system::check_name(via)?;
+            .ok_or_else(|| format!("[{SECTION}] needs Via or ViaUser"))?;
+        if user.is_some() {
+            if !crate::cli::safe_zone_name(std::ffi::OsStr::new(via)) {
+                return Err("ViaUser must name a user zone".to_owned());
+            }
+        } else {
+            crate::system::check_name(via)?;
+        }
         Ok(Some(Self {
             via: via.to_owned(),
+            user: user.is_some(),
         }))
     }
 
     pub fn text(&self) -> String {
-        format!("[{SECTION}]\nVia = {}\n", self.via)
+        format!(
+            "[{SECTION}]\n{} = {}\n",
+            if self.user { "ViaUser" } else { "Via" },
+            self.via
+        )
     }
 
     /// Nothing used to establish an inner tunnel may reach the host network.
@@ -319,16 +474,36 @@ impl ChainConfig {
             }
         } else {
             for entry in ini.sections.iter().flat_map(|s| &s.entries) {
-                if entry.key.eq_ignore_ascii_case("Endpoint")
-                    && Endpoint::parse(&entry.value)
-                        .is_some_and(|e| matches!(e.host, EndpointHost::Name(_)))
-                {
-                    return Err(format!(
-                        "chained Endpoint on line {} must be a literal IP address; resolving its name through the host would bypass the outer zone",
-                        entry.line
-                    ));
+                if entry.key.eq_ignore_ascii_case("Endpoint") {
+                    let endpoint = Endpoint::parse(&entry.value).ok_or_else(|| {
+                        format!("invalid chained Endpoint on line {}", entry.line)
+                    })?;
+                    if matches!(endpoint.host, EndpointHost::Name(_)) {
+                        return Err(format!(
+                            "chained Endpoint on line {} must be a literal IP address; resolving its name through the host would bypass the outer zone",
+                            entry.line
+                        ));
+                    }
                 }
             }
+        }
+        Ok(())
+    }
+
+    pub fn validate_user_ipv4_transport(ini: &WgConfig) -> Result<(), String> {
+        if openconnect::is_openconnect(ini) {
+            let oc = OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
+            if oc.server_literal().is_some_and(|addr| addr.is_ipv6()) {
+                return Err(
+                    "a user-to-user chain currently needs an IPv4 OpenConnect Server".to_owned(),
+                );
+            }
+        } else if ini.sections.iter().flat_map(|s| &s.entries).any(|e| {
+            e.key.eq_ignore_ascii_case("Endpoint")
+                && Endpoint::parse(&e.value)
+                    .is_some_and(|ep| matches!(ep.host, EndpointHost::V6(_)))
+        }) {
+            return Err("a user-to-user chain currently needs IPv4 tunnel Endpoints".to_owned());
         }
         Ok(())
     }
@@ -366,13 +541,19 @@ impl ChainConfig {
 /// no WireGuard key, so its address and port are the strongest local identity
 /// available here. Different accounts on one gateway intentionally conflict:
 /// either direct connection would still reveal that gateway to the provider.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum TunnelIdentity {
     WireGuard(String),
     OpenConnect(String, u16),
 }
 
 fn identity(ini: &WgConfig) -> Result<Option<TunnelIdentity>, String> {
+    if crate::hostif::is_host_interface(ini)
+        || crate::hostif::is_host_network(ini)
+        || crate::sysuplink::is_system_zone(ini)
+    {
+        return Ok(None);
+    }
     if openconnect::is_openconnect(ini) {
         let oc = OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
         let server = oc
@@ -386,6 +567,8 @@ fn identity(ini: &WgConfig) -> Result<Option<TunnelIdentity>, String> {
     Ok(ini
         .interface()
         .and_then(|section| section.get("PrivateKey"))
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
         .map(|key| TunnelIdentity::WireGuard(key.trim().to_owned())))
 }
 
@@ -410,12 +593,12 @@ pub fn refuse_user_shortcut_with(
         return Ok(());
     };
     if let Some(allowed) = policy {
-        if !allowed.contains(&Route::from_ini(name, ini)?) {
+        if !allowed.contains(&Route::from_ini_in(state, name, ini)?) {
             // A node in the pool, not a published route. It cannot dial yet.
             return Ok(());
         }
     }
-    let chained = ChainConfig::from_ini(ini)?.is_some();
+    let ours_route = Route::from_ini_in(state, name, ini)?;
     let entries = match fs::read_dir(state) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -439,13 +622,17 @@ pub fn refuse_user_shortcut_with(
         let peer =
             WgConfig::parse(&raw).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
         if let Some(allowed) = policy {
-            if !allowed.contains(&Route::from_ini(other_name, &peer)?) {
+            if !allowed.contains(&Route::from_ini_in(state, other_name, &peer)?) {
                 continue;
             }
         }
         if identity(&peer).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?
             == Some(ours.clone())
-            && chained != ChainConfig::from_ini(&peer)?.is_some()
+            && {
+                let peer_route = Route::from_ini_in(state, other_name, &peer)?;
+                ours_route.prefix != peer_route.prefix
+                    || ours_route.user_edges != peer_route.user_edges
+            }
         {
             return Err(format!(
                 "the same VPN is also user zone {other_name} with a different route; \
@@ -686,6 +873,136 @@ mod tests {
             b"[Node]\nName = ch\n[Chain]\nVia = nl\nEndpoint = 192.0.2.1:1\n"
         )
         .is_err());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn three_hops_need_exact_publication_of_every_user_prefix() {
+        let state = state("three-hops");
+        installed(
+            &state,
+            "middle",
+            "[Interface]\nPrivateKey = middle\n[Chain]\nVia = nl\n",
+        );
+        installed(
+            &state,
+            "last",
+            "[Interface]\nPrivateKey = last\n[Chain]\nViaUser = middle\n",
+        );
+        let raw = read_zone_config(&state, "last").unwrap();
+        let ini = WgConfig::parse(&raw).unwrap();
+        let route = Route::from_ini_in(&state, "last", &ini).unwrap();
+        assert_eq!(route.text(), "nl > middle >> last");
+        let mut allow = BTreeSet::new();
+        allow.insert(route);
+        write_routes(&state, &allow).unwrap();
+        assert!(user_upstreams(&state, "last", &ini).is_err());
+        allow.insert(Route::parse("nl > middle").unwrap());
+        write_routes(&state, &allow).unwrap();
+        assert_eq!(
+            user_upstreams(&state, "last", &ini).unwrap(),
+            vec!["middle"]
+        );
+        assert!(published(&state, "last", &ini).unwrap());
+        assert!(!allow.contains(&Route::parse("last").unwrap()));
+        assert!(Route::parse("nl > middle >> last").is_ok());
+        assert!(Route::parse("nl > middle > last").is_err());
+        assert!(Route::parse("nl > middle >> nl").is_err());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn user_route_cycles_are_refused_before_transport_starts() {
+        let state = state("cycle");
+        installed(
+            &state,
+            "a",
+            "[Interface]\nPrivateKey = a\n[Chain]\nViaUser = b\n",
+        );
+        installed(
+            &state,
+            "b",
+            "[Interface]\nPrivateKey = b\n[Chain]\nViaUser = a\n",
+        );
+        let ini = WgConfig::parse(&read_zone_config(&state, "a").unwrap()).unwrap();
+        assert!(Route::from_ini_in(&state, "a", &ini)
+            .unwrap_err()
+            .contains("cycle"));
+        assert!(user_upstreams(&state, "a", &ini).is_err());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn one_vpn_identity_cannot_repeat_inside_a_chain() {
+        let state = state("repeat-key");
+        installed(&state, "outer", "[Interface]\nPrivateKey = shared\n");
+        installed(
+            &state,
+            "inner",
+            "[Interface]\nPrivateKey = shared\n[Chain]\nViaUser = outer\n",
+        );
+        let ini = WgConfig::parse(&read_zone_config(&state, "inner").unwrap()).unwrap();
+        assert!(Route::from_ini_in(&state, "inner", &ini)
+            .unwrap_err()
+            .contains("twice"));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn user_routes_can_start_from_a_user_vpn_without_a_system_hop() {
+        let state = state("user-root");
+        installed(&state, "home-vpn-long", "[Interface]\nPrivateKey = home\n");
+        installed(
+            &state,
+            "office",
+            "[Interface]\nPrivateKey = office\n[Chain]\nViaUser = home-vpn-long\n",
+        );
+        let ini = WgConfig::parse(&read_zone_config(&state, "office").unwrap()).unwrap();
+        assert_eq!(
+            Route::from_ini_in(&state, "office", &ini).unwrap().text(),
+            "home-vpn-long >> office"
+        );
+        let mut allow = BTreeSet::new();
+        allow.insert(Route::parse("home-vpn-long").unwrap());
+        allow.insert(Route::parse("home-vpn-long >> office").unwrap());
+        write_routes(&state, &allow).unwrap();
+        assert_eq!(
+            user_upstreams(&state, "office", &ini).unwrap(),
+            vec!["home-vpn-long"]
+        );
+        let ipv6 = WgConfig::parse(b"[Peer]\nEndpoint = [2001:db8::1]:51820\n").unwrap();
+        assert!(ChainConfig::validate_user_ipv4_transport(&ipv6).is_err());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn changing_a_system_hop_to_a_user_hop_does_not_inherit_publication() {
+        let state = state("hop-kind");
+        installed(&state, "nl", "[Interface]\nPrivateKey = outer\n");
+        let ini =
+            WgConfig::parse(b"[Interface]\nPrivateKey = inner\n[Chain]\nViaUser = nl\n").unwrap();
+        let mut allow = BTreeSet::new();
+        allow.insert(Route::parse("nl > inner").unwrap());
+        allow.insert(Route::parse("nl").unwrap());
+        write_routes(&state, &allow).unwrap();
+        assert!(!published(&state, "inner", &ini).unwrap());
+        allow.insert(Route::parse("nl >> inner").unwrap());
+        write_routes(&state, &allow).unwrap();
+        assert!(published(&state, "inner", &ini).unwrap());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_plain_user_zone_cannot_carry_an_inner_vpn_even_with_a_key_field() {
+        let state = state("plain-upstream");
+        installed(
+            &state,
+            "plain",
+            "[Interface]\nPrivateKey = decoy\n[HostNetwork]\n",
+        );
+        let ini = WgConfig::parse(b"[Interface]\nPrivateKey = inner\n[Chain]\nViaUser = plain\n")
+            .unwrap();
+        assert!(Route::from_ini_in(&state, "inner", &ini).is_err());
         fs::remove_dir_all(state).unwrap();
     }
 }

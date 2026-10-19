@@ -59,10 +59,10 @@ struct Net {
     /// What the tunnel watch last found: `alive`, `idle`, `dead`,
     /// `suspect`, `unknown`; `-` not looked at.
     tunnel: String,
-    /// The outer system zone carrying this network, if it has one.
+    /// The immediate upstream zone, system or user, if it has one.
     upstream: String,
-    /// `chain`: this network has an inner tunnel; `system`: it borrows the
-    /// outer tunnel directly.
+    /// `chain`: over a system VPN; `chain-user`: over another user VPN;
+    /// `system`: it borrows the outer tunnel directly.
     route: String,
     published: bool,
 }
@@ -71,15 +71,50 @@ struct Net {
 /// boundaries: the inner encrypted packet passes through the outer tunnel,
 /// then each server removes only its own layer. A response follows the same
 /// path backwards; this is not a second exit from the host network.
-fn route_path(net: &Net, who: &str) -> String {
-    match net.route.as_str() {
-        "chain" => format!(
-            "{who} → {} (awg0: слой 1) → uplink (hostif) → {} (awg0: слой 2) → сервер {} (снят слой 2) → сервер {} (снят слой 1) → Интернет\nОтвет ← теми же звеньями в обратном порядке",
-            net.name, net.upstream, net.upstream, net.name
-        ),
-        "system" => format!("{who} → системная зона {} (awg0) → Интернет", net.upstream),
-        _ => format!("{who} → {} → Интернет", network_text(&net.name)),
+fn route_path(net: &Net, networks: &[Net], who: &str) -> String {
+    if net.route == "system" {
+        return format!("{who} → системная зона {} (awg0) → Интернет", net.upstream);
     }
+    if net.route != "chain" && net.route != "chain-user" {
+        return format!("{who} → {} → Интернет", network_text(&net.name));
+    }
+    let mut inner_to_outer = vec![net.name.clone()];
+    let mut current = net;
+    for _ in 0..networks.len() + 1 {
+        if current.route != "chain" && current.route != "chain-user" {
+            break;
+        }
+        if current.upstream.is_empty() || inner_to_outer.contains(&current.upstream) {
+            return format!(
+                "{who} → {} → маршрут недоступен (цикл или отсутствует звено)",
+                net.name
+            );
+        }
+        inner_to_outer.push(current.upstream.clone());
+        if current.route == "chain" {
+            break;
+        }
+        let Some(next) = networks.iter().find(|n| n.name == current.upstream) else {
+            return format!(
+                "{who} → {} → маршрут недоступен (нет внешней зоны)",
+                net.name
+            );
+        };
+        current = next;
+    }
+    let hops = inner_to_outer;
+    let mut path = who.to_owned();
+    for (index, hop) in hops.iter().enumerate() {
+        if index > 0 {
+            path.push_str(" → uplink (hostif)");
+        }
+        path.push_str(&format!(" → {hop} (awg0: слой {})", index + 1));
+    }
+    for (index, hop) in hops.iter().enumerate().rev() {
+        path.push_str(&format!(" → сервер {hop} (снят слой {})", index + 1));
+    }
+    path.push_str(" → Интернет\nОтвет ← теми же звеньями в обратном порядке");
+    path
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1136,17 +1171,21 @@ impl Panel {
                     text("●")
                         .size(14)
                         .color(net.color.unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88))),
-                    text(format!("{} ({state})", route_path(net, &who))).size(14)
+                    text(format!(
+                        "{} ({state})",
+                        route_path(net, &self.data.networks, &who)
+                    ))
+                    .size(14)
                 ]
                 .spacing(8),
             );
-            if net.route == "chain" {
+            if net.route == "chain" || net.route == "chain-user" {
                 paths = paths.push(
                     text(
-                        "Провайдер видит внешний VPN, но не внутренний сервер; внешний VPN видит \
-                         адрес внутреннего сервера, но не содержимое его туннеля; внутренний VPN \
-                         видит назначения. DNS программ идёт через внутренний VPN, адрес внутреннего \
-                         сервера задан без DNS хоста. Ping здесь не измеряется: два звена могут \
+                        "Провайдер видит только первый VPN. Каждый промежуточный VPN видит адрес \
+                         следующего сервера, но не содержимое следующего туннеля; последний VPN \
+                         видит назначения. DNS программ идёт через последний VPN, адреса внутренних \
+                         серверов заданы без DNS хоста. Ping здесь не измеряется: каждое звено может \
                          увеличить задержку.",
                     )
                     .size(12),
@@ -2082,7 +2121,7 @@ mod tests {
         assert!(d.networks[3].upstream.is_empty());
         assert!(d.networks[0].up && !d.networks[0].locked);
         assert_eq!(d.networks[0].route, "chain");
-        let path = route_path(&d.networks[0], "work");
+        let path = route_path(&d.networks[0], &d.networks, "work");
         assert!(path.contains("work → nl (awg0: слой 1) → uplink (hostif) → corp (awg0: слой 2)"));
         assert!(path.contains("сервер corp (снят слой 2) → сервер nl (снят слой 1)"));
         assert!(path.contains("Ответ ← теми же звеньями в обратном порядке"));
@@ -2120,6 +2159,29 @@ mod tests {
         assert_eq!(d.month[0].out, 9000);
         assert_eq!(color_of("#12345"), None);
         assert_eq!(color_of("123456"), None);
+    }
+
+    #[test]
+    fn a_three_hop_route_shows_every_namespace_and_server_in_order() {
+        let networks = vec![
+            Net {
+                name: "vps".into(),
+                upstream: "ch".into(),
+                route: "chain-user".into(),
+                ..Net::default()
+            },
+            Net {
+                name: "ch".into(),
+                upstream: "nl".into(),
+                route: "chain".into(),
+                ..Net::default()
+            },
+        ];
+        let path = route_path(&networks[0], &networks, "game");
+        assert!(path.contains("game → vps (awg0: слой 1) → uplink (hostif) → ch (awg0: слой 2) → uplink (hostif) → nl (awg0: слой 3)"));
+        assert!(path.contains(
+            "сервер nl (снят слой 3) → сервер ch (снят слой 2) → сервер vps (снят слой 1)"
+        ));
     }
 
     #[test]

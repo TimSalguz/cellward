@@ -956,7 +956,7 @@ pub fn run(args: Args) -> u8 {
     // the system broker identifies callers by their host uid, whereas uid 0
     // inside our namespace is a subordinate uid and cannot ask it.
     if !zone.is_offline() {
-        let verify = || -> Result<(), String> {
+        let verify = || -> Result<Vec<String>, String> {
             let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
             let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
             if zone.name() != crate::launch::HOST
@@ -975,18 +975,50 @@ pub fn run(args: Args) -> u8 {
                 &zone.name(),
                 &ini,
             )?;
-            if crate::chain::ChainConfig::from_ini(&ini)?.is_some() {
+            if let Some(chain) = crate::chain::ChainConfig::from_ini(&ini)? {
                 crate::chain::ChainConfig::validate_transport(&ini)?;
+                if chain.user {
+                    crate::chain::ChainConfig::validate_user_ipv4_transport(&ini)?;
+                }
                 crate::chain::ChainConfig::refuse_system_duplicate(
                     &ini,
                     crate::sysrun::request_key_owner,
                 )?;
             }
-            Ok(())
+            crate::chain::user_upstreams(
+                zone.dir.parent().ok_or("zone has no state directory")?,
+                &zone.name(),
+                &ini,
+            )
         };
-        if let Err(e) = verify() {
-            eprintln!("zone {}: unsafe route in {CONFIG}: {e}", zone.name());
-            return 1;
+        let upstreams = match verify() {
+            Ok(upstreams) => upstreams,
+            Err(e) => {
+                eprintln!("zone {}: unsafe route in {CONFIG}: {e}", zone.name());
+                return 1;
+            }
+        };
+        for upstream in upstreams {
+            let state = zone.dir.parent().expect("verified state directory");
+            if crate::cli::zone_up(state, std::ffi::OsStr::new(&upstream)).is_none()
+                && crate::connect::mode(state, &config, &upstream).0 != crate::connect::Mode::Auto
+            {
+                eprintln!("zone {}: upstream {upstream} asks before connecting or is manual — bring it up explicitly first", zone.name());
+                return 1;
+            }
+            let status = Command::new(&zone.tools.runner)
+                .arg("up")
+                .arg(&upstream)
+                .status();
+            if !status.is_ok_and(|s| s.success())
+                || crate::cli::zone_up(state, std::ffi::OsStr::new(&upstream)).is_none()
+            {
+                eprintln!(
+                    "zone {}: upstream user route {upstream} did not come up",
+                    zone.name()
+                );
+                return 1;
+            }
         }
     }
     // Leftovers of a previous run would make `vpn-zone up` and the picker
@@ -4506,12 +4538,21 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         let netns = format!("/proc/{pid}/ns/net");
         let _ = fs::remove_file(zone.path(PASTA_DONE));
         if let Some(chain) = chain.as_ref() {
-            // The outer system zone's pasta is attached to the INNER tunnel's
-            // uplink, not to its app namespace. Thus only the encrypted
-            // transport of this tunnel crosses the outer one. The watcher is
-            // supervised exactly like local pasta: either hop ending takes
-            // the inner zone down, with no fallback to the host network.
-            match start_system_uplink(&chain.via, pid, PASTA_IFACE) {
+            // The preceding VPN zone's pasta is attached to the INNER
+            // tunnel's uplink, not to its app namespace. Thus only this
+            // tunnel's encrypted transport crosses the preceding one. The
+            // watcher is supervised like local pasta: either hop ending takes
+            // the inner zone down, with no host-network fallback.
+            let uplink = if chain.user {
+                let state = zone.dir.parent().ok_or("zone has no state directory")?;
+                crate::chain::validate_user_source(state, &chain.via)?;
+                let source = crate::cli::zone_up(state, std::ffi::OsStr::new(&chain.via))
+                    .ok_or_else(|| format!("upstream user route {} is no longer up", chain.via))?;
+                start_user_uplink(source, pid, PASTA_IFACE)
+            } else {
+                start_system_uplink(&chain.via, pid, PASTA_IFACE)
+            };
+            match uplink {
                 Ok((child, _resolvers)) => {
                     PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
                     pasta = Some(child);
@@ -4526,7 +4567,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
                     kill_and_reap(pid);
                     kill_and_reap(zone_pid);
                     return Err(format!(
-                        "no way out through the outer system zone {} — {e}",
+                        "no way out through the outer zone {} — {e}",
                         chain.via
                     ));
                 }
@@ -4632,6 +4673,10 @@ fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfi
     let chain = crate::chain::ChainConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
     if chain.is_some() {
         crate::chain::ChainConfig::validate_transport(&ini)
+            .map_err(|e| format!("{CONFIG}: {e}"))?;
+    }
+    if chain.as_ref().is_some_and(|c| c.user) {
+        crate::chain::ChainConfig::validate_user_ipv4_transport(&ini)
             .map_err(|e| format!("{CONFIG}: {e}"))?;
     }
     let backend = prepare_backend(zone, &raw)?;
@@ -7298,6 +7343,43 @@ fn start_system_uplink(
     Err(line
         .strip_prefix("ERR ")
         .unwrap_or("the watcher said nothing")
+        .to_owned())
+}
+
+/// Attach an inner tunnel's uplink to another user VPN zone's app namespace.
+/// The helper's connection to the system broker is the link's lifetime: if
+/// the outer zone dies or changes namespace, the inner holder loses its way
+/// out and tears the inner zone down rather than falling back to the host.
+fn start_user_uplink(
+    source: i32,
+    target: i32,
+    interface: &str,
+) -> Result<(Child, Vec<String>), String> {
+    let mut child = Command::new("/proc/self/exe")
+        .arg("user-uplink")
+        .arg(source.to_string())
+        .arg(target.to_string())
+        .arg(interface)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start user-uplink watcher: {e}"))?;
+    let mut line = String::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = BufReader::new(out).read_line(&mut line);
+    }
+    let line = line.trim_end();
+    if let Some(resolvers) = line.strip_prefix("OK") {
+        return Ok((
+            child,
+            resolvers.split_whitespace().map(str::to_owned).collect(),
+        ));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(line
+        .strip_prefix("ERR ")
+        .unwrap_or("the user-uplink watcher said nothing")
         .to_owned())
 }
 
