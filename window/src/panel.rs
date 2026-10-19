@@ -66,13 +66,15 @@ struct Net {
     route: String,
 }
 
-/// The route represented by a zone, including the namespace boundary where
-/// an inner tunnel's encrypted transport leaves for the outer VPN.
+/// The route represented by a zone. Show both namespace and remote-server
+/// boundaries: the inner encrypted packet passes through the outer tunnel,
+/// then each server removes only its own layer. A response follows the same
+/// path backwards; this is not a second exit from the host network.
 fn route_path(net: &Net, who: &str) -> String {
     match net.route.as_str() {
         "chain" => format!(
-            "{who} → VPN {} (awg0) → uplink (hostif) → системная зона {} → Интернет",
-            net.name, net.upstream
+            "{who} → {} (awg0: слой 1) → uplink (hostif) → {} (awg0: слой 2) → сервер {} (снят слой 2) → сервер {} (снят слой 1) → Интернет\nОтвет ← теми же звеньями в обратном порядке",
+            net.name, net.upstream, net.upstream, net.name
         ),
         "system" => format!("{who} → системная зона {} (awg0) → Интернет", net.upstream),
         _ => format!("{who} → {} → Интернет", network_text(&net.name)),
@@ -1125,9 +1127,11 @@ impl Panel {
             if net.route == "chain" {
                 paths = paths.push(
                     text(
-                        "Провайдер видит внешний VPN; внешний VPN — адрес внутреннего сервера; \
-                         внутренний VPN — назначения. DNS программ идёт через внутренний VPN. \
-                         Два звена могут увеличить задержку (ping).",
+                        "Провайдер видит внешний VPN, но не внутренний сервер; внешний VPN видит \
+                         адрес внутреннего сервера, но не содержимое его туннеля; внутренний VPN \
+                         видит назначения. DNS программ идёт через внутренний VPN, адрес внутреннего \
+                         сервера задан без DNS хоста. Ping здесь не измеряется: два звена могут \
+                         увеличить задержку.",
                     )
                     .size(12),
                 );
@@ -2057,8 +2061,10 @@ mod tests {
         assert!(d.networks[2].upstream.is_empty());
         assert!(d.networks[0].up && !d.networks[0].locked);
         assert_eq!(d.networks[0].route, "chain");
-        assert!(route_path(&d.networks[0], "work")
-            .contains("work → VPN nl (awg0) → uplink (hostif) → системная зона corp"));
+        let path = route_path(&d.networks[0], "work");
+        assert!(path.contains("work → nl (awg0: слой 1) → uplink (hostif) → corp (awg0: слой 2)"));
+        assert!(path.contains("сервер corp (снят слой 2) → сервер nl (снят слой 1)"));
+        assert!(path.contains("Ответ ← теми же звеньями в обратном порядке"));
         assert!(d.networks[1].locked);
         assert_eq!(tunnel_text(&d.networks[0]), "поднята · туннель жив");
         assert_eq!(
