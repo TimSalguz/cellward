@@ -4073,16 +4073,14 @@ pub enum Backend {
 /// An OpenConnect zone, ready to be started.
 pub struct OcZone {
     pub cfg: OcConfig,
-    /// The gateway's address, resolved in the HOST's network before either
-    /// namespace exists — the same rule the WireGuard endpoint follows, and for
-    /// the same two reasons: the uplink has no resolver of its own, and its
-    /// filter would not let a lookup out even if it had one. The client is then
-    /// told the answer with `--resolve`, so it never asks either.
+    /// The gateway's address: the authentication helper's exact address for
+    /// an interactive login, otherwise resolved before either namespace
+    /// exists. The uplink has no resolver of its own. The client is told the
+    /// answer with `--resolve`, so it never asks either.
     pub addr: IpAddr,
-    /// The login the connect window took (no `PasswordFile`, `crate::connect`):
-    /// taken over its socket while still in the host's namespaces, handed
-    /// to the client on its standard input.
-    pub login: Option<crate::connect::Login>,
+    /// The session the connect window obtained (no `PasswordFile`): taken
+    /// over its socket and handed to the client on standard input.
+    pub login: Option<crate::connect::Session>,
 }
 
 impl Backend {
@@ -4703,46 +4701,53 @@ fn prepare_openconnect(zone: &Zone, ini: &WgConfig) -> Result<Backend, String> {
     // before it is handed to the client (`spawn_openconnect`).
     cfg.check_password_file()
         .map_err(|e| format!("{CONFIG}: {e}"))?;
-    // A login asked when the zone starts (no `PasswordFile`): taken now, over the
+    // A session obtained when the zone starts (no `PasswordFile`): taken now, over the
     // socket of the user's runtime directory whoever started the zone holds
     // (`connect::Offer`) — here, before a namespace of the zone exists.
     let login = if cfg.login {
-        Some(crate::connect::fetch_login(&zone.name())?)
+        Some(crate::connect::fetch_session(&zone.name())?)
     } else {
         None
     };
 
-    let addr = match cfg.server_literal() {
-        Some(addr) => addr,
-        None => {
-            let port = cfg.port.unwrap_or(443);
-            let addrs: Vec<IpAddr> = (cfg.server.as_str(), port)
-                .to_socket_addrs()
-                .map_err(|e| {
-                    format!(
-                        "cannot resolve the gateway {} ({e}) — it has to be an address by the \
+    let addr = if let Some(session) = &login {
+        // Authentication is allowed to visit only the configured gateway.
+        // The transport must use precisely the address and certificate that
+        // the authentication helper saw, never a fresh host DNS lookup.
+        session_gateway(&cfg, session)?
+    } else {
+        match cfg.server_literal() {
+            Some(addr) => addr,
+            None => {
+                let port = cfg.port.unwrap_or(443);
+                let addrs: Vec<IpAddr> = (cfg.server.as_str(), port)
+                    .to_socket_addrs()
+                    .map_err(|e| {
+                        format!(
+                            "cannot resolve the gateway {} ({e}) — it has to be an address by the \
                          time the zone starts, because the uplink has no resolver of its own",
-                        cfg.server
-                    )
-                })?
-                .map(|a| a.ip())
-                .collect();
-            // v4 first, as everywhere else in this file. A name that resolves
-            // ONLY to IPv6 is refused rather than half-supported: `--resolve`
-            // takes `HOST:IP` and cannot express a v6 address unambiguously, so
-            // the client would be handed a mangled one. Writing the literal
-            // into `Server =` works and is what the message asks for.
-            match addrs.iter().copied().find(IpAddr::is_ipv4) {
-                Some(addr) => addr,
-                None if addrs.is_empty() => {
-                    return Err(format!("the gateway {} resolved to nothing", cfg.server))
-                }
-                None => {
-                    return Err(format!(
+                            cfg.server
+                        )
+                    })?
+                    .map(|a| a.ip())
+                    .collect();
+                // v4 first, as everywhere else in this file. A name that resolves
+                // ONLY to IPv6 is refused rather than half-supported: `--resolve`
+                // takes `HOST:IP` and cannot express a v6 address unambiguously, so
+                // the client would be handed a mangled one. Writing the literal
+                // into `Server =` works and is what the message asks for.
+                match addrs.iter().copied().find(IpAddr::is_ipv4) {
+                    Some(addr) => addr,
+                    None if addrs.is_empty() => {
+                        return Err(format!("the gateway {} resolved to nothing", cfg.server))
+                    }
+                    None => {
+                        return Err(format!(
                         "the gateway {} resolves only to IPv6; write that address into Server = \
                          instead — `--resolve` cannot carry one unambiguously",
                         cfg.server
                     ))
+                    }
                 }
             }
         }
@@ -4752,6 +4757,42 @@ fn prepare_openconnect(zone: &Zone, ini: &WgConfig) -> Result<Backend, String> {
     // tunnel is already up the moment it looks.
     let _ = fs::remove_file(zone.path(openconnect::PLAN_FILE));
     Ok(Backend::Oc(Box::new(OcZone { cfg, addr, login })))
+}
+
+/// Check the helper's connection URL before giving it to the client. A
+/// redirected gateway is not an implicit new route, even with a valid cookie.
+fn session_gateway(cfg: &OcConfig, session: &crate::connect::Session) -> Result<IpAddr, String> {
+    let authority = session
+        .connect_url
+        .strip_prefix("https://")
+        .and_then(|url| url.split(['/', '?', '#']).next())
+        .ok_or("the OpenConnect login returned no HTTPS gateway URL")?;
+    let host = if cfg.server.contains(':') {
+        format!("[{}]", cfg.server)
+    } else {
+        cfg.server.clone()
+    };
+    let expected = format!("{host}:{}", cfg.port.unwrap_or(443));
+    if authority != expected && !(cfg.port.is_none_or(|port| port == 443) && authority == host) {
+        return Err(format!(
+            "the OpenConnect login changed the gateway from {host} to {authority} — refused"
+        ));
+    }
+    if session.fingerprint.is_empty() || session.cookie.is_empty() {
+        return Err("the OpenConnect login returned no certificate or session".to_owned());
+    }
+    let address = session
+        .address
+        .parse::<IpAddr>()
+        .map_err(|_| "the OpenConnect login returned no valid gateway address".to_owned())?;
+    if let Some(literal) = cfg.server_literal() {
+        if address != literal {
+            return Err("the OpenConnect login changed the literal gateway address".to_owned());
+        }
+    } else if !address.is_ipv4() {
+        return Err("the OpenConnect login returned an IPv6 address for a named gateway; --resolve cannot pin it".to_owned());
+    }
+    Ok(address)
 }
 
 // --- PROCESS 3: THE UPLINK ---------------------------------------------------
@@ -7613,10 +7654,7 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 ///   arrives — keeps meaning what it says.
 /// * `--non-inter` because a zone is started by a systemd unit and there is no
 ///   terminal to ask anything on; a prompt would hang the zone instead of
-///   failing it. Not with a one-time code of the connect window's login
-///   (no `PasswordFile`): the gateway's second prompt reads it from standard
-///   input, the line after the password — and a prompt past those finds the
-///   input closed, and fails.
+///   failing it. The connect window has already completed all login forms.
 /// * `--no-external-auth` so that authentication never tries to open a browser
 ///   OUTSIDE the zone — the exact move `docs/LEAK-MODEL.md` spends a section on.
 /// * No `--disable-ipv6` (it was there until 2026-09-27): IPv6 the gateway
@@ -7625,11 +7663,8 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 ///   `--resolve` names the gateway by the address resolved above.
 /// * `--resolve` hands over the address resolved in the host's network, so the
 ///   client never needs a resolver in a namespace that has none.
-/// * `--passwd-on-stdin` with the password written on one line and the pipe
-///   closed. Not a command-line argument: `/proc/<pid>/cmdline` is world
-///   readable, and not an environment variable either, for the same reason.
-///   The password is the file's (`PasswordFile`) or the login's; the login's
-///   user and group, where given, come before the config's.
+/// * `--passwd-on-stdin` for a configured password, or `--cookie-on-stdin`
+///   for a completed login session. Neither secret enters argv or env.
 ///
 /// And the environment is BUILT rather than inherited
 /// ([`crate::openconnect::client_env`]): `openconnect` honours `https_proxy`
@@ -7642,23 +7677,11 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, String> {
     let cfg = &oc.cfg;
     let login = oc.login.as_ref();
-    let (password, code) = match login {
-        Some(login) => (
-            Some(login.password.clone()),
-            Some(login.code.clone()).filter(|code| !code.is_empty()),
-        ),
-        None => (
-            cfg.read_password().map_err(|e| format!("{CONFIG}: {e}"))?,
-            None,
-        ),
+    let password = if login.is_some() {
+        None
+    } else {
+        cfg.read_password().map_err(|e| format!("{CONFIG}: {e}"))?
     };
-    let given = |value: &str| Some(value.to_owned()).filter(|v| !v.is_empty());
-    let user = login
-        .and_then(|l| given(&l.user))
-        .or_else(|| cfg.user.clone());
-    let group = login
-        .and_then(|l| given(&l.group))
-        .or_else(|| cfg.authgroup.clone());
 
     // `openconnect` runs its `--script` through `/bin/sh -c`, so the string is
     // shell-parsed. Store paths never contain anything a shell would look at,
@@ -7695,28 +7718,31 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         .arg("--script")
         .arg(format!("{exe} oc-script"))
         .arg("--no-external-auth");
-    if code.is_none() {
-        cmd.arg("--non-inter");
-    }
+    cmd.arg("--non-inter");
     if cfg.server_literal().is_none() {
         cmd.arg(format!("--resolve={}:{}", cfg.server, oc.addr));
     }
-    if let Some(pin) = &cfg.server_cert {
+    if let Some(pin) = login
+        .map(|session| &session.fingerprint)
+        .or(cfg.server_cert.as_ref())
+    {
         cmd.arg(format!("--servercert={pin}"));
     }
-    if let Some(user) = &user {
+    if let Some(user) = &cfg.user {
         cmd.arg(format!("--user={user}"));
     }
-    if let Some(group) = &group {
+    if let Some(group) = &cfg.authgroup {
         cmd.arg(format!("--authgroup={group}"));
     }
-    if password.is_some() {
+    if login.is_some() {
+        cmd.arg("--cookie-on-stdin");
+    } else if password.is_some() {
         cmd.arg("--passwd-on-stdin");
     }
     for extra in &cfg.extra {
         cmd.arg(extra);
     }
-    cmd.arg(cfg.server_arg());
+    cmd.arg(login.map_or_else(|| cfg.server_arg(), |session| session.connect_url.clone()));
 
     // THE CLIENT STARTS WITH AN EMPTY ENVIRONMENT, not with ours. `openconnect`
     // honours `https_proxy` and its relatives, so an environment carried in
@@ -7744,7 +7770,7 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
     }
     cmd.env_clear().envs(env);
     let root = client_root(Path::new(CLIENT_ROOT), dir, &files)?;
-    cmd.stdin(if password.is_some() {
+    cmd.stdin(if password.is_some() || login.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
@@ -7852,26 +7878,19 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
             )
         }
     })?;
-    if let Some(password) = password {
+    if let Some(secret) = login.map(|session| &session.cookie).or(password.as_ref()) {
         let Some(mut stdin) = child.stdin.take() else {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("openconnect was given no stdin to read the password from".to_string());
+            return Err("openconnect was given no stdin to read the session from".to_string());
         };
-        // One line, then EOF: `--non-inter` means nothing else will be asked
-        // — or, with a one-time code, its line after the password's, for the
-        // gateway's second prompt.
-        let mut lines = format!("{password}\n");
-        if let Some(code) = &code {
-            lines.push_str(code);
-            lines.push('\n');
-        }
-        let written = stdin.write_all(lines.as_bytes());
+        // Neither the session cookie nor the password enters argv or env.
+        let written = stdin.write_all(format!("{secret}\n").as_bytes());
         drop(stdin);
         if let Err(e) = written {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("cannot hand the password to openconnect: {e}"));
+            return Err(format!("cannot hand the session to openconnect: {e}"));
         }
     }
     Ok(child)
@@ -9823,6 +9842,38 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openconnect_session_cannot_redirect_the_transport() {
+        let cfg = OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org:4443\n").unwrap();
+        let mut session = crate::connect::Session {
+            cookie: "secret".into(),
+            connect_url: "https://vpn.example.org:4443/path".into(),
+            fingerprint: "pin-sha256:abc=".into(),
+            address: "192.0.2.10".into(),
+        };
+        assert_eq!(
+            session_gateway(&cfg, &session),
+            Ok("192.0.2.10".parse().unwrap())
+        );
+        session.address = "2001:db8::10".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        session.address = "192.0.2.10".into();
+        session.connect_url = "https://vpn.example.org/path".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        session.connect_url = "https://other.example.org:4443/path".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        session.connect_url = "http://vpn.example.org:4443/path".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        let literal = OcConfig::parse(b"[OpenConnect]\nServer = 192.0.2.11\n").unwrap();
+        session.connect_url = "https://192.0.2.11/".into();
+        assert!(session_gateway(&literal, &session).is_err());
+        let default = OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org\n").unwrap();
+        session.connect_url = "https://vpn.example.org/".into();
+        assert!(session_gateway(&default, &session).is_ok());
+        session.fingerprint.clear();
+        assert!(session_gateway(&default, &session).is_err());
+    }
 
     /// The host's own network: pasta bound to no interface, the host's
     /// resolver behind the gateway's address, IPv6 off when the host has

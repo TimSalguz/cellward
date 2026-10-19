@@ -1117,7 +1117,7 @@ fn gateway_login(
                         }
                     }
                     let value = before
-                        .filter(|b| field.kind != Kind::Token)
+                        .filter(|_| field.kind != Kind::Token)
                         .map(|b| b.value.clone())
                         .or_else(|| kept.clone())
                         .unwrap_or_else(|| field.value.clone());
