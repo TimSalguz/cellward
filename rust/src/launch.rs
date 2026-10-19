@@ -1107,6 +1107,17 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     let binreg = (!binary.is_empty() && binary != appname)
         .then(|| regdir.join(registry::BY_BINARY).join(&binary));
     let dryrun = env_nonempty(ENV_DRYRUN).is_some();
+    let main_home = matches!(
+        (&selection.sandbox, &selection.container),
+        (Sandbox::None, Container::Main | Container::MainNamed(_))
+    );
+    // Foot and Alacritty create an independent process/window for each
+    // ordinary launch. The generic cross-network warning and the profile
+    // singleton guard describe browsers, not these terminals. `footclient`
+    // and `foot --server` deliberately do not get this exception: they hand
+    // work to a long-lived process, potentially in another network.
+    let separate_place = instance_id.as_deref().is_none_or(|id| id.contains(':'));
+    let independent_terminal = main_home && separate_place && independent_terminal(&selection.cmd);
 
     let busy = match registry::lock(&regdir) {
         Ok(_guard) => {
@@ -1127,7 +1138,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
     };
 
-    if let Some(busy) = busy.filter(|_| !dryrun) {
+    if let Some(busy) = busy.filter(|_| !dryrun && !independent_terminal) {
         // Both `{busy}` and both `{zone}` get the same value, so a plain
         // replace does what the shell's five `%s` did.
         // The pretty label again: the warning is about a PROGRAM, and with two
@@ -1268,14 +1279,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // lock per program, and noted before the zone and the instance come up
     // (`main_home_guard`): two launches answered at once both passed the
     // look while neither program ran yet (owner, 2026-09-29).
-    let main_home = matches!(
-        (&selection.sandbox, &selection.container),
-        (Sandbox::None, Container::Main | Container::MainNamed(_))
-    );
     // Kept until the `exec` — the note lives on with the pid — or taken back
     // by the launch that gives up on the way.
     let _main_home_note = match program_word(&selection.cmd)
-        .filter(|_| main_home && appid_env.is_some() && !dryrun)
+        .filter(|_| main_home && !independent_terminal && appid_env.is_some() && !dryrun)
     {
         None => None,
         Some(word) => match main_home_guard(tools, instance_id.as_deref(), &zone_name, word) {
@@ -2007,8 +2014,9 @@ fn up_instance(
     let elsewhere = |running: String| {
         format!(
             "контейнер {id} уже работает в сети «{running}», а запуск просит «{zone_name}»: \
-             контейнер не бывает в двух сетях сразу — закрой его программы \
-             (cellward container stop {id}) или запусти в «{running}»"
+             контейнер не бывает в двух сетях сразу. Для второй независимой копии выбери \
+             отдельный контейнер (например, «Разовый контейнер» в окне запуска); чтобы \
+             перенести работающую копию без перезапуска, используй ⇄ в панели Cellward"
         )
     };
     if crate::instance::up(&tools.state, id).is_some() {
@@ -2677,6 +2685,39 @@ fn trusted_bin_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Only two terminal binaries whose normal invocation starts a separate
+/// process. This is not a permission granted by a desktop file's name: the
+/// executable must also resolve from one of the trusted profile directories.
+/// A foot server/client is deliberately excluded because its new window may
+/// belong to the server's older network.
+fn independent_terminal_form(cmd: &[OsString]) -> bool {
+    let Some(word) = program_word(cmd) else {
+        return false;
+    };
+    match basename(word).as_bytes() {
+        b"alacritty" => !cmd.iter().any(|arg| arg == "msg" || arg == "--daemon"),
+        b"foot" => !cmd.iter().any(|arg| {
+            arg == "--server" || arg == "-s" || arg.as_bytes().starts_with(b"--server=")
+        }),
+        _ => false,
+    }
+}
+
+fn independent_terminal(cmd: &[OsString]) -> bool {
+    if !independent_terminal_form(cmd) {
+        return false;
+    }
+    let Some(word) = program_word(cmd) else {
+        return false;
+    };
+    let Some(real) = resolve_program(word, std::env::var_os("PATH").as_deref()) else {
+        return false;
+    };
+    basename(word)
+        .to_str()
+        .is_some_and(|name| names_program(name, &real, &trusted_bin_dirs()))
+}
+
 /// A process as the main-home guard sees it ([`rival`]): its real uid, the
 /// file it runs (`dev`, `ino` of `/proc/<pid>/exe`, when it may be read) and
 /// its `argv[0]`'s last component.
@@ -2951,7 +2992,9 @@ pub fn noted_rival<'a>(notes: &'a [Noted], place: &str) -> Option<&'a Noted> {
 /// its own profile (owner, 2026-09-29 — zen in «свой» refused zen in the
 /// main). Asked for applications only (a launch with an app's id): a
 /// terminal's `cellward run nl -- sh` is no single-instance program, and the
-/// user's shells are everywhere.
+/// user's shells are everywhere. Ordinary `foot` and `alacritty` launches
+/// are also independent processes, and are excluded at the caller; a server
+/// or client launch is not.
 fn main_home_rival(tools: &Tools, id: &str, word: &OsStr) -> Option<i32> {
     let (exe, uid, skip) = rival_marks(word);
     let key_of = |pid: i32| crate::place::ns_key(Path::new(&format!("/proc/{pid}/ns/user")));
@@ -3204,6 +3247,50 @@ pub fn restrict_compositor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_independent_terminal_forms_skip_single_instance_guards() {
+        let words = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
+        assert!(independent_terminal_form(&words(&["foot"])));
+        assert!(independent_terminal_form(&words(&[
+            "alacritty",
+            "-e",
+            "sh"
+        ])));
+        assert!(!independent_terminal_form(&words(&[
+            "alacritty",
+            "msg",
+            "create-window"
+        ])));
+        assert!(!independent_terminal_form(&words(&[
+            "alacritty",
+            "--daemon"
+        ])));
+        assert!(!independent_terminal_form(&words(&["foot", "--server"])));
+        assert!(!independent_terminal_form(&words(&["foot", "-s"])));
+        assert!(!independent_terminal_form(&words(&[
+            "foot",
+            "--server=/tmp/foot.sock"
+        ])));
+        assert!(!independent_terminal_form(&words(&["footclient"])));
+        assert!(!independent_terminal_form(&words(&["gnome-terminal"])));
+        assert!(!independent_terminal_form(&words(&["firefox"])));
+
+        // A program in a writable directory may call itself `foot`; that
+        // name alone must not bypass either cross-network guard.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("vz-fake-foot-{}-{nonce}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let fake = dir.join("foot");
+        fs::write(&fake, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!independent_terminal(&[fake.clone().into_os_string()]));
+        let _ = fs::remove_file(fake);
+        let _ = fs::remove_dir(dir);
+    }
 
     /// The conflict question's "не спрашивать больше", kdialog's way: kept
     /// in its group, read back, and the window's written where kdialog
