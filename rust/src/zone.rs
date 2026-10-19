@@ -951,6 +951,28 @@ pub fn run(args: Args) -> u8 {
         );
         return 1;
     }
+    // The system configuration may have changed since `cellward add`. Check
+    // the route again as the host user, before entering the user namespace:
+    // the system broker identifies callers by their host uid, whereas uid 0
+    // inside our namespace is a subordinate uid and cannot ask it.
+    if !zone.is_offline() {
+        let verify = || -> Result<(), String> {
+            let raw = fs::read(zone.path(CONFIG)).map_err(|e| e.to_string())?;
+            let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+            if crate::chain::ChainConfig::from_ini(&ini)?.is_some() {
+                crate::chain::ChainConfig::validate_transport(&ini)?;
+                crate::chain::ChainConfig::refuse_system_duplicate(
+                    &ini,
+                    crate::sysrun::request_key_owner,
+                )?;
+            }
+            Ok(())
+        };
+        if let Err(e) = verify() {
+            eprintln!("zone {}: unsafe route in {CONFIG}: {e}", zone.name());
+            return 1;
+        }
+    }
     // Leftovers of a previous run would make `vpn-zone up` and the picker
     // believe this zone is already up.
     let _ = fs::remove_file(zone.path(PID));

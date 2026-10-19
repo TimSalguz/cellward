@@ -651,7 +651,18 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
         }
     }
     if via.is_some() || ini.section(crate::chain::SECTION).is_some() {
+        if let Err(e) = crate::chain::ChainConfig::from_ini(&ini) {
+            eprintln!("{}: {e}", conf.display());
+            return 1;
+        }
         if let Err(e) = crate::chain::ChainConfig::validate_transport(&ini) {
+            eprintln!("{}: {e}", conf.display());
+            return 1;
+        }
+        if let Err(e) = crate::chain::ChainConfig::refuse_system_duplicate(
+            &ini,
+            crate::sysrun::request_key_owner,
+        ) {
             eprintln!("{}: {e}", conf.display());
             return 1;
         }

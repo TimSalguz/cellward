@@ -63,6 +63,34 @@ impl ChainConfig {
         }
         Ok(())
     }
+
+    /// A key already installed as a system zone could be started directly at
+    /// boot, independently of this route's `Via`. Do not claim the inner hop
+    /// is protected while that direct system route still exists. Failure to
+    /// ask the system tier is a refusal too, not permission by silence.
+    pub fn refuse_system_duplicate(
+        ini: &WgConfig,
+        lookup: impl FnOnce(&str) -> Result<Option<String>, String>,
+    ) -> Result<(), String> {
+        let Some(key) = ini
+            .interface()
+            .and_then(|section| section.get("PrivateKey"))
+        else {
+            return Ok(()); // OpenConnect has no WireGuard key to compare.
+        };
+        match lookup(key.trim()).map_err(|e| {
+            format!(
+                "cannot verify that the inner VPN is absent from system zones ({e}) — \
+                 a chain is not safe to publish without that check"
+            )
+        })? {
+            Some(zone) => Err(format!(
+                "this inner VPN is also the system zone {zone}; that zone may connect directly \
+                 at boot, bypassing [Chain] — remove the direct system zone first"
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +124,23 @@ mod tests {
             .contains("gateway login"));
         let ini = WgConfig::parse(b"[OpenConnect]\nServer = 192.0.2.2\nAskLogin = no\n").unwrap();
         assert!(ChainConfig::validate_transport(&ini).is_ok());
+    }
+
+    #[test]
+    fn inner_key_cannot_also_be_a_direct_system_zone() {
+        let ini = WgConfig::parse(b"[Interface]\nPrivateKey = inner-secret\n[Chain]\nVia = nl\n")
+            .unwrap();
+        assert!(ChainConfig::refuse_system_duplicate(&ini, |key| {
+            assert_eq!(key, "inner-secret");
+            Ok(Some("ch-direct".into()))
+        })
+        .unwrap_err()
+        .contains("ch-direct"));
+        assert!(ChainConfig::refuse_system_duplicate(&ini, |_| Ok(None)).is_ok());
+        assert!(
+            ChainConfig::refuse_system_duplicate(&ini, |_| Err("no socket".into()))
+                .unwrap_err()
+                .contains("no socket")
+        );
     }
 }
