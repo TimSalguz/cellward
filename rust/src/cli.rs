@@ -650,6 +650,12 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
             return 1;
         }
     }
+    if via.is_some() || ini.section(crate::chain::SECTION).is_some() {
+        if let Err(e) = crate::chain::ChainConfig::validate_transport(&ini) {
+            eprintln!("{}: {e}", conf.display());
+            return 1;
+        }
+    }
     if openconnect::is_openconnect(&ini) {
         // Checked in full right here, the password file included: a zone that
         // is created now and refuses to come up in a week, with the reason in

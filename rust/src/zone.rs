@@ -4589,31 +4589,9 @@ fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfi
     let seed = crate::bridge::config_seed(&raw);
     let ini = WgConfig::parse(&raw).map_err(|e| format!("{CONFIG}: {e}"))?;
     let chain = crate::chain::ChainConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
-    // Resolving an inner gateway with the host resolver would disclose the
-    // destination outside the chain before the chain exists. Until the system
-    // bridge grows a resolver request of its own, chained endpoints are
-    // literals: inconvenient, but honest and leak-free.
     if chain.is_some() {
-        if openconnect::is_openconnect(&ini) {
-            let oc = OcConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
-            if oc.server_literal().is_none() {
-                return Err(format!(
-                    "{CONFIG}: a chained OpenConnect Server must be a literal IP address; resolving its name through the host would bypass the outer zone"
-                ));
-            }
-        } else {
-            for entry in ini.sections.iter().flat_map(|s| &s.entries) {
-                if entry.key.eq_ignore_ascii_case("Endpoint")
-                    && crate::config::Endpoint::parse(&entry.value)
-                        .is_some_and(|e| matches!(e.host, EndpointHost::Name(_)))
-                {
-                    return Err(format!(
-                        "{CONFIG}: chained Endpoint on line {} must be a literal IP address; resolving its name through the host would bypass the outer zone",
-                        entry.line
-                    ));
-                }
-            }
-        }
+        crate::chain::ChainConfig::validate_transport(&ini)
+            .map_err(|e| format!("{CONFIG}: {e}"))?;
     }
     let backend = prepare_backend(zone, &raw)?;
     if chain.is_some()

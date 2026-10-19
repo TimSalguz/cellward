@@ -1215,6 +1215,11 @@ fn serve_uplink(
         ));
     }
     let plain = system::settings(zone).is_some_and(|s| s.plain);
+    if interface == crate::zone::PASTA_IFACE && plain {
+        return Err(format!(
+            "the outer system zone {zone} is plain: it would expose the inner VPN endpoint directly; a chained uplink needs a system VPN zone"
+        ));
+    }
     if fds.len() != 2 {
         return Err("an uplink comes with the zone's two namespaces".to_owned());
     }

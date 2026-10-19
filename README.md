@@ -431,6 +431,11 @@ For now the outer hop must be a system zone and the inner VPN server must be
 a literal IPv4/IPv6 address: resolving its name through the host before the
 chain exists would leak around `outer`. A SOCKS/HTTP hop still depends on the
 planned proxy-zone backend.
+The outer system zone must itself be a VPN. A plain zone would expose the
+inner gateway to the access provider, so Cellward refuses that chain.
+Interactive OpenConnect login is refused in a chain because its helper would
+contact the inner gateway before the outer tunnel exists. Use `PasswordFile`
+or a gateway that needs no login (`AskLogin = no`).
 
 Then just launch programs from the launcher. The same from the terminal:
 

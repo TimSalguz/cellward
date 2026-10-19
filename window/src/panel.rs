@@ -1101,6 +1101,16 @@ impl Panel {
                 ]
                 .spacing(8),
             );
+            if network.is_some_and(|n| n.route == "chain") {
+                paths = paths.push(
+                    text(
+                        "Провайдер видит внешний VPN; внешний VPN — адрес внутреннего сервера; \
+                         внутренний VPN — назначения. DNS программ идёт через внутренний VPN. \
+                         Два звена могут увеличить задержку (ping).",
+                    )
+                    .size(12),
+                );
+            }
         }
         let mut now = column![text("Сейчас").size(17)].spacing(4);
         if self.data.instances.is_empty() {
