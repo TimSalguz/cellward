@@ -24,8 +24,11 @@
 #
 #   nix-build tests/vm-audio.nix -A driver -o vm-audio-driver
 #   ./vm-audio-driver/bin/nixos-test-driver
+#   nix-build tests/vm-audio.nix -A driver --arg nixpkgsSrc /path/to/nixpkgs
+#     to reproduce against the host's WirePlumber release.
 {
   system ? builtins.currentSystem,
+  nixpkgsSrc ? (import ./pins.nix).nixpkgs,
   # Supply an installed Helium store path with --arg helium /nix/store/… .
   # It is intentionally optional: Helium is not in this test's pinned nixpkgs.
   helium ? null,
@@ -33,7 +36,7 @@
 
 let
   pins = import ./pins.nix;
-  pkgs = import pins.nixpkgs {
+  pkgs = import nixpkgsSrc {
     inherit system;
     config = { };
     overlays = [ ];
@@ -120,6 +123,10 @@ let
         # network without a question (docs/FIREWALL.md §9) — the user's
         # setting, home-manager's.
         home-manager.users.alice.programs.cellward.defaults.permissions.network = "yes";
+        # Exercise the NixOS policy alone; the home-manager default has its
+        # own evaluation test in harness.nix. Otherwise its user fragment
+        # could hide a broken system search path.
+        home-manager.users.alice.programs.cellward.pipewirePolicy = false;
         # The policy's own log lines, for a failure to be read.
         systemd.user.services.wireplumber.environment.WIREPLUMBER_DEBUG = "2,s-vpn-zones:4";
         home-manager.useGlobalPkgs = true;
