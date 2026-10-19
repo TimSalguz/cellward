@@ -975,11 +975,8 @@ pub fn run(args: Args) -> u8 {
                 &zone.name(),
                 &ini,
             )?;
-            if let Some(chain) = crate::chain::ChainConfig::from_ini(&ini)? {
+            if crate::chain::ChainConfig::from_ini(&ini)?.is_some() {
                 crate::chain::ChainConfig::validate_transport(&ini)?;
-                if chain.user {
-                    crate::chain::ChainConfig::validate_user_ipv4_transport(&ini)?;
-                }
                 crate::chain::ChainConfig::refuse_system_duplicate(
                     &ini,
                     crate::sysrun::request_key_owner,
@@ -4548,7 +4545,14 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
                 crate::chain::validate_user_source(state, &chain.via)?;
                 let source = crate::cli::zone_up(state, std::ffi::OsStr::new(&chain.via))
                     .ok_or_else(|| format!("upstream user route {} is no longer up", chain.via))?;
-                start_user_uplink(source, pid, PASTA_IFACE)
+                let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
+                let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+                start_user_uplink(
+                    source,
+                    pid,
+                    PASTA_IFACE,
+                    crate::chain::ChainConfig::needs_ipv6_transport(&ini)?,
+                )
             } else {
                 start_system_uplink(&chain.via, pid, PASTA_IFACE)
             };
@@ -4673,10 +4677,6 @@ fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfi
     let chain = crate::chain::ChainConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
     if chain.is_some() {
         crate::chain::ChainConfig::validate_transport(&ini)
-            .map_err(|e| format!("{CONFIG}: {e}"))?;
-    }
-    if chain.as_ref().is_some_and(|c| c.user) {
-        crate::chain::ChainConfig::validate_user_ipv4_transport(&ini)
             .map_err(|e| format!("{CONFIG}: {e}"))?;
     }
     let backend = prepare_backend(zone, &raw)?;
@@ -7354,6 +7354,7 @@ fn start_user_uplink(
     source: i32,
     target: i32,
     interface: &str,
+    needs_ipv6: bool,
 ) -> Result<(Child, Vec<String>), String> {
     let mut child = Command::new("/proc/self/exe")
         .arg("user-uplink")
@@ -7369,11 +7370,13 @@ fn start_user_uplink(
         let _ = BufReader::new(out).read_line(&mut line);
     }
     let line = line.trim_end();
-    if let Some(resolvers) = line.strip_prefix("OK") {
-        return Ok((
-            child,
-            resolvers.split_whitespace().map(str::to_owned).collect(),
-        ));
+    if line == "OK 6" || line == "OK 4" {
+        if !needs_ipv6 || line == "OK 6" {
+            return Ok((child, Vec::new()));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the upstream user VPN has no IPv6 route to this tunnel endpoint".to_owned());
     }
     let _ = child.kill();
     let _ = child.wait();

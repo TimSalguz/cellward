@@ -1135,10 +1135,6 @@ fn route_command(tools: &Tools, args: &[OsString]) -> u8 {
                 eprintln!("маршрут {}: {e}", name.to_string_lossy());
                 return 1;
             }
-            if let Err(e) = crate::chain::ChainConfig::validate_user_ipv4_transport(&ini) {
-                eprintln!("маршрут {}: {e}", name.to_string_lossy());
-                return 1;
-            }
         }
         if let Err(e) = crate::chain::ChainConfig::validate_transport(&ini).and_then(|()| {
             crate::chain::ChainConfig::refuse_system_duplicate(

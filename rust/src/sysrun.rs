@@ -986,7 +986,11 @@ pub fn request_uplink(
 /// another zone's `/proc/<pid>/ns/net` (different subordinate uid), so only
 /// its OWN namespace descriptors are sent. The broker opens and validates
 /// the outer one's pid itself before starting pasta inside it.
-pub fn request_user_uplink(source: i32, target: i32, interface: &str) -> Result<OwnedFd, String> {
+pub fn request_user_uplink(
+    source: i32,
+    target: i32,
+    interface: &str,
+) -> Result<(OwnedFd, bool), String> {
     let target_user = File::open(format!("/proc/{target}/ns/user"))
         .map_err(|e| format!("cannot open inner user namespace: {e}"))?;
     let target_net = File::open(format!("/proc/{target}/ns/net"))
@@ -1005,7 +1009,8 @@ pub fn request_user_uplink(source: i32, target: i32, interface: &str) -> Result<
         return Err("the user-uplink service went away without an answer".to_owned());
     }
     match parse_done(&buf[..n.unsigned_abs()])? {
-        Done::Ok(_) => Ok(sock),
+        Done::Ok(family) if family == "4" || family == "6" => Ok((sock, family == "6")),
+        Done::Ok(_) => Err("a strange IPv6 capability answer to a user uplink".to_owned()),
         Done::Same(_) => Err("a strange answer to a user uplink".to_owned()),
     }
 }
@@ -1028,8 +1033,8 @@ pub fn user_uplink_main(args: &[OsString]) -> u8 {
         .unwrap_or(crate::zone::PASTA_IFACE);
     let mut out = io::stdout();
     match request_user_uplink(source, target, interface) {
-        Ok(sock) => {
-            let _ = writeln!(out, "OK");
+        Ok((sock, ipv6)) => {
+            let _ = writeln!(out, "OK {}", if ipv6 { "6" } else { "4" });
             let _ = out.flush();
             wait_uplink(&sock)
         }
@@ -1578,11 +1583,13 @@ fn serve_user_uplink(
     if file_ns_id(&current_target) != ns_id(&target_net) {
         return Err("inner zone changed namespace".to_owned());
     }
+    // IPv6 is offered only when the pinned upstream VPN namespace has a
+    // global address and a default route through its tunnel. A failed probe
+    // means IPv4-only pasta, never an IPv6 route inherited from the host.
+    let ipv6 = user_vpn_ipv6(source_pid, source_id);
     system::make_pasta_pid_dir()?;
     let pid_file =
         Path::new(system::PASTA_PID_DIR).join(format!("sysrun-{}.pid", std::process::id()));
-    // IPv4 only until the outer user zone's IPv6 capability is attested by
-    // the broker. No IPv6 default is safer than an unverified side route.
     let mut pasta = spawn_uplink_pasta(
         &source_file,
         &target_user,
@@ -1591,7 +1598,7 @@ fn serve_user_uplink(
         &user,
         interface,
         Some(&pid_file),
-        false,
+        ipv6,
     )?;
     let attached = match sys::pidfd_open(pasta.id() as i32) {
         Some(pidfd) => sys::wait_for_entry_or(&pid_file, Some(&pidfd), Some(sock), sys::written),
@@ -1617,7 +1624,10 @@ fn serve_user_uplink(
             ));
         }
     }
-    send_on(sock, &answer_done(&Done::Ok(String::new())));
+    send_on(
+        sock,
+        &answer_done(&Done::Ok(if ipv6 { "6" } else { "4" }.to_owned())),
+    );
     loop {
         if File::open(&source_path).ok().and_then(|f| file_ns_id(&f)) != Some(source_id) {
             let _ = pasta.kill();
@@ -1645,6 +1655,17 @@ fn serve_user_uplink(
             return Ok(answer_exit(0));
         }
     }
+}
+
+fn user_vpn_ipv6(pid: i32, source_id: (u64, u64)) -> bool {
+    let path = format!("/proc/{pid}/ns/net");
+    if File::open(&path).ok().and_then(|f| file_ns_id(&f)) != Some(source_id) {
+        return false;
+    }
+    let inet6 = fs::read_to_string(format!("/proc/{pid}/net/if_inet6")).unwrap_or_default();
+    let routes = fs::read_to_string(format!("/proc/{pid}/net/ipv6_route")).unwrap_or_default();
+    File::open(&path).ok().and_then(|f| file_ns_id(&f)) == Some(source_id)
+        && crate::hostif::ipv6_usable(crate::zone::TUN_IFACE, &inet6, &routes)
 }
 
 /// [`ns_id`] of an opened namespace file.

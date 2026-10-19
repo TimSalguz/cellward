@@ -490,22 +490,20 @@ impl ChainConfig {
         Ok(())
     }
 
-    pub fn validate_user_ipv4_transport(ini: &WgConfig) -> Result<(), String> {
+    /// An IPv6 endpoint cannot be reached over an IPv4-only preceding hop.
+    /// The broker reports what the pinned source namespace really carries.
+    pub fn needs_ipv6_transport(ini: &WgConfig) -> Result<bool, String> {
         if openconnect::is_openconnect(ini) {
-            let oc = OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
-            if oc.server_literal().is_some_and(|addr| addr.is_ipv6()) {
-                return Err(
-                    "a user-to-user chain currently needs an IPv4 OpenConnect Server".to_owned(),
-                );
-            }
-        } else if ini.sections.iter().flat_map(|s| &s.entries).any(|e| {
+            return Ok(OcConfig::from_ini(ini)
+                .map_err(|e| e.to_string())?
+                .server_literal()
+                .is_some_and(|addr| addr.is_ipv6()));
+        }
+        Ok(ini.sections.iter().flat_map(|s| &s.entries).any(|e| {
             e.key.eq_ignore_ascii_case("Endpoint")
                 && Endpoint::parse(&e.value)
                     .is_some_and(|ep| matches!(ep.host, EndpointHost::V6(_)))
-        }) {
-            return Err("a user-to-user chain currently needs IPv4 tunnel Endpoints".to_owned());
-        }
-        Ok(())
+        }))
     }
 
     /// A key already installed as a system zone could be started directly at
@@ -970,9 +968,15 @@ mod tests {
             user_upstreams(&state, "office", &ini).unwrap(),
             vec!["home-vpn-long"]
         );
-        let ipv6 = WgConfig::parse(b"[Peer]\nEndpoint = [2001:db8::1]:51820\n").unwrap();
-        assert!(ChainConfig::validate_user_ipv4_transport(&ipv6).is_err());
         fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn an_ipv6_endpoint_requires_ipv6_in_the_preceding_user_vpn() {
+        let ipv4 = WgConfig::parse(b"[Peer]\nEndpoint = 192.0.2.1:51820\n").unwrap();
+        let ipv6 = WgConfig::parse(b"[Peer]\nEndpoint = [2001:db8::1]:51820\n").unwrap();
+        assert!(!ChainConfig::needs_ipv6_transport(&ipv4).unwrap());
+        assert!(ChainConfig::needs_ipv6_transport(&ipv6).unwrap());
     }
 
     #[test]

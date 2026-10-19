@@ -1,6 +1,7 @@
 # Focused NixOS VM test of three user-owned VPN hops. Three WireGuard servers
 # run in a second VM; the middle and inner endpoints are reachable only
-# through the preceding tunnels. Also verifies publication and teardown.
+# through the preceding tunnels, including IPv6-only inner endpoints. Also
+# verifies publication and teardown.
 #
 # Run: nix-build tests/vm-user-chain.nix -A driver && ./result/bin/nixos-test-driver
 { system ? builtins.currentSystem }:
@@ -75,8 +76,8 @@ pkgs.testers.runNixOSTest {
 
     def add_node(name, number, private, public, endpoint):
         alice(
-            f"printf '[Interface]\\nPrivateKey = %s\\nAddress = 10.99.{number}.2/32\\n\\n"
-            f"[Peer]\\nPublicKey = %s\\nAllowedIPs = 0.0.0.0/0\\n"
+            f"printf '[Interface]\\nPrivateKey = %s\\nAddress = 10.99.{number}.2/32, fd99:{number}::2/128\\n\\n"
+            f"[Peer]\\nPublicKey = %s\\nAllowedIPs = 0.0.0.0/0, ::/0\\n"
             f"Endpoint = {endpoint}\\n' "
             f"'{private}' '{public}' > /tmp/{name}.conf"
         )
@@ -106,8 +107,8 @@ pkgs.testers.runNixOSTest {
         assert server_ip, "server has no VLAN address"
         for name, number, endpoint in [
             ("outer", 1, f"{server_ip}:51821"),
-            ("middle", 2, "10.99.1.1:51822"),
-            ("inner", 3, "10.99.2.1:51823"),
+            ("middle", 2, "[fd99:1::1]:51822"),
+            ("inner", 3, "[fd99:2::1]:51823"),
         ]:
             server_private = server.succeed("wg genkey").strip()
             server_public = server.succeed(
@@ -121,9 +122,11 @@ pkgs.testers.runNixOSTest {
             server.succeed(
                 f"ip link add wg{number} type wireguard && "
                 f"ip addr add 10.99.{number}.1/24 dev wg{number} && "
+                f"ip -6 addr add fd99:{number}::1/64 dev wg{number} && "
                 f"wg set wg{number} listen-port {51820 + number} "
                 f"private-key /root/wg{number}.key peer '{client_public}' "
-                f"allowed-ips 10.99.{number}.2/32 && ip link set wg{number} up"
+                f"allowed-ips 10.99.{number}.2/32,fd99:{number}::2/128 && "
+                f"ip link set wg{number} up"
             )
             add_node(name, number, client_private, server_public, endpoint)
 
@@ -152,16 +155,18 @@ pkgs.testers.runNixOSTest {
             machine.succeed(f"test -f {STATE}/{name}/ready")
         pasta_in("middle", "outer")
         pasta_in("inner", "middle")
-        inner_pid = machine.succeed(f"cat {STATE}/inner/zone.pid").strip()
-        machine.wait_until_succeeds(
-            "su -l alice -c "
-            + shlex.quote(
-                f"export XDG_RUNTIME_DIR=/run/user/1000; "
-                f"nsenter --preserve-credentials -U -n -m -t {inner_pid} -- "
-                "ping -c1 -W2 10.99.3.1"
-            ),
-            timeout=60,
-        )
+        for name, number in [("outer", 1), ("middle", 2), ("inner", 3)]:
+            zone_pid = machine.succeed(f"cat {STATE}/{name}/zone.pid").strip()
+            for addr in [f"10.99.{number}.1", f"fd99:{number}::1"]:
+                probe = (
+                    "su -l alice -c "
+                    + shlex.quote(
+                        f"export XDG_RUNTIME_DIR=/run/user/1000; "
+                        f"nsenter --preserve-credentials -U -n -m -t {zone_pid} -- "
+                        f"ping -c1 -W2 {addr}"
+                    )
+                )
+                machine.wait_until_succeeds(probe, timeout=20)
         for number in [1, 2, 3]:
             handshakes = server.succeed(f"wg show wg{number} latest-handshakes")
             assert handshakes.strip() and not handshakes.strip().endswith("\t0"), handshakes
