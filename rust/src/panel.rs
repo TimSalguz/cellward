@@ -11,7 +11,7 @@
 //! ```text
 //! container⇥<name>⇥<home: private|layer|main>⇥<network|ask>⇥<#rrggbb>
 //! path⇥<container>⇥<path>⇥<until: unix seconds, 0 for ever>
-//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>⇥<upstream>⇥<route: chain|system|->
+//! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>⇥<upstream>⇥<route: chain|system|->⇥<published: 0|1>
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
@@ -147,6 +147,7 @@ pub fn data(tools: &Tools) -> String {
     for zone in zones(&tools.state) {
         let up = crate::cli::zone_pid(&tools.state, OsStr::new(&zone)).is_some();
         let (upstream, route) = upstream(&tools.state, &zone);
+        let published = crate::chain::published_zone(&tools.state, &zone).unwrap_or(false);
         line(&[
             "network",
             &zone,
@@ -157,6 +158,7 @@ pub fn data(tools: &Tools) -> String {
             tunnel(&zone, up),
             &upstream,
             route,
+            if published { "1" } else { "0" },
         ]);
     }
     line(&[
@@ -169,6 +171,7 @@ pub fn data(tools: &Tools) -> String {
         "-",
         "",
         "",
+        "1",
     ]);
     {
         let up = crate::cli::zone_pid(&tools.state, OsStr::new(crate::launch::HOST)).is_some();
@@ -182,6 +185,7 @@ pub fn data(tools: &Tools) -> String {
             "-",
             "",
             "",
+            "1",
         ]);
     }
     line(&[
@@ -194,6 +198,7 @@ pub fn data(tools: &Tools) -> String {
         "-",
         "",
         "",
+        "1",
     ]);
     let procs = crate::owners::Procs::scan();
     for i in crate::instance::running(&tools.state) {

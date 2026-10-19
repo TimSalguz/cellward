@@ -64,6 +64,7 @@ struct Net {
     /// `chain`: this network has an inner tunnel; `system`: it borrows the
     /// outer tunnel directly.
     route: String,
+    published: bool,
 }
 
 /// The route represented by a zone. Show both namespace and remote-server
@@ -161,6 +162,19 @@ fn parse(text: &str) -> Data {
                     c.paths.push(((*path).to_owned(), num(until)));
                 }
             }
+            ["network", name, kind, up, color, locked, tunnel, upstream, route, published] => {
+                d.networks.push(Net {
+                    name: (*name).to_owned(),
+                    kind: (*kind).to_owned(),
+                    up: *up == "1",
+                    color: color_of(color),
+                    locked: *locked == "1",
+                    tunnel: (*tunnel).to_owned(),
+                    upstream: (*upstream).to_owned(),
+                    route: (*route).to_owned(),
+                    published: *published == "1",
+                })
+            }
             ["network", name, kind, up, color, locked, tunnel, upstream, route] => {
                 d.networks.push(Net {
                     name: (*name).to_owned(),
@@ -171,6 +185,7 @@ fn parse(text: &str) -> Data {
                     tunnel: (*tunnel).to_owned(),
                     upstream: (*upstream).to_owned(),
                     route: (*route).to_owned(),
+                    published: true,
                 })
             }
             // A panel backend from the previous generation, while a
@@ -185,6 +200,7 @@ fn parse(text: &str) -> Data {
                 tunnel: (*tunnel).to_owned(),
                 upstream: String::new(),
                 route: String::new(),
+                published: true,
             }),
             ["setting", name, value, source] => d.settings.push((
                 (*name).to_owned(),
@@ -1763,6 +1779,9 @@ impl Panel {
             if !n.upstream.is_empty() {
                 state.push_str(&format!(" · через {}", n.upstream));
             }
+            if !n.published {
+                state.push_str(" · маршрут не разрешён");
+            }
             let mut buttons = row![].spacing(6);
             if n.kind == "zone" || n.kind == "host" {
                 if n.up {
@@ -1778,7 +1797,7 @@ impl Panel {
                             Msg::ZoneDo(n.name.clone(), "check"),
                             false,
                         ));
-                } else {
+                } else if n.published {
                     buttons =
                         buttons.push(act("Поднять", Msg::ZoneDo(n.name.clone(), "up"), false));
                 }
@@ -2031,6 +2050,7 @@ mod tests {
         path\tnobody\t/x\t0\n\
         container\tbank\tprivate\task\t#808080\n\
         network\tnl\tzone\t1\t#3366ff\t0\talive\tcorp\tchain\n\
+        network\tch\tzone\t0\t#808080\t0\t-\tnl\tchain\t0\n\
         network\toffline\toffline\t1\t#808080\t1\t-\t\t\n\
         network\told\tzone\t1\t#808080\t0\tunknown\n\
         setting\tdefault\toffline\tdefault\n\
@@ -2057,15 +2077,16 @@ mod tests {
         // The previous generation's seven-field network line stays readable
         // while a home-manager switch replaces backend and window in either
         // order; it simply has no upstream yet.
-        assert_eq!(d.networks.len(), 3);
-        assert!(d.networks[2].upstream.is_empty());
+        assert_eq!(d.networks.len(), 4);
+        assert!(!d.networks[1].published);
+        assert!(d.networks[3].upstream.is_empty());
         assert!(d.networks[0].up && !d.networks[0].locked);
         assert_eq!(d.networks[0].route, "chain");
         let path = route_path(&d.networks[0], "work");
         assert!(path.contains("work → nl (awg0: слой 1) → uplink (hostif) → corp (awg0: слой 2)"));
         assert!(path.contains("сервер corp (снят слой 2) → сервер nl (снят слой 1)"));
         assert!(path.contains("Ответ ← теми же звеньями в обратном порядке"));
-        assert!(d.networks[1].locked);
+        assert!(d.networks[2].locked);
         assert_eq!(tunnel_text(&d.networks[0]), "поднята · туннель жив");
         assert_eq!(
             d.settings,
