@@ -959,6 +959,11 @@ pub fn run(args: Args) -> u8 {
         let verify = || -> Result<(), String> {
             let raw = fs::read(zone.path(CONFIG)).map_err(|e| e.to_string())?;
             let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+            crate::chain::refuse_user_shortcut(
+                zone.dir.parent().ok_or("zone has no state directory")?,
+                &zone.name(),
+                &ini,
+            )?;
             if crate::chain::ChainConfig::from_ini(&ini)?.is_some() {
                 crate::chain::ChainConfig::validate_transport(&ini)?;
                 crate::chain::ChainConfig::refuse_system_duplicate(

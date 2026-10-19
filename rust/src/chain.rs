@@ -5,6 +5,9 @@
 //! namespace.  The inner tunnel therefore sees the outer tunnel as its only
 //! route; if either hop dies, the inner zone dies too.
 
+use std::fs;
+use std::path::Path;
+
 use crate::config::{Endpoint, EndpointHost, WgConfig};
 use crate::openconnect::{self, OcConfig};
 
@@ -93,9 +96,94 @@ impl ChainConfig {
     }
 }
 
+/// The identity of a tunnel, not its zone name. An OpenConnect gateway has
+/// no WireGuard key, so its address and port are the strongest local identity
+/// available here. Different accounts on one gateway intentionally conflict:
+/// either direct connection would still reveal that gateway to the provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TunnelIdentity {
+    WireGuard(String),
+    OpenConnect(String, u16),
+}
+
+fn identity(ini: &WgConfig) -> Result<Option<TunnelIdentity>, String> {
+    if openconnect::is_openconnect(ini) {
+        let oc = OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
+        let server = oc
+            .server_literal()
+            .map_or_else(|| oc.server.to_ascii_lowercase(), |ip| ip.to_string());
+        return Ok(Some(TunnelIdentity::OpenConnect(
+            server,
+            oc.port.unwrap_or(443),
+        )));
+    }
+    Ok(ini
+        .interface()
+        .and_then(|section| section.get("PrivateKey"))
+        .map(|key| TunnelIdentity::WireGuard(key.trim().to_owned())))
+}
+
+/// A user zone with the same tunnel must not offer a shorter route than a
+/// chain. Check both when adding a zone and when starting it: either config
+/// might have been added or changed since the other was created. A malformed
+/// peer config is not silently treated as evidence of safety.
+pub fn refuse_user_shortcut(state: &Path, name: &str, ini: &WgConfig) -> Result<(), String> {
+    let Some(ours) = identity(ini)? else {
+        return Ok(());
+    };
+    let chained = ChainConfig::from_ini(ini)?.is_some();
+    let entries = match fs::read_dir(state) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("cannot inspect user zones for shorter routes: {e}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("cannot inspect user zones: {e}"))?;
+        let other = entry.file_name();
+        let Some(other_name) = other.to_str() else {
+            continue;
+        };
+        if other_name == name || !crate::cli::safe_zone_name(&other) {
+            continue;
+        }
+        let path = entry.path().join("config.conf");
+        if !path.exists() {
+            continue;
+        }
+        let raw = fs::read(&path).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+        let peer =
+            WgConfig::parse(&raw).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+        if identity(&peer).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?
+            == Some(ours.clone())
+            && chained != ChainConfig::from_ini(&peer)?.is_some()
+        {
+            return Err(format!(
+                "the same VPN is also user zone {other_name} with a different route; \
+                 its direct connection could bypass [Chain] — remove that shorter route first"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "cellward-chain-shortcut-{tag}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn installed(state: &Path, name: &str, text: &str) {
+        let dir = state.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.conf"), text).unwrap();
+    }
 
     fn parse(text: &str) -> Result<Option<ChainConfig>, String> {
         ChainConfig::from_ini(&WgConfig::parse(text.as_bytes()).unwrap())
@@ -142,5 +230,65 @@ mod tests {
                 .unwrap_err()
                 .contains("no socket")
         );
+    }
+
+    #[test]
+    fn same_user_wireguard_key_cannot_have_a_direct_shortcut_in_either_order() {
+        let state = state("wg");
+        let direct = "[Interface]\nPrivateKey = inner-secret\n";
+        let chain = "[Interface]\nPrivateKey = inner-secret\n[Chain]\nVia = nl\n";
+        installed(&state, "direct", direct);
+        assert!(
+            refuse_user_shortcut(&state, "inner", &WgConfig::parse(chain.as_bytes()).unwrap())
+                .unwrap_err()
+                .contains("direct")
+        );
+        fs::remove_dir_all(state.join("direct")).unwrap();
+        installed(&state, "inner", chain);
+        assert!(refuse_user_shortcut(
+            &state,
+            "direct",
+            &WgConfig::parse(direct.as_bytes()).unwrap()
+        )
+        .unwrap_err()
+        .contains("inner"));
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn same_openconnect_gateway_cannot_have_a_direct_shortcut() {
+        let state = state("oc");
+        let chain = "[OpenConnect]\nServer = 192.0.2.5\nAskLogin = no\n[Chain]\nVia = nl\n";
+        installed(&state, "inner", chain);
+        let direct = "[OpenConnect]\nServer = 192.0.2.5:443\nAskLogin = no\n";
+        assert!(refuse_user_shortcut(
+            &state,
+            "direct",
+            &WgConfig::parse(direct.as_bytes()).unwrap()
+        )
+        .unwrap_err()
+        .contains("inner"));
+        let other = "[OpenConnect]\nServer = 192.0.2.6\nAskLogin = no\n";
+        assert!(
+            refuse_user_shortcut(&state, "other", &WgConfig::parse(other.as_bytes()).unwrap())
+                .is_ok()
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn independent_and_equally_chained_zones_are_allowed() {
+        let state = state("allowed");
+        installed(
+            &state,
+            "first",
+            "[Interface]\nPrivateKey = shared\n[Chain]\nVia = nl\n",
+        );
+        let same_route =
+            WgConfig::parse(b"[Interface]\nPrivateKey = shared\n[Chain]\nVia = nl\n").unwrap();
+        assert!(refuse_user_shortcut(&state, "second", &same_route).is_ok());
+        let other = WgConfig::parse(b"[Interface]\nPrivateKey = distinct\n").unwrap();
+        assert!(refuse_user_shortcut(&state, "other", &other).is_ok());
+        fs::remove_dir_all(state).unwrap();
     }
 }

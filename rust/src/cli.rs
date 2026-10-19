@@ -771,6 +771,24 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
         );
     }
 
+    // The final config (including --via or the system-zone conversion) is
+    // what will be published. A previously installed direct user zone must
+    // not be a shortcut to the same inner VPN, and the reverse order of
+    // creation must be refused too.
+    let final_ini = match WgConfig::parse(&text) {
+        Ok(ini) => ini,
+        Err(e) => {
+            eprintln!("не разобрать итоговый конфиг: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) =
+        crate::chain::refuse_user_shortcut(&tools.state, &name.to_string_lossy(), &final_ini)
+    {
+        eprintln!("{}: {e}", conf.display());
+        return 1;
+    }
+
     let dir = tools.state.join(name);
     if let Err(e) = fs::create_dir_all(&dir) {
         eprintln!("не создать {}: {e}", dir.display());
