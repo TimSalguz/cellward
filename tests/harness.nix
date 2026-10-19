@@ -45,6 +45,21 @@ let
       };
   };
 
+  hmWithoutAudioPolicy = import "${homeManagerSrc}/modules" {
+    inherit pkgs;
+    configuration = {
+      imports = [ ../module ];
+      programs.cellward = {
+        enable = true;
+        pipewirePolicy = false;
+      };
+      home = {
+        inherit username homeDirectory;
+        stateVersion = "26.05";
+      };
+    };
+  };
+
   # Скрипты модуля — внутренние let-биндинги, наружу они попадают только через
   # home.packages. Вытаскиваем их оттуда по имени деривации (lib.getName
   # отбрасывает версию: «cellward-0.1.0» → «cellward»), чтобы CI мог собирать
@@ -336,6 +351,23 @@ let
     if lib.isList rawInstanceExecStart then lib.head rawInstanceExecStart else rawInstanceExecStart;
 in
 {
+  # The standalone home-manager entry must provide the restricted PipeWire
+  # path too: ALSA clients do not use the Pulse filter as a fallback.
+  audioPolicyDefault = lib.all lib.id [
+    (expect "standalone home-manager leaves the PipeWire policy disabled" hm.config.programs.cellward.pipewirePolicy)
+    (expect "standalone home-manager does not install the WirePlumber policy fragment" (
+      hm.config.xdg.configFile ? "wireplumber/wireplumber.conf.d/90-vpn-zones.conf"
+    ))
+    (expect "standalone home-manager does not install the WirePlumber policy script" (
+      hm.config.xdg.dataFile ? "wireplumber/scripts/vpn-zones/policy.lua"
+    ))
+    (expect "explicit PipeWire policy opt-out is ignored" (
+      !hmWithoutAudioPolicy.config.programs.cellward.pipewirePolicy
+      && !(hmWithoutAudioPolicy.config.xdg.configFile ? "wireplumber/wireplumber.conf.d/90-vpn-zones.conf")
+      && !(hmWithoutAudioPolicy.config.xdg.dataFile ? "wireplumber/scripts/vpn-zones/policy.lua")
+    ))
+  ];
+
   # Полная активация home-manager: инстанцируется в CI как «модуль хотя бы
   # целиком вычисляется». Собирать её не обязательно.
   inherit (hm) activationPackage;

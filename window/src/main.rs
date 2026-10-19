@@ -321,9 +321,10 @@ impl Window {
             .or_else(|| req.nets.iter().position(|i| i.tag == "offline"))
             .unwrap_or(0);
         let container = req.containers.iter().position(|i| i.selected).unwrap_or(0);
+        let unconfined = req.nets.get(net).is_some_and(|n| n.tag == "unconfined");
         Self {
-            pin_net: req.pin_net,
-            pin_container: req.pin_container,
+            pin_net: req.pin_net && !unconfined,
+            pin_container: req.pin_container && !unconfined,
             rule: false,
             offered: vec![false; req.offers.len()],
             changed: std::collections::HashMap::new(),
@@ -395,6 +396,9 @@ impl Window {
     }
 
     fn container_ok(&self, i: usize) -> bool {
+        if self.net_tag() == "unconfined" {
+            return false;
+        }
         self.req
             .containers
             .get(i)
@@ -404,6 +408,9 @@ impl Window {
     /// Everything needed to start: a container that goes with the network, a
     /// name for a new one, and the guard's time over.
     fn ready(&self) -> bool {
+        if self.net_tag() == "unconfined" {
+            return self.armed;
+        }
         let Some(c) = self.req.containers.get(self.container) else {
             return false;
         };
@@ -443,7 +450,13 @@ impl Window {
 
     fn pick(&mut self, index: usize) {
         match self.pane {
-            Pane::Net if index < self.req.nets.len() => self.net = index,
+            Pane::Net if index < self.req.nets.len() => {
+                self.net = index;
+                if self.net_tag() == "unconfined" {
+                    self.pin_net = false;
+                    self.pin_container = false;
+                }
+            }
             Pane::Container if self.container_ok(index) => self.container = index,
             _ => {}
         }
@@ -485,6 +498,10 @@ impl Window {
     /// The answer, as the picker reads it.
     fn answer(&self) -> String {
         let mut out = format!("net\t{}\n", self.net_tag());
+        if self.net_tag() == "unconfined" {
+            out.push_str("container\topen\npin-net\t0\npin-container\t0\n");
+            return out;
+        }
         let c = &self.req.containers[self.container];
         out.push_str(&format!("container\t{}\n", c.tag));
         if c.new {
@@ -578,6 +595,10 @@ impl Window {
                 self.pane = Pane::Net;
                 let changed = self.net != i;
                 self.net = i;
+                if self.net_tag() == "unconfined" {
+                    self.pin_net = false;
+                    self.pin_container = false;
+                }
                 if changed && self.guarded() {
                     return self.hold();
                 }
@@ -595,8 +616,12 @@ impl Window {
                     }
                 }
             }
-            Msg::PinNet(v) => self.pin_net = v && !self.req.no_pins,
-            Msg::PinContainer(v) => self.pin_container = v && !self.req.no_pins,
+            Msg::PinNet(v) => {
+                self.pin_net = v && !self.req.no_pins && self.net_tag() != "unconfined"
+            }
+            Msg::PinContainer(v) => {
+                self.pin_container = v && !self.req.no_pins && self.net_tag() != "unconfined"
+            }
             Msg::Rule(v) => self.rule = v && self.req.rule.is_some(),
             Msg::Offer(i, v) => {
                 if let Some(ticked) = self.offered.get_mut(i) {
@@ -716,28 +741,49 @@ impl Window {
                 return self.update(Msg::Launch)
             }
             Key::Named(key::Named::ArrowLeft) => self.pane = Pane::Net,
-            Key::Named(key::Named::ArrowRight) => self.pane = Pane::Container,
+            Key::Named(key::Named::ArrowRight) if self.net_tag() != "unconfined" => {
+                self.pane = Pane::Container
+            }
             Key::Named(key::Named::Tab) => {
                 self.pane = match (self.pane, modifiers.shift()) {
                     (Pane::Net, false) | (Pane::Container, true) => Pane::Container,
                     _ => Pane::Net,
+                };
+                if self.net_tag() == "unconfined" {
+                    self.pane = Pane::Net;
                 }
             }
             Key::Named(key::Named::ArrowUp) => self.step(-1),
             Key::Named(key::Named::ArrowDown) => self.step(1),
             Key::Named(key::Named::Space) if !self.req.no_pins => match self.pane {
-                Pane::Net => self.pin_net = !self.pin_net,
-                Pane::Container => self.pin_container = !self.pin_container,
+                Pane::Net if self.net_tag() != "unconfined" => self.pin_net = !self.pin_net,
+                Pane::Net => {}
+                Pane::Container if self.net_tag() != "unconfined" => {
+                    self.pin_container = !self.pin_container
+                }
+                Pane::Container => {}
             },
             // Digits choose nothing in a zone's window.
             Key::Character(c) if self.req.asker.is_none() => {
-                if let Some(d) = c
-                    .chars()
-                    .next()
-                    .and_then(|c| c.to_digit(10))
-                    .filter(|d| *d > 0)
-                {
-                    self.pick(d as usize - 1);
+                if let Some(d) = c.chars().next().and_then(|c| c.to_digit(10)) {
+                    let index = if self.pane == Pane::Net {
+                        if d == 0 {
+                            self.req.nets.iter().position(|n| n.tag == "unconfined")
+                        } else {
+                            self.req
+                                .nets
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, n)| n.tag != "unconfined")
+                                .nth(d as usize - 1)
+                                .map(|(i, _)| i)
+                        }
+                    } else {
+                        (d > 0).then_some(d as usize - 1)
+                    };
+                    if let Some(index) = index {
+                        self.pick(index);
+                    }
                     if self.pane == Pane::Container && self.naming() {
                         return iced::widget::operation::focus(NAME_FIELD);
                     }
@@ -759,12 +805,20 @@ impl Window {
         let focused = self.pane == pane;
         let mut list = column![].spacing(2);
         for (i, item) in items.iter().enumerate() {
+            if pane == Pane::Net && item.tag == "unconfined" {
+                continue;
+            }
             let why = (pane == Pane::Container)
                 .then(|| blocked(item, self.net_tag()))
                 .flatten();
             let mark = if i == chosen { "●" } else { "○" };
-            let number = if i < 9 {
-                format!("{} ", i + 1)
+            let display_number = if pane == Pane::Net {
+                items[..i].iter().filter(|n| n.tag != "unconfined").count() + 1
+            } else {
+                i + 1
+            };
+            let number = if display_number < 10 {
+                format!("{display_number} ")
             } else {
                 "  ".to_owned()
             };
@@ -871,22 +925,9 @@ impl Window {
             return self.view_perms();
         }
         let nets = self.column_view("Сеть", Pane::Net, &self.req.nets, self.net, Msg::Net);
-        let containers = self.column_view(
-            "Контейнер",
-            Pane::Container,
-            &self.req.containers,
-            self.container,
-            Msg::Container,
-        );
-        // The containers' words are the longer ones: their column is wider.
-        let mut right = column![containers].spacing(8).width(Length::FillPortion(3));
+        let unconfined = self.net_tag() == "unconfined";
         let mut left = column![nets].spacing(8).width(Length::FillPortion(2));
-        if !self.req.no_pins {
-            right = right.push(
-                checkbox(self.pin_container)
-                    .label("Всегда этот контейнер")
-                    .on_toggle(Msg::PinContainer),
-            );
+        if !self.req.no_pins && !unconfined {
             left = left.push(
                 checkbox(self.pin_net)
                     .label("Всегда эту сеть")
@@ -901,6 +942,21 @@ impl Window {
         for note in &self.req.notes {
             page = page.push(text(format!("ⓘ {note}")).size(14));
         }
+        if self.req.nets.iter().any(|n| n.tag == "unconfined") {
+            let style = if unconfined {
+                button::danger
+            } else {
+                button::secondary
+            };
+            if let Some(index) = self.req.nets.iter().position(|n| n.tag == "unconfined") {
+                page = page.push(
+                    button(text("⚠ Без изоляции и без VPN — полный доступ к файлам, устройствам и сеансу хоста").size(15))
+                        .width(Length::Fill)
+                        .style(style)
+                        .on_press(Msg::Net(index)),
+                );
+            }
+        }
         if !self.req.command.is_empty() {
             page = page.push(self.command_view());
         }
@@ -909,28 +965,49 @@ impl Window {
         } else {
             Length::Fill
         };
-        page = page.push(row![left, right].spacing(16).height(lists));
-        if !self.req.perms.is_empty() {
-            page = page.push(self.perms_view());
-        }
-        if let Some(rule) = &self.req.rule {
-            page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
-        }
-        if !self.req.offers.is_empty() {
-            let mut offers =
-                column![
-                    text("Заготовка программы предлагает её контейнеру — только отмеченное:")
-                        .size(14)
-                ]
-                .spacing(4);
-            for (i, (_, label)) in self.req.offers.iter().enumerate() {
-                offers = offers.push(
-                    checkbox(self.offered.get(i).copied().unwrap_or(false))
-                        .label(label.as_str())
-                        .on_toggle(move |v| Msg::Offer(i, v)),
+        if unconfined {
+            page = page.push(text("Контейнер не используется. Чтобы выбрать сеть и контейнер, нажмите сеть слева.").size(14));
+            page = page.push(left.height(lists));
+        } else {
+            let containers = self.column_view(
+                "Контейнер",
+                Pane::Container,
+                &self.req.containers,
+                self.container,
+                Msg::Container,
+            );
+            let mut right = column![containers].spacing(8).width(Length::FillPortion(3));
+            if !self.req.no_pins {
+                right = right.push(
+                    checkbox(self.pin_container)
+                        .label("Всегда этот контейнер")
+                        .on_toggle(Msg::PinContainer),
                 );
             }
-            page = page.push(offers);
+            page = page.push(row![left, right].spacing(16).height(lists));
+        }
+        if !unconfined {
+            if !self.req.perms.is_empty() {
+                page = page.push(self.perms_view());
+            }
+            if let Some(rule) = &self.req.rule {
+                page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
+            }
+            if !self.req.offers.is_empty() {
+                let mut offers = column![text(
+                    "Заготовка программы предлагает её контейнеру — только отмеченное:"
+                )
+                .size(14)]
+                .spacing(4);
+                for (i, (_, label)) in self.req.offers.iter().enumerate() {
+                    offers = offers.push(
+                        checkbox(self.offered.get(i).copied().unwrap_or(false))
+                            .label(label.as_str())
+                            .on_toggle(move |v| Msg::Offer(i, v)),
+                    );
+                }
+                page = page.push(offers);
+            }
         }
         let label = if !self.armed {
             "Секунду…".to_owned()
@@ -1302,6 +1379,30 @@ mod tests {
             w.answer(),
             "net\tde\ncontainer\twork\npin-net\t1\npin-container\t1\n"
         );
+    }
+
+    #[test]
+    fn no_isolation_is_a_whole_launch_mode_not_a_container_combination() {
+        let mut w = Window::new(parse_request(
+            "title\tFirefox\nnet\tunconfined\tБез изоляции\t\nnet\toffline\tБез сети\tselected\n\
+             container\t\tНастоящий дом\t\ncontainer\twork\tКонтейнер work\tselected\n\
+             pin-net\t0\npin-container\t1\noffer\tcamera=on\tкамера\n",
+        ));
+        w.pane = Pane::Net;
+        w.pick(0);
+        assert!(w.ready(), "скрытый контейнер не должен блокировать запуск");
+        assert!(!w.pin_container);
+        assert_eq!(
+            w.answer(),
+            "net\tunconfined\ncontainer\topen\npin-net\t0\npin-container\t0\n"
+        );
+        w.pick(1);
+        assert_eq!(
+            w.container, 1,
+            "выбор контейнера сохраняется для обычной сети"
+        );
+        assert!(w.answer().contains("container\twork\n"));
+        assert!(!w.pin_container);
     }
 
     #[test]

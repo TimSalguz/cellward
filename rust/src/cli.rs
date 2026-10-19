@@ -24,7 +24,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 
@@ -39,6 +39,7 @@ use crate::tools::Tools;
 /// a command that failed, hence its own code — and the same "bad invocation"
 /// number `vpn-zone-core` uses.
 pub const EXIT_TOOLS: u8 = 2;
+const CHAIN_USAGE: &str = "\nЦепочки VPN:\n  cellward add <имя> <файл.conf> --via <системная зона>\n      транспорт нового туннеля идёт через внешнюю системную зону\n  cellward node add <узел> <файл.conf>\n      сохранить VPN-конфиг один раз в скрытом пуле\n  cellward route add <зона> <узел> [--via <системная зона>|--via-user <маршрут>]\n      создать маршрут без копии ключа (нужна строгая политика)\n  cellward routes enable            включить строгий белый список (сначала пустой)\n  cellward routes [list|allow <зона>|deny <зона>]\n      публиковать только разрешённые маршруты; конфиг сам по себе их не разрешает\n";
 
 const USAGE: &str = "cellward — сетевые зоны с VPN, без root\n(коротко — cw; прежнее имя vpn-zone тоже работает)\n\n  cellward add <имя> <файл.conf>   создать зону из конфига AmneziaWG/WireGuard\n                                   или OpenConnect (секция [OpenConnect])\n  cellward add <имя> --system <з.> зона через туннель системной зоны <з.>:\n                                   своего туннеля нет, один VPN — одно\n                                   подключение (конфиг с ключом системной\n                                   зоны становится такой зоной сам)\n  cellward up <имя>                поднять\n  cellward down <имя>              опустить\n  cellward restart <имя>           опустить и поднять снова: так поднятая зона\n                                   берёт новую сборку после обновления (её\n                                   контейнеры на миг без сети и подключаются\n                                   снова; программы, запущенные прошлой\n                                   сборкой в самой зоне, её теряют)\n  cellward list                    список зон и их состояние\n  cellward connection [<сеть> [auto|ask|manual|default]]\n                                   как подключается сеть: auto — сразу,\n                                   когда в неё запускают программу (по\n                                   умолчанию); ask — сначала спросить;\n                                   manual — только вручную (cellward up)\n  cellward version                 версия и сборка (путь в /nix/store)\n  cellward status <имя>            подробности (адрес, handshake)\n  cellward status --json           всё состояние машиночитаемо: зоны, контейнеры,\n                                   программы, откуда взято каждое значение\n  cellward status --bar            одна строка JSON для статус-бара (waybar):\n                                   поднятые зоны и живы ли их туннели\n  cellward traffic [--json] [--watch]\n                                   сколько отдал (↑) и принял (↓) каждый\n                                   работающий контейнер с его подъёма;\n                                   --watch — раз в секунду\n  cellward traffic --days <N> [--json]\n                                   расход по контейнерам и сетям за N\n                                   дней (итоги пишет cellward watch)\n  cellward traffic --connections [--json]\n                                   с кем соединялся каждый работающий\n                                   контейнер: адрес, порт, имя из ответа\n                                   DNS, программа, сколько туда и оттуда\n  cellward traffic --programs [--days <N>] [--json]\n                                   расход по программам контейнеров за N\n                                   дней (по умолчанию сегодня)\n  cellward netlog [keep <дни>|cap <размер>]\n                                   сколько хранить журнал соединений (по\n                                   умолчанию 30 дней и не больше 1G)\n  cellward protect [add|rm <путь>] что из настоящего дома не пишет ни один\n                                   контейнер: репозиторий конфигурации и\n                                   т. п. (то, что исполняет хост, — всегда);\n                                   запись выдаёт container grant\n  cellward presets [<программа>] [--json]\n                                   что программе нужно по заготовке: что её\n                                   свой контейнер получает сам, что — только\n                                   по выбору (programs.cellward.programs)\n  cellward explain <контейнер|программа|main> [<сеть>] [--json]\n                                   что получают программы контейнера в сети и\n                                   чьё слово это решило: обходы сети (сессия\n                                   хоста, Nix-демон, запись файлов хоста) —\n                                   только если контейнер просит и сеть\n                                   допускает; X11, камеры, микрофон, экран\n  cellward run <имя> -- <кмд>      запустить программу внутри зоны\n  cellward launch <id> [-- <арг.>] запустить ярлык по id через пикер, как\n                                   щелчок по нему, — для биндов композитора\n  cellward rm <имя>                удалить зону вместе с ярлыками\n  cellward sync                    пересобрать .desktop-ярлыки\n  cellward mode <режим>            как ярлыки работают:\n                                     picker   — один ярлык, спрашивает сеть\n                                                при запуске (по умолчанию)\n                                     per-zone — отдельный ярлык на каждую зону\n                                                (устарел, будет убран)\n                                     both     — и то, и другое (устарел)\n                                     off      — не трогать ярлыки вовсе\n  cellward default <вариант>       что предлагать в пикере для незнакомой\n                                   программы: offline (по умолчанию),\n                                   host (сеть хоста без VPN), unconfined\n                                   (без изоляции и без VPN; прежнее имя —\n                                   direct) или имя сети с VPN\n  cellward gc                      убрать зависшие держатели зон, осиротевшую\n                                   обвязку и мёртвые записи\n  cellward perms list|reset <прог.|--all>\n                                   какие доступы к файлам выданы программам\n                                   со своим домом; reset — спросить заново\n  cellward container create <имя> [--home private|layer|main]\n                                   контейнер: свой дом (private, по умолчанию),\n                                   слой над настоящим домом (layer) или сам\n                                   настоящий дом (main) — со своими сетью,\n                                   программами и разрешениями\n  cellward container rm <имя>      удалить контейнер с его данными\n  cellward container stop <имя>    остановить экземпляр контейнера: его\n                                   программы закрываются (TERM), как при\n                                   выходе из сессии\n  cellward container kill <имя>    то же сразу: заморозить и убить все\n                                   программы контейнера, остановить его\n  cellward container reattach <имя> снова присоединить экземпляр к его зоне,\n                                   какой она стала (после смены её конфига)\n  cellward sandbox create|list|rm <имя>\n  cellward profile create|list|rm <имя>\n                                   прежние слова: контейнер со своим домом\n                                   (sandbox) или слоем (profile)\n  cellward run <имя> --container <к> -- <кмд>\n                                   запустить в контейнере (--sandbox и\n                                   --profile — прежние слова для того же)\n  cellward run <имя> --fs-sandbox -- <кмд>\n                                   запустить в разовом контейнере: вместо\n                                   $HOME — пустой каталог, наружу\n                                   видно только разрешённое, остальное — через\n                                   диалог выбора файла (порталы)\n  cellward run <имя> --fs-sandbox --join <н> -- <кмд>\n                                   в открытый разовый контейнер (его имя —\n                                   в реестре: __fs__:<н>), к его дому\n  cellward run <имя> --fs-sandbox --with x11=on|off --with camera=<как> -- <кмд>\n                                   разрешения одного запуска — только у\n                                   разового контейнера (camera: no, black,\n                                   ask, yes)\n  cellward run <имя> --tmp-profile -- <кмд>\n                                   запустить во временном слое над домом:\n                                   дом виден, слой создаётся в /tmp и\n                                   стирается, когда выйдет последняя программа\n  cellward run <сеть> --no-isolation -- <кмд>\n                                   без изоляции: всё, что у хоста, в этой\n                                   сети (обходы туннеля решает сеть)\n  cellward run host -- <кмд>       сеть хоста без VPN, программа в своём\n                                   контейнере\n  cellward default-profile <v>     контейнер по умолчанию для всех запусков:\n                                   ask (спрашивать), main (основной),\n                                   own (свой контейнер у каждой программы)\n                                   или имя контейнера\n  cellward pins                    какие программы закреплены за сетями\n  cellward forget <прог.|--all>    снять закрепление (снова будет спрашивать)\n  cellward wayland-proxy on|off    посредник между программами и\n                                   композитором (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-no-proxy)\n  cellward wayland-sandbox on|off  отбирать ли у программ захват экрана,\n                                   чтение буфера в фоне и эмуляцию ввода\n                                   (по умолчанию on; исключения —\n                                   ~/.config/vpn-zones/wayland-allow)\n  cellward frame show|hide         рамка цвета зоны вокруг окон её программ;\n                                   hide — спрятать у окон, открытых после\n                                   этого (для показа экрана)\n  cellward frame width <0–32> (по умолчанию 4)\n                                   толщина рамки, логические пиксели; 0 —\n                                   без рамки по краям; открытые окна\n                                   перестраиваются сразу\n  cellward frame color <зона> default (из имени зоны)|<#rrggbb>\n                                   цвет рамки зоны\n  cellward frame title always (по умолчанию)|hover|off\n                                   полоса заголовка «зона · контейнер» сверху:\n                                   всегда, при наведении (поверх окна, у\n                                   верхнего края) или нет\n  cellward frame style soft (по умолчанию)|full|tag\n                                   вид рамки: мягкие тона цвета зоны, сам цвет\n                                   зоны (как раньше) или бирка сверху слева\n                                   вместо рамки\n  cellward frame buttons cellward (по умолчанию)|gnome|kde|macos|windows|none\n                                   кнопки заголовка: свои, как в GNOME, KDE,\n                                   macOS (светофор слева), Windows или без них\n  cellward frame radius <0–16> (по умолчанию 0)\n                                   скругление углов окна внутри рамки\n  cellward frame fullscreen width|title|notice <значение>\n                                   рамка окна во весь экран: толщина (same —\n                                   как обычно), строка (off по умолчанию),\n                                   имя зоны при входе (3 с; off — нет)\n  cellward frame fullscreen-button one (по умолчанию)|two|menu|none\n                                   кнопка □ полного экрана; правый клик или\n                                   ▣ — во весь экран внутри окна\n  cellward frame double-click maximize (по умолчанию)|none\n                                   двойной клик по заголовку — развернуть\n  cellward tray badge dot (по умолчанию)|bar|off\n                                   метка цвета зоны на значках программ зоны в\n                                   трее: точка в углу, полоска снизу или нет\n                                   (герметичные зоны: значок идёт через их\n                                   фильтр шины)\n  cellward check <имя>             прошло ли рукопожатие (жив ли конфиг)\n  cellward watch [--json]          живы ли туннели поднятых зон; при смерти и\n                                   возвращении — уведомление (зовёт таймер)\n  cellward kill <зона>             оборвать зону сейчас: заморозить все её\n                                   программы, опустить зону, убить программы\n                                   (для удалённого доступа, который надо\n                                   прекратить немедленно); имя контейнера —\n                                   то же для его экземпляра, offline — для\n                                   всех контейнеров без сети\n  cellward journal [--json] [<N>]  последние события: запуски без изоляции\n                                   (unconfined) и решения брокера\n  cellward focused [--json|--bar|--watch]\n                                   в какой сети и контейнере программа окна в\n                                   фокусе (niri, sway); --bar — строка для\n                                   статус-бара, --watch — такая строка при\n                                   каждой смене фокуса\n  cellward window-menu             меню программы окна в фокусе — для бинда\n                                   композитора: закрепить сеть, перезапустить\n                                   с выбором сети, закрыть, оборвать зону\n  cellward window-menu --pid <pid> [--restart|--network]\n                                   то же меню для запуска процесса <pid> (pid\n                                   окна у композитора) — его открывают кнопки\n                                   рамки окна; --restart — сразу «перезапустить\n                                   с выбором сети»; --network — сменить сеть\n                                   контейнера на ходу (кнопка ⇄), а где его\n                                   экземпляр так не может — перезапуск\n  cellward tasks [--json] [--watch <мс>]\n                                   контейнеры, их запуски и процессы: память,\n                                   ЦП, на паузе ли\n  cellward tasks pause|resume|kill <экземпляр> <запуск>\n                                   приостановить, продолжить, завершить запуск\n  cellward scheme [--json]         схема сети: каждое место на пути пакета\n                                   и каждый поток — что идёт, в чём, кто видит,\n                                   где кончается\n                                   целиком\n  cellward endpoint <зона> [refresh]\n                                   адрес сервера VPN, запомненный после одного\n                                   резолва в сети хоста; refresh — забыть\n  cellward clip-window --pid <pid> [--entry <история> <номер>]\n                                   история буфера обмена контейнера запуска\n                                   <pid>: выбранная запись (или --entry)\n                                   вставляется в его окно\n  cellward window-focus --pid <pid> [--ask]\n                                   программа запуска <pid> просит фокус, а её\n                                   контейнер — notify (уведомление с\n                                   «Перейти») или ask (--ask, вопрос); его\n                                   запускает посредник Wayland\n  cellward doctor [<зона>…] [--json]\n                                   что на деле закрыто: готовность системы и\n                                   проверки изнутри каждой поднятой зоны\n                                   (выходы, маршруты, резолверы, открытые\n                                   каналы); код 1 — есть нарушения\n  cellward hermetic <зона> default (как у всех зон)|on|off\n                                   герметичная зона: без systemd --user,\n                                   сессионная шина через фильтр, запуск\n                                   наружу через брокер; off — допускает\n                                   негерметичные контейнеры (offline — никогда)\n  cellward hermetic --default on (по умолчанию)|off\n                                   герметичны ли зоны без своей настройки\n                                   (on — с 2026-09)\n  cellward nix-daemon <зона> off (по умолчанию)|on\n                                   допускает ли сеть Nix-демон хоста у своих\n                                   контейнеров (off: он качает в сети хоста;\n                                   offline — никогда)\n  cellward defaults [set microphone|screencast yes|no|ask|default]\n  cellward defaults [set camera|audio-manager on|off|default]\n                                   разрешения программ контейнера без своего\n                                   слова (микрофон, трансляция экрана, камеры,\n                                   PipeWire хоста без ограничений): сеть их\n                                   больше не решает, своё слово — container\n                                   set <к>|main <настройка> …\n  cellward ask-again <срок>        не действует с 2026-09-29: после «Отказать»\n                                   программу не спрашивают, пока это не\n                                   изменят в меню окна (☰)\n  cellward question-timeout <срок>|never (по умолчанию 2m)\n                                   сколько вопрос брокера (окно запуска из\n                                   зоны) ждёт ответа, потом закрывается\n                                   отказом: 30s…1d; never — без срока (пока\n                                   он открыт, другие вопросы — отказ)\n  cellward handshake-check <срок> (по умолчанию 6s)\n                                   сколько окно добавления зоны ждёт\n                                   рукопожатия, прежде чем сказать, жив ли\n                                   туннель: 1s…10m\n  cellward host-files <зона> read-only (по умолчанию)|writable\n                                   допускает ли сеть, чтобы её герметичные\n                                   контейнеры писали то, что хост исполняет\n                                   из дома (offline — никогда)\n  cellward lock|unlock <имя>       запретить/разрешить программам этой зоны\n                                   запускать что-либо в ДРУГИХ сетях\n                                   (по умолчанию разрешено; держится только\n                                   в герметичных контейнерах: запуск\n                                   негерметичного в запертую зону —\n                                   отказ; lock называет такие)\n  cellward trust add <контейнер> <сертификат> [--yes]\n                                   дополнительный корневой сертификат ТОЛЬКО\n                                   для программ этого контейнера: хост и\n                                   другие контейнеры\n                                   ему не доверяют. Его владелец сможет читать\n                                   TLS-трафик программ контейнера\n  cellward trust list [<контейнер>] [--json]\n  cellward trust rm <контейнер> <начало sha256>\n  cellward trust reset <контейнер> убрать все дополнительные сертификаты\n  cellward container list|show [<контейнер>] [--json]\n                                   контейнеры: их дом, сеть, программы,\n                                   сертификаты\n  cellward container set <контейнер> network <сеть|ask> [--yes] [--restart]\n                                   привязать контейнер к сети: запуск в\n                                   другой сети будет отказом. Работает —\n                                   сеть меняется на ходу: программы\n                                   остаются, соединения рвутся, прежняя\n                                   сеть в новой не заговорит (--yes — без\n                                   вопроса; --restart — закрыть программы\n                                   и открыть их в новой сети)\n  cellward container set <контейнер> x11 default (как у всех)|on|off\n                                   свой X-сервер (xwayland-satellite) в\n                                   любой сети; X хоста в зонах недоступен\n                                   всегда; как у всех — cellward defaults\n  cellward container set <контейнер> color default (цвет сети)|<#rrggbb>\n                                   цвет рамки окон контейнера\n  cellward container set <контейнер> microphone default (как у зоны)|yes|no|ask\n                                   может ли программа контейнера записывать\n                                   микрофон (Nix зоны важнее местной\n                                   настройки, если та шире)\n  cellward container set <контейнер> screencast default (как у зоны)|yes|no|ask\n                                   может ли программа контейнера транслировать\n                                   экран через портал (yes — выбор можно\n                                   запомнить: портал знает контейнер по\n                                   имени cellward.c.<контейнер>, ярлык\n                                   кладёт sync)\n  cellward container set <контейнер> camera default (как у зоны)|on|off\n                                   видны ли программам контейнера камеры хоста\n                                   (запущенным после этого)\n  cellward container set <контейнер> focus default (input)|input|notify|ask|allow\n                                   может ли программа контейнера забрать фокус:\n                                   input — один раз на щелчок или клавишу,\n                                   notify — уведомление «просит внимания»,\n                                   ask — вопрос, allow — всегда (запущенным\n                                   после этого)\n  cellward container set <контейнер> hermetic|nix-daemon|audio-manager default (как у сети)|on|off\n                                   свои у контейнера: герметичность, Nix-демон\n                                   хоста, PipeWire хоста без ограничений\n                                   (со следующего подъёма его экземпляра);\n                                   без герметичности и Nix-демон — только\n                                   в сетях, которые их допускают\n  cellward container set <контейнер> host-files default (как у сети)|read-only|writable\n                                   может ли герметичный контейнер писать то,\n                                   что хост исполняет из дома (в сетях,\n                                   которые это допускают)\n  cellward container set <контейнер> home private|layer|main\n                                   сменить вид дома; данные прежнего вида\n                                   откладываются рядом, ничего не стирается\n  cellward devices [--json]        что подключено из того, что можно выдать\n                                   контейнеру: имя для выдачи и наборы\n  cellward container devices <контейнер> [add|rm <устройство>]\n                                   выдать контейнеру устройства, закрытые в\n                                   зонах: наборы games, security-keys, phone,\n                                   serial, vm, одно\n                                   usb:<произв.>:<модель>[:<сер.>] или all\n                                   (все устройства хоста)\n  cellward container net <контейнер> [allow|deny|forget <программа>]\n  cellward container net <контейнер> default allow|deny|none\n                                   есть ли сеть у программы контейнера (по\n                                   id ярлыка) и у остальных; решается при\n                                   каждом её новом соединении\n  cellward container links <контейнер> [set <схема> <id> | rm <схема>]\n                                   в какой программе открывать ссылки схемы\n                                   (https, tg…) из этого контейнера без выбора\n                                   программы; окно сети и контейнера остаётся\n  cellward container assign <программа> <контейнер>\n  cellward container unassign <программа>\n  cellward container grant <контейнер> <каталог> [--for 2h]\n  cellward container revoke <контейнер> <каталог>\n                                   выдать контейнеру каталог настоящего дома\n                                   или диска (/mnt, /media, /run/media, /srv):\n                                   префикс Wine, библиотеку Steam; --for —\n                                   на срок (30s, 15m, 2h, 7d), по истечении\n                                   и при revoke каталог отмонтируется и у\n                                   уже запущенных программ\n  cellward container merge <из> <в> [--yes]\n                                   объединить два контейнера одного вида:\n                                   совпавшее остаётся у <в>, версии из <из>\n                                   кладутся рядом; --yes — согласие принять\n                                   чужие корневые сертификаты\n";
 
@@ -57,7 +58,7 @@ pub fn main() -> ExitCode {
     // Help does not need the manifest: somebody who ran the binary without the
     // wrapper needs to be told what this is, not what is missing.
     if matches!(verb.as_bytes(), b"" | b"-h" | b"--help" | b"help") {
-        print!("{USAGE}");
+        print!("{USAGE}{CHAIN_USAGE}");
         return ExitCode::SUCCESS;
     }
 
@@ -124,6 +125,9 @@ pub fn main() -> ExitCode {
         b"endpoint" => endpoint(&tools, rest),
         b"check" => check(&tools, rest),
         b"run" => launch::run(&tools, rest),
+        b"routes" => routes(&tools, rest),
+        b"node" => node_command(&tools, rest),
+        b"route" => route_command(&tools, rest),
         b"launch" => launch_entry(&tools, rest),
         b"gc" => gc(&tools),
         b"doctor" => crate::doctor::run(&tools, rest),
@@ -179,7 +183,7 @@ pub fn main() -> ExitCode {
         }
         _ => {
             eprintln!("неизвестная команда: {}", verb.to_string_lossy());
-            print!("{USAGE}");
+            print!("{USAGE}{CHAIN_USAGE}");
             1
         }
     };
@@ -301,6 +305,20 @@ pub fn started_up(state: &Path, name: &OsStr) -> bool {
 /// desktop once it is taking a while: the wait has no clock of its own, and
 /// a stuck start is the person's to end.
 pub fn start_zone(tools: &Tools, name: &OsStr, notify: bool) -> u8 {
+    if name != launch::HOST {
+        let label = name.to_string_lossy();
+        match crate::chain::published_zone(&tools.state, &label) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("маршрут {label} не разрешён в .routes — cellward routes allow {label}");
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("маршрут {label}: {e}");
+                return 1;
+            }
+        }
+    }
     // The host's own network is made when it is first wanted.
     if name == launch::HOST {
         if let Err(why) = launch::ensure_host_zone(&tools.state) {
@@ -574,6 +592,26 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
     } else {
         None
     };
+    let via = if system.is_none() && args.get(2).is_some_and(|a| a == "--via") {
+        let Some(zone) = required(args, 3, "после --via нужно имя системной зоны")
+        else {
+            return 1;
+        };
+        Some(zone.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    let expected = if system.is_some() {
+        3
+    } else if via.is_some() {
+        4
+    } else {
+        2
+    };
+    if args.len() != expected {
+        eprintln!("cellward add <имя> <файл.conf> [--via <системная зона>]");
+        return 1;
+    }
     if !safe_zone_name(name) {
         eprintln!("имя только из букв, цифр, - и _");
         return 1;
@@ -626,6 +664,33 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
             return 1;
         }
     };
+    if let Some(outer) = via.as_deref() {
+        if let Err(e) = crate::system::check_name(outer) {
+            eprintln!("--via: {e}");
+            return 1;
+        }
+        if ini.section(crate::chain::SECTION).is_some() {
+            eprintln!("в конфиге уже есть [Chain]; не задавай её второй раз через --via");
+            return 1;
+        }
+    }
+    if via.is_some() || ini.section(crate::chain::SECTION).is_some() {
+        if let Err(e) = crate::chain::ChainConfig::from_ini(&ini) {
+            eprintln!("{}: {e}", conf.display());
+            return 1;
+        }
+        if let Err(e) = crate::chain::ChainConfig::validate_transport(&ini) {
+            eprintln!("{}: {e}", conf.display());
+            return 1;
+        }
+        if let Err(e) = crate::chain::ChainConfig::refuse_system_duplicate(
+            &ini,
+            crate::sysrun::request_key_owner,
+        ) {
+            eprintln!("{}: {e}", conf.display());
+            return 1;
+        }
+    }
     if openconnect::is_openconnect(&ini) {
         // Checked in full right here, the password file included: a zone that
         // is created now and refuses to come up in a week, with the reason in
@@ -638,6 +703,10 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
             }
         }
     } else if crate::hostif::is_host_interface(&ini) {
+        if via.is_some() {
+            eprintln!("--via нужен зоне с собственным VPN-туннелем, не [HostInterface]");
+            return 1;
+        }
         match crate::hostif::HostIfConfig::from_ini(&ini) {
             Ok(host) => {
                 // Only a warning: a VPN the system brings up later, a modem
@@ -660,6 +729,10 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
             }
         }
     } else if crate::sysuplink::is_system_zone(&ini) {
+        if via.is_some() {
+            eprintln!("[SystemZone] уже выбирает внешний туннель; --via здесь лишний");
+            return 1;
+        }
         match crate::sysuplink::SysUplinkConfig::from_ini(&ini) {
             Ok(sys) => println!(
                 "зона пойдёт наружу через туннель системной зоны {} — своего туннеля у неё нет",
@@ -677,35 +750,67 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
             conf.display()
         );
         return 1;
-    } else if let Some(key) = ini.interface().and_then(|i| i.get("PrivateKey")) {
-        // One VPN, one tunnel: the same key in a user zone next to a system
-        // zone makes the server see two devices with one key, and they knock
-        // each other off. When the system tier has this VPN already, the user
-        // zone goes out through it instead of dialling it a second time.
-        if Path::new(crate::sysrun::SOCKET).exists() {
-            match crate::sysrun::request_key_owner(key.trim()) {
-                Ok(Some(zone)) => {
-                    println!(
-                        "этот VPN уже поднят системой как зона {zone}: второе подключение \
+    } else if via.is_none() {
+        if let Some(key) = ini.interface().and_then(|i| i.get("PrivateKey")) {
+            // One VPN, one tunnel: the same key in a user zone next to a system
+            // zone makes the server see two devices with one key, and they knock
+            // each other off. When the system tier has this VPN already, the user
+            // zone goes out through it instead of dialling it a second time.
+            if Path::new(crate::sysrun::SOCKET).exists() {
+                match crate::sysrun::request_key_owner(key.trim()) {
+                    Ok(Some(zone)) => {
+                        println!(
+                            "этот VPN уже поднят системой как зона {zone}: второе подключение \
                          выбивало бы первое, поэтому зона пойдёт наружу через её туннель"
-                    );
-                    text = crate::sysuplink::SysUplinkConfig { zone }
-                        .text()
-                        .into_bytes();
-                }
-                Ok(None) => {}
-                // A zone of the system's this user may not use: refused, not
-                // dialled a second time behind its back.
-                Err(e) if e.contains("already the system zone") => {
-                    eprintln!("{e}");
-                    return 1;
-                }
-                Err(e) => eprintln!(
-                    "не удалось спросить системный уровень, не поднят ли этот VPN уже там \
+                        );
+                        text = crate::sysuplink::SysUplinkConfig { zone }
+                            .text()
+                            .into_bytes();
+                    }
+                    Ok(None) => {}
+                    // A zone of the system's this user may not use: refused, not
+                    // dialled a second time behind its back.
+                    Err(e) if e.contains("already the system zone") => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                    Err(e) => eprintln!(
+                        "не удалось спросить системный уровень, не поднят ли этот VPN уже там \
                      ({e}) — зона создаётся со своим туннелем"
-                ),
+                    ),
+                }
             }
         }
+    }
+
+    if let Some(via) = via {
+        let chain = crate::chain::ChainConfig { via, user: false };
+        if !text.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+        text.extend_from_slice(chain.text().as_bytes());
+        println!(
+            "цепочка: транспорт этого VPN идёт через системную зону {} — без отката на сеть хоста",
+            chain.via
+        );
+    }
+
+    // The final config (including --via or the system-zone conversion) is
+    // what will be published. A previously installed direct user zone must
+    // not be a shortcut to the same inner VPN, and the reverse order of
+    // creation must be refused too.
+    let final_ini = match WgConfig::parse(&text) {
+        Ok(ini) => ini,
+        Err(e) => {
+            eprintln!("не разобрать итоговый конфиг: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) =
+        crate::chain::refuse_user_shortcut(&tools.state, &name.to_string_lossy(), &final_ini)
+    {
+        eprintln!("{}: {e}", conf.display());
+        return 1;
     }
 
     let dir = tools.state.join(name);
@@ -768,6 +873,330 @@ fn up(tools: &Tools, args: &[OsString]) -> u8 {
             code
         }
     }
+}
+
+fn routes(tools: &Tools, args: &[OsString]) -> u8 {
+    let action = args.first().and_then(|a| a.to_str()).unwrap_or("list");
+    let current = match crate::chain::routes(&tools.state) {
+        Ok(routes) => routes,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    match action {
+        "list" if args.len() <= 1 => {
+            match current {
+                None => println!(
+                    "политика маршрутов не включена: существующие зоны доступны как прежде"
+                ),
+                Some(routes) => {
+                    println!("разрешённые маршруты:");
+                    for route in routes {
+                        println!("  {}", route.text());
+                    }
+                }
+            }
+            0
+        }
+        "enable" if args.len() == 1 => {
+            if current.is_some() {
+                println!("политика маршрутов уже включена");
+                return 0;
+            }
+            let up: Vec<_> = visible_entries(&tools.state)
+                .into_iter()
+                .filter_map(|d| d.file_name().map(|n| n.to_os_string()))
+                .filter(|n| zone_up(&tools.state, n).is_some())
+                .collect();
+            if !up.is_empty() {
+                eprintln!("сначала опусти пользовательские зоны: включение списка не останавливает уже работающие маршруты");
+                return 1;
+            }
+            if let Err(e) = crate::chain::write_routes(&tools.state, &Default::default()) {
+                eprintln!("{e}");
+                return 1;
+            }
+            println!("строгая политика включена: пока ни один VPN-маршрут не разрешён; cellward routes allow <зона>");
+            0
+        }
+        "allow" | "deny" if args.len() == 2 => {
+            let Some(name) = required_zone(args, 1, "нужно имя зоны") else {
+                return 1;
+            };
+            let Some(mut allowed) = current else {
+                eprintln!("сначала включи строгую политику: cellward routes enable");
+                return 1;
+            };
+            let name = name.to_string_lossy();
+            if zone_up(&tools.state, OsStr::new(name.as_ref())).is_some() {
+                eprintln!("зона {name} ещё работает — сначала cellward down {name}");
+                return 1;
+            }
+            if action == "deny" {
+                allowed.retain(|r| r.zone != name);
+            } else {
+                let path = tools.state.join(name.as_ref()).join("config.conf");
+                let raw = match crate::chain::read_zone_config(&tools.state, &name) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        eprintln!("не прочитать {}: {e}", path.display());
+                        return 1;
+                    }
+                };
+                let ini = match WgConfig::parse(&raw) {
+                    Ok(ini) => ini,
+                    Err(e) => {
+                        eprintln!("не разобрать {}: {e}", path.display());
+                        return 1;
+                    }
+                };
+                if let Err(e) = crate::chain::user_upstreams(&tools.state, &name, &ini) {
+                    eprintln!("маршрут {name} не опубликован: {e}");
+                    return 1;
+                }
+                let route = match crate::chain::Route::from_ini_in(&tools.state, &name, &ini) {
+                    Ok(route) => route,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return 1;
+                    }
+                };
+                allowed.retain(|r| r.zone != name);
+                allowed.insert(route);
+                if let Err(e) = crate::chain::refuse_user_shortcut_with(
+                    &tools.state,
+                    &name,
+                    &ini,
+                    Some(&allowed),
+                ) {
+                    eprintln!("маршрут {name} не опубликован: {e}");
+                    return 1;
+                }
+            }
+            if let Err(e) = crate::chain::write_routes(&tools.state, &allowed) {
+                eprintln!("{e}");
+                return 1;
+            }
+            println!("маршруты обновлены");
+            0
+        }
+        _ => {
+            eprintln!("cellward routes [list|enable|allow <зона>|deny <зона>]");
+            1
+        }
+    }
+}
+
+/// Store a tunnel config once, outside the set of selectable zones. The
+/// directory is hidden from every zone/picker walk and the secret is 0600.
+fn node_command(tools: &Tools, args: &[OsString]) -> u8 {
+    if args.len() != 3 || args[0] != "add" {
+        eprintln!("cellward node add <имя> <файл.conf>");
+        return 1;
+    }
+    let Some(name) = required_zone(args, 1, "нужно имя узла") else {
+        return 1;
+    };
+    let source = Path::new(&args[2]);
+    let raw = match fs::read(source) {
+        Ok(raw) => strip_cr(&raw),
+        Err(e) => {
+            eprintln!("не прочитать {}: {e}", source.display());
+            return 1;
+        }
+    };
+    let ini = match WgConfig::parse(&raw) {
+        Ok(ini) => ini,
+        Err(e) => {
+            eprintln!("{}: {e}", source.display());
+            return 1;
+        }
+    };
+    if let Err(e) = crate::chain::validate_node(&ini) {
+        eprintln!("{}: {e}", source.display());
+        return 1;
+    }
+    if openconnect::is_openconnect(&ini) {
+        if let Err(e) = OcConfig::from_ini(&ini).and_then(|cfg| cfg.check_password_file()) {
+            eprintln!("{}: {e}", source.display());
+            return 1;
+        }
+    }
+    let pool = tools.state.join(crate::chain::NODES_DIR);
+    if let Err(e) = fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&pool)
+    {
+        eprintln!("не создать пул узлов: {e}");
+        return 1;
+    }
+    let dir = pool.join(name);
+    if dir.exists() {
+        eprintln!(
+            "узел {} уже есть — его конфиг не заменён",
+            name.to_string_lossy()
+        );
+        return 1;
+    }
+    if let Err(e) = fs::DirBuilder::new().mode(0o700).create(&dir) {
+        eprintln!("не создать узел {}: {e}", name.to_string_lossy());
+        return 1;
+    }
+    let target = dir.join("config.conf");
+    let result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&target)
+        .and_then(|mut f| f.write_all(&raw));
+    if let Err(e) = result {
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(&dir);
+        eprintln!("не записать узел {}: {e}", name.to_string_lossy());
+        return 1;
+    }
+    println!(
+        "узел {} добавлен в пул; маршруты к нему не опубликованы",
+        name.to_string_lossy()
+    );
+    0
+}
+
+/// Publish a route *configuration* referencing a node, never a second copy
+/// of its key. In strict mode it still needs `routes allow` to be launchable.
+fn route_command(tools: &Tools, args: &[OsString]) -> u8 {
+    if !(args.len() == 3 || args.len() == 5)
+        || args[0] != "add"
+        || (args.len() == 5 && args[3] != "--via" && args[3] != "--via-user")
+    {
+        eprintln!("cellward route add <зона> <узел> [--via <системная зона>|--via-user <маршрут>]");
+        return 1;
+    }
+    match crate::chain::routes(&tools.state) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            eprintln!("сначала включи строгую публикацию: cellward routes enable");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    }
+    let Some(name) = required_zone(args, 1, "нужно имя зоны") else {
+        return 1;
+    };
+    let Some(node) = required_zone(args, 2, "нужно имя узла") else {
+        return 1;
+    };
+    if name == launch::HOST
+        || name == launch::OFFLINE
+        || launch::is_unconfined_name(&name.to_string_lossy())
+    {
+        eprintln!("это встроенная сеть, не имя маршрута");
+        return 1;
+    }
+    let via_user = args.len() == 5 && args[3] == "--via-user";
+    let via = if args.len() == 5 {
+        let Some(via) = args[4].to_str() else {
+            eprintln!("неверное имя внешней зоны");
+            return 1;
+        };
+        if via_user {
+            if !safe_zone_name(OsStr::new(via)) {
+                eprintln!("--via-user: неверное имя пользовательского маршрута");
+                return 1;
+            }
+        } else if let Err(e) = crate::system::check_name(via) {
+            eprintln!("--via: {e}");
+            return 1;
+        }
+        Some(via)
+    } else {
+        None
+    };
+    let mut stub = format!("[Node]\nName = {}\n", node.to_string_lossy());
+    if let Some(via) = via {
+        stub.push_str(&format!(
+            "[Chain]\n{} = {via}\n",
+            if via_user { "ViaUser" } else { "Via" }
+        ));
+    }
+    let raw = match crate::chain::resolve_route_config(&tools.state, stub.as_bytes()) {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!("маршрут {}: {e}", name.to_string_lossy());
+            return 1;
+        }
+    };
+    let ini = match WgConfig::parse(&raw) {
+        Ok(ini) => ini,
+        Err(e) => {
+            eprintln!("маршрут {}: {e}", name.to_string_lossy());
+            return 1;
+        }
+    };
+    if via.is_some() {
+        if via_user {
+            if let Err(e) =
+                crate::chain::Route::from_ini_in(&tools.state, &name.to_string_lossy(), &ini)
+            {
+                eprintln!("маршрут {}: {e}", name.to_string_lossy());
+                return 1;
+            }
+        }
+        if let Err(e) = crate::chain::ChainConfig::validate_transport(&ini).and_then(|()| {
+            crate::chain::ChainConfig::refuse_system_duplicate(
+                &ini,
+                crate::sysrun::request_key_owner,
+            )
+        }) {
+            eprintln!("маршрут {}: {e}", name.to_string_lossy());
+            return 1;
+        }
+    }
+    if let Err(e) = crate::chain::refuse_user_shortcut(&tools.state, &name.to_string_lossy(), &ini)
+    {
+        eprintln!("маршрут {}: {e}", name.to_string_lossy());
+        return 1;
+    }
+    let dir = tools.state.join(name);
+    if dir.exists() {
+        eprintln!(
+            "зона {} уже есть — её конфиг не заменён",
+            name.to_string_lossy()
+        );
+        return 1;
+    }
+    if let Err(e) = fs::create_dir_all(&tools.state) {
+        eprintln!("не создать каталог зон: {e}");
+        return 1;
+    }
+    if let Err(e) = fs::DirBuilder::new().mode(0o700).create(&dir) {
+        eprintln!("не создать маршрут {}: {e}", name.to_string_lossy());
+        return 1;
+    }
+    let target = dir.join("config.conf");
+    let result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&target)
+        .and_then(|mut f| f.write_all(stub.as_bytes()));
+    if let Err(e) = result {
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(&dir);
+        eprintln!("не записать маршрут {}: {e}", name.to_string_lossy());
+        return 1;
+    }
+    println!(
+        "маршрут {} к узлу {} создан без копирования ключа",
+        name.to_string_lossy(),
+        node.to_string_lossy()
+    );
+    0
 }
 
 fn down(tools: &Tools, args: &[OsString]) -> u8 {

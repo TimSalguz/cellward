@@ -23,20 +23,24 @@
 //! (step 3), once per network, from the launch that asked; the person who
 //! waited for it is told the wait is over, whatever window is in front.
 //!
-//! **The login** never touches a disk. The form's answers come back on the
-//! window's standard output; they go to the zone's holder on a socket of the
-//! user's runtime directory ([`Offer`]), served to that network's holder
-//! alone — its peer's cgroup must be the unit `vpn-zone@<network>.service`,
-//! so a program of a container of the same user that finds the socket gets
+//! **The login** is the gateway's own (§11.17): `cellward-oc-auth` goes
+//! through its forms, and each is shown in the connect window as the
+//! gateway sent it — its fields, a choice's choices, a «сохранить» box by
+//! each but a code. What is typed goes to the helper on its standard input
+//! and to the gateway, never to a disk; what comes out is the session's
+//! cookie, which goes to the zone's holder on a socket of the user's runtime
+//! directory ([`Offer`]), served to that network's holder alone — its
+//! peer's cgroup must be the unit `vpn-zone@<network>.service`, so a
+//! program of a container of the same user that finds the socket gets
 //! nothing —, and from the holder to `openconnect` on its standard input
-//! (`crate::zone`). The user and the group are remembered for the next form
-//! (the network's `login` file); the password only where the person ticks
-//! «запомнить», in the session's keyring (Secret Service, `secret-tool`,
-//! handed the password on its standard input). A one-time code never.
+//! (`crate::zone`). What the person ticks is kept: text and choices in the
+//! network's `login` file, a password only in the session's keyring (Secret
+//! Service, `secret-tool`, handed it on its standard input). A code never.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -44,6 +48,7 @@ use std::process::{Command, Stdio};
 
 use crate::cli::{read_setting, DECLARED_DIR};
 use crate::container::Source;
+use crate::oc_form::{self, Field, Form, Kind, Said};
 use crate::openconnect::OcConfig;
 use crate::tools::Tools;
 use crate::window::Asked;
@@ -58,8 +63,8 @@ pub const DECLARED: &str = "network-connect";
 /// answer — `<number> yes|no`, the number counting the questions.
 const LOCK: &str = ".connect-lock";
 const ANSWER: &str = ".connect-answer";
-/// In a network's state directory: the user and the group of its last
-/// login that brought it up — not secret, the form's prefill.
+/// In a network's state directory: what the person chose to keep of its
+/// login ([`Saved`]) — not secret, the forms' prefill.
 const LAST_LOGIN: &str = "login";
 /// Below `$XDG_RUNTIME_DIR`: the sockets a login is handed over on.
 pub const LOGIN_DIR: &str = "vpn-zones/login";
@@ -167,7 +172,7 @@ pub fn set(state: &Path, config: &Path, zone: &str, mode: Option<Mode>) -> Resul
 /// The network's OpenConnect section, where its login is asked (no
 /// `PasswordFile`, and not `AskLogin = no`).
 pub fn asks_login(state: &Path, zone: &str) -> Option<OcConfig> {
-    let raw = fs::read(state.join(zone).join("config.conf")).ok()?;
+    let raw = crate::chain::read_zone_config(state, zone).ok()?;
     let cfg = OcConfig::parse(&raw).ok()?;
     cfg.login.then_some(cfg)
 }
@@ -288,6 +293,7 @@ fn lock(dir: &Path) -> Result<fs::File, String> {
 /// of — the real ones ([`Real`]), or a test's.
 trait Steps {
     fn ask(&self, zone: &str, mode: Mode, wants: Wants<'_>) -> bool;
+    /// Whether the person went through with the login — up or not.
     fn log_in(&self, zone: &str, asked: (Mode, Wants<'_>), cfg: &OcConfig) -> bool;
     fn start(&self, zone: &str, wants: Wants<'_>);
     fn up(&self, zone: &str) -> bool;
@@ -354,6 +360,13 @@ impl Steps for Real<'_> {
 /// session's autostart, and it was a refusal. `Err`: why it is not up, for
 /// the person.
 pub fn bring_up(tools: &Tools, zone: &str, wants: Wants<'_>) -> Result<(), NotUp> {
+    if zone != crate::launch::HOST {
+        match crate::chain::published_zone(&tools.state, zone) {
+            Ok(true) => {}
+            Ok(false) => return Err(format!("маршрут {zone} не разрешён в .routes").into()),
+            Err(e) => return Err(format!("маршрут {zone}: {e}").into()),
+        }
+    }
     bring_up_with(tools, zone, wants, &Real(tools))
 }
 
@@ -541,26 +554,33 @@ fn question_text(zone: &str, mode: Mode, wants: Wants<'_>) -> (String, String) {
     )
 }
 
-// --- THE LOGIN (step 2 of §11.16) -------------------------------------------
+// --- THE LOGIN (§11.16 step 2, §11.17) ---------------------------------------
 
-/// A network's login, as its form gave it.
+/// The helper that goes through the gateway's forms (`cellward-oc-auth`,
+/// the one binary with libopenconnect), next to our own binaries.
+pub const OC_AUTH: &str = "cellward-oc-auth";
+
+/// What a login gave the zone's holder: the gateway's session — never the
+/// password, which went to the gateway alone.
 #[derive(Clone, Default, PartialEq, Eq)]
-pub struct Login {
-    pub user: String,
-    pub group: String,
-    pub password: String,
-    /// A one-time code; empty where the gateway asks for none.
-    pub code: String,
+pub struct Session {
+    pub cookie: String,
+    /// Where the client connects: the gateway's URL for the session.
+    pub connect_url: String,
+    /// The certificate the login saw: the client's `--servercert`.
+    pub fingerprint: String,
+    /// The one address the login went to — and the client goes to.
+    pub address: String,
 }
 
-/// Never the password, nor the code, in a log.
-impl std::fmt::Debug for Login {
+/// Never the cookie in a log: it is the session.
+impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Login")
-            .field("user", &self.user)
-            .field("group", &self.group)
-            .field("password", &"…")
-            .field("code", &!self.code.is_empty())
+        f.debug_struct("Session")
+            .field("cookie", &"…")
+            .field("connect_url", &self.connect_url)
+            .field("fingerprint", &self.fingerprint)
+            .field("address", &self.address)
             .finish()
     }
 }
@@ -573,32 +593,32 @@ fn one_line(value: &str) -> String {
         .collect()
 }
 
-impl Login {
+impl Session {
     fn encode(&self) -> String {
         [
-            ("user", &self.user),
-            ("group", &self.group),
-            ("password", &self.password),
-            ("code", &self.code),
+            ("cookie", &self.cookie),
+            ("url", &self.connect_url),
+            ("fingerprint", &self.fingerprint),
+            ("address", &self.address),
         ]
         .iter()
         .map(|(key, value)| format!("{key}\t{}\n", one_line(value)))
         .collect()
     }
 
-    /// The lines back; `None` without a password.
+    /// The lines back; `None` without a cookie.
     fn decode(text: &str) -> Option<Self> {
-        let mut login = Self::default();
+        let mut session = Self::default();
         for line in text.lines() {
             match line.split_once('\t') {
-                Some(("user", v)) => login.user = v.to_owned(),
-                Some(("group", v)) => login.group = v.to_owned(),
-                Some(("password", v)) => login.password = v.to_owned(),
-                Some(("code", v)) => login.code = v.to_owned(),
+                Some(("cookie", v)) => session.cookie = v.to_owned(),
+                Some(("url", v)) => session.connect_url = v.to_owned(),
+                Some(("fingerprint", v)) => session.fingerprint = v.to_owned(),
+                Some(("address", v)) => session.address = v.to_owned(),
                 _ => {}
             }
         }
-        (!login.password.is_empty()).then_some(login)
+        (!session.cookie.is_empty()).then_some(session)
     }
 }
 
@@ -617,7 +637,7 @@ fn in_unit(pid: i32, unit: &str) -> bool {
     })
 }
 
-/// A login handed to a network's holder while the network starts: the
+/// A session handed to a network's holder while the network starts: the
 /// socket held, served once, to that network's holder alone — anybody else
 /// who connects is closed on with nothing said. Taken back when dropped.
 pub struct Offer {
@@ -629,7 +649,7 @@ pub struct Offer {
 }
 
 impl Offer {
-    pub fn open(runtime: &Path, zone: &str, login: Login) -> Result<Self, String> {
+    pub fn open(runtime: &Path, zone: &str, session: Session) -> Result<Self, String> {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let path = login_socket(runtime, zone);
         let dir = path.parent().unwrap_or(runtime);
@@ -644,7 +664,7 @@ impl Offer {
         let listener = UnixListener::bind(&path).map_err(fail)?;
         let stop = OwnedFd::from(listener.try_clone().map_err(fail)?);
         let unit = format!("vpn-zone@{zone}.service");
-        let serving = std::thread::spawn(move || serve(&listener, &unit, &login));
+        let serving = std::thread::spawn(move || serve(&listener, &unit, &session));
         Ok(Self {
             path,
             stop,
@@ -674,8 +694,8 @@ impl Drop for Offer {
     }
 }
 
-/// Serve the login to the unit's process that asks, once.
-fn serve(listener: &UnixListener, unit: &str, login: &Login) -> bool {
+/// Serve the session to the unit's process that asks, once.
+fn serve(listener: &UnixListener, unit: &str, session: &Session) -> bool {
     for conn in listener.incoming() {
         let Ok(mut conn) = conn else {
             return false;
@@ -684,14 +704,14 @@ fn serve(listener: &UnixListener, unit: &str, login: &Login) -> bool {
         if !ours {
             continue;
         }
-        return conn.write_all(login.encode().as_bytes()).is_ok();
+        return conn.write_all(session.encode().as_bytes()).is_ok();
     }
     false
 }
 
-/// The holder of `zone`, starting: the login handed over by whoever
+/// The holder of `zone`, starting: the session handed over by whoever
 /// started it ([`Offer`]). `Err`: why there is none, for the journal.
-pub fn fetch_login(zone: &str) -> Result<Login, String> {
+pub fn fetch_session(zone: &str) -> Result<Session, String> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|r| !r.is_empty())
         .ok_or("XDG_RUNTIME_DIR is not set: there is nowhere to take the login from")?;
@@ -708,65 +728,112 @@ pub fn fetch_login(zone: &str) -> Result<Login, String> {
     stream
         .read_to_string(&mut text)
         .map_err(|e| format!("the login for {zone} could not be read: {e}"))?;
-    Login::decode(&text).ok_or_else(|| format!("no login was handed over for {zone}"))
+    Session::decode(&text).ok_or_else(|| format!("the login for {zone} came without a session"))
 }
 
-/// The user and the group of the network's last login that brought it up.
-fn last_login(state: &Path, zone: &str) -> (Option<String>, Option<String>) {
+/// What the person chose to keep of a network's login: the gateway's
+/// fields by name — text and choices only; a password is the keyring's, a
+/// code nobody's. The file's lines are `field⇥<name>⇥<value>`; a file of
+/// before (`user⇥…`, `group⇥…`) is read as what it was, as are the
+/// config's `User =` and `AuthGroup =`: the user and the group, for the
+/// fields that ask for them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Saved {
+    fields: BTreeMap<String, String>,
+    user: Option<String>,
+    group: Option<String>,
+}
+
+fn load_saved(state: &Path, zone: &str, cfg: &OcConfig) -> Saved {
     let text = fs::read_to_string(state.join(zone).join(LAST_LOGIN)).unwrap_or_default();
-    let get = |key: &str| {
-        text.lines().find_map(|line| {
-            line.split_once('\t')
-                .filter(|(k, v)| *k == key && !v.is_empty())
-                .map(|(_, v)| v.to_owned())
-        })
+    let mut saved = Saved {
+        user: cfg.user.clone(),
+        group: cfg.authgroup.clone(),
+        ..Saved::default()
     };
-    (get("user"), get("group"))
+    for line in text.lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        match parts.as_slice() {
+            ["field", name, value] if !value.is_empty() => {
+                saved.fields.insert((*name).to_owned(), (*value).to_owned());
+            }
+            ["user", value] if !value.is_empty() => saved.user = Some((*value).to_owned()),
+            ["group", value] if !value.is_empty() => saved.group = Some((*value).to_owned()),
+            _ => {}
+        }
+    }
+    saved
 }
 
-fn save_last_login(state: &Path, zone: &str, login: &Login) {
-    let text = format!(
-        "user\t{}\ngroup\t{}\n",
-        one_line(&login.user),
-        one_line(&login.group)
-    );
+fn store_saved(state: &Path, zone: &str, fields: &BTreeMap<String, String>) {
+    let text: String = fields
+        .iter()
+        .map(|(name, value)| format!("field\t{}\t{}\n", one_line(name), one_line(value)))
+        .collect();
     if let Err(e) =
         crate::desktop::write_atomically(&state.join(zone).join(LAST_LOGIN), text.as_bytes())
     {
-        eprintln!("cellward: пользователь сети {zone} не запомнен: {e}");
+        eprintln!("cellward: сохранённое для входа в сеть {zone} не записано: {e}");
     }
 }
 
-/// The keyring's attributes of a network's password.
-fn keyring_attributes(zone: &str, user: &str) -> [String; 6] {
+/// Does this field ask for the user? By its name or its label.
+fn asks_user(field: &Field) -> bool {
+    let words = format!("{} {}", field.name, field.label).to_lowercase();
+    ["user", "login", "пользовател", "логин"]
+        .iter()
+        .any(|w| words.contains(w))
+}
+
+/// What is known for a field: kept by its name; else the user for a field
+/// that asks for it, the group for a choice that offers it.
+fn known(saved: &Saved, field: &Field) -> Option<String> {
+    if let Some(value) = saved.fields.get(&field.name) {
+        return Some(value.clone());
+    }
+    match field.kind {
+        Kind::Text if asks_user(field) => saved.user.clone(),
+        Kind::Select => saved.group.as_ref().and_then(|g| {
+            field
+                .choices
+                .iter()
+                .find(|c| &c.name == g || &c.label == g)
+                .map(|c| c.name.clone())
+        }),
+        _ => None,
+    }
+}
+
+/// The keyring's attributes of a network's secret field.
+fn keyring_attributes(zone: &str, field: &str) -> [String; 6] {
     [
         "service".into(),
         "cellward".into(),
         "network".into(),
         zone.into(),
-        "user".into(),
-        user.into(),
+        "field".into(),
+        field.into(),
     ]
 }
 
-/// The password remembered for `zone` and `user`, if there is one.
-fn keyring_lookup(tools: &Tools, zone: &str, user: &str) -> Option<String> {
+/// The secret remembered for `zone`'s field `field`, if there is one.
+fn keyring_lookup(tools: &Tools, zone: &str, field: &str) -> Option<String> {
     let out = Command::new(&tools.secret_tool)
         .arg("lookup")
-        .args(keyring_attributes(zone, user))
+        .args(keyring_attributes(zone, field))
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    let password = String::from_utf8(out.stdout).ok()?;
-    let password = password.trim_end_matches('\n');
-    (out.status.success() && !password.is_empty()).then(|| password.to_owned())
+    let secret = String::from_utf8(out.stdout).ok()?;
+    let secret = secret.trim_end_matches('\n');
+    (out.status.success() && !secret.is_empty()).then(|| secret.to_owned())
 }
 
-/// Remember `login`'s password (`true`) or forget it, in the session's
-/// keyring. The password goes on `secret-tool`'s standard input.
-fn keyring_keep(tools: &Tools, zone: &str, login: &Login, keep: bool) {
-    let attributes = keyring_attributes(zone, &login.user);
+/// Remember a secret (`keep`) or forget it, in the session's keyring. The
+/// secret goes on `secret-tool`'s standard input.
+fn keyring_keep(tools: &Tools, zone: &str, field: &str, secret: &str, keep: bool) {
+    let attributes = keyring_attributes(zone, field);
     let result = if keep {
         Command::new(&tools.secret_tool)
             .arg("store")
@@ -778,7 +845,7 @@ fn keyring_keep(tools: &Tools, zone: &str, login: &Login, keep: bool) {
             .spawn()
             .and_then(|mut child| {
                 if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(login.password.as_bytes())?;
+                    stdin.write_all(secret.as_bytes())?;
                 }
                 child.wait()
             })
@@ -797,22 +864,27 @@ fn keyring_keep(tools: &Tools, zone: &str, login: &Login, keep: bool) {
     }
 }
 
-/// What the form came back with.
-struct Answer {
-    login: Login,
-    remember: bool,
+/// A field of a gateway's form as the person answered it, and whether to
+/// keep the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Answered {
+    field: Field,
+    value: String,
+    keep: bool,
 }
 
-/// The connect window's login form for `zone`, prefilled; `error` said above
-/// it when a try before did not bring the network up.
-fn login_request(
+/// The window's request for a form of the gateway's: its words — the
+/// banner, the message, what went wrong — as the gateway's, then its
+/// fields prefilled (`values`), a choice's choices, and a «сохранить» box
+/// for each but a code (`keeps`; a password's only with a keyring).
+fn form_request(
     zone: &str,
     (mode, wants): (Mode, Wants<'_>),
     cfg: &OcConfig,
-    prefill: (&str, &str, &str),
-    (error, keyring): (Option<&str>, bool),
+    form: &Form,
+    (values, keeps): (&[String], &[bool]),
+    (notes, keyring): (&[String], bool),
 ) -> String {
-    let (user, group, password) = prefill;
     let mut req = format!(
         "title\tВход в сеть {zone}\nnote\t{} Шлюз {}.\n",
         crate::window::clean(&who(zone, wants)),
@@ -824,52 +896,85 @@ fn login_request(
     if let Wants::Program(_) = wants {
         req.push_str("note\tПрограмма ждёт без сети.\n");
     }
-    if let Some(error) = error {
-        req.push_str(&format!("note\t{}\n", crate::window::clean(error)));
+    for note in notes {
+        req.push_str(&format!("note\t{}\n", crate::window::clean(note)));
+    }
+    for (said, mark) in [(&form.banner, ""), (&form.message, ""), (&form.error, "⚠ ")] {
+        for line in said.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            req.push_str(&format!(
+                "note\t{mark}Шлюз: {}\n",
+                crate::window::clean(line)
+            ));
+        }
     }
     req.push_str(&format!("guard\t{}\n", crate::dialog::TOO_FAST.as_millis()));
-    for (tag, label, kind, value) in [
-        ("user", "Пользователь", "text", user),
-        ("group", "Группа (если шлюз просит)", "optional", group),
-        ("password", "Пароль", "secret", password),
-        ("code", "Одноразовый код (если шлюз просит)", "code", ""),
-    ] {
+    for (i, field) in form.fields.iter().enumerate() {
+        let kind = match field.kind {
+            Kind::Text => "text",
+            Kind::Password => "secret",
+            Kind::Select => "select",
+            Kind::Token => "token",
+        };
+        let value = values.get(i).map_or("", String::as_str);
         req.push_str(&format!(
-            "field\t{tag}\t{label}\t{kind}\t{}\n",
+            "field\t{}\t{}\t{kind}\t{}\n",
+            one_line(&field.name),
+            one_line(&field.label),
             one_line(value)
         ));
-    }
-    if keyring {
+        for choice in &field.choices {
+            req.push_str(&format!(
+                "choice\t{}\t{}\t{}\n",
+                one_line(&field.name),
+                one_line(&choice.name),
+                one_line(&choice.label)
+            ));
+        }
+        let keep = keeps.get(i).copied().unwrap_or(false);
+        let label = match field.kind {
+            Kind::Token => continue,
+            Kind::Password if !keyring => continue,
+            Kind::Password => "Сохранить в связке ключей сеанса",
+            Kind::Text | Kind::Select => "Сохранить",
+        };
         req.push_str(&format!(
-            "remember\tЗапомнить пароль в связке ключей сеанса\t{}\n",
-            u8::from(!password.is_empty())
+            "save\t{}\t{label}\t{}\n",
+            one_line(&field.name),
+            u8::from(keep)
         ));
     }
     req
 }
 
-/// The form's answer lines back.
-fn parse_answer(text: &str) -> Option<Answer> {
-    let mut login = Login::default();
-    let mut remember = false;
+/// The window's answer to a form: each field's value, in the form's order,
+/// and whether to keep it. `None` without every field.
+fn parse_form_answer(text: &str, form: &Form) -> Option<(Vec<String>, Vec<bool>)> {
+    let mut values: BTreeMap<&str, String> = BTreeMap::new();
+    let mut keeps: BTreeMap<&str, bool> = BTreeMap::new();
     for line in text.lines() {
-        let fields: Vec<&str> = line.splitn(3, '\t').collect();
-        match fields.as_slice() {
-            ["field", "user", v] => login.user = (*v).to_owned(),
-            ["field", "group", v] => login.group = (*v).to_owned(),
-            ["field", "password", v] => login.password = (*v).to_owned(),
-            ["field", "code", v] => login.code = (*v).to_owned(),
-            ["remember", on] => remember = *on == "1",
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        match parts.as_slice() {
+            ["field", name, value] => {
+                values.insert(name, (*value).to_owned());
+            }
+            ["save", name, on] => {
+                keeps.insert(name, *on == "1");
+            }
             _ => {}
         }
     }
-    (!login.password.is_empty()).then_some(Answer { login, remember })
+    let mut out = (Vec::new(), Vec::new());
+    for field in &form.fields {
+        out.0.push(values.get(field.name.as_str())?.clone());
+        out.1
+            .push(keeps.get(field.name.as_str()).copied().unwrap_or(false));
+    }
+    Some(out)
 }
 
-/// Show the form; its answer. Where the window cannot be shown: kdialog
-/// asks the password alone (no code: a gateway that asks one needs the
-/// window).
-fn login_form(tools: &Tools, request: &str, user: &str, group: &str) -> Option<Answer> {
+/// Show the form; its answer. Where the window cannot be shown: kdialog,
+/// a field at a time, keeping nothing.
+fn show_form(tools: &Tools, request: &str, form: &Form) -> Option<(Vec<String>, Vec<bool>)> {
     if let Ok(mut child) = Command::new(&tools.window)
         .arg("login")
         .stdin(Stdio::piped())
@@ -883,7 +988,7 @@ fn login_form(tools: &Tools, request: &str, user: &str, group: &str) -> Option<A
         let out = child.wait_with_output().ok()?;
         if out.status.code() != Some(3) {
             return if out.status.success() {
-                parse_answer(&String::from_utf8_lossy(&out.stdout))
+                parse_form_answer(&String::from_utf8_lossy(&out.stdout), form)
             } else {
                 None
             };
@@ -892,77 +997,289 @@ fn login_form(tools: &Tools, request: &str, user: &str, group: &str) -> Option<A
     if !crate::launch::has_display() {
         return None;
     }
-    let out = Command::new(&tools.kdialog)
-        .arg("--title")
-        .arg("Вход в сеть")
-        .arg("--password")
-        .arg(format!("Пароль ({user})"))
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let password = String::from_utf8(out.stdout).ok()?;
-    let password = password.trim_end_matches('\n');
-    (out.status.success() && !password.is_empty()).then(|| Answer {
-        login: Login {
-            user: user.to_owned(),
-            group: group.to_owned(),
-            password: password.to_owned(),
-            code: String::new(),
-        },
-        remember: false,
-    })
+    let mut values = Vec::new();
+    for field in &form.fields {
+        let label = crate::window::clean(&field.label);
+        let mut cmd = Command::new(&tools.kdialog);
+        cmd.arg("--title").arg("Вход в сеть");
+        match field.kind {
+            Kind::Password => {
+                cmd.arg("--password").arg(&label);
+            }
+            Kind::Select => {
+                cmd.arg("--combobox").arg(&label);
+                for choice in &field.choices {
+                    cmd.arg(&choice.name);
+                }
+            }
+            Kind::Text | Kind::Token => {
+                cmd.arg("--inputbox").arg(&label);
+            }
+        }
+        let out = cmd.stderr(Stdio::null()).output().ok()?;
+        let value = String::from_utf8(out.stdout).ok()?;
+        let value = value.trim_end_matches('\n');
+        if !out.status.success() {
+            return None;
+        }
+        values.push(value.to_owned());
+    }
+    let keeps = vec![false; values.len()];
+    Some((values, keeps))
 }
 
-/// The login of `zone` taken in the form and handed to its holder while it
-/// starts; the form again, with what went wrong, until the network is up or
-/// the person gives up. Whether it is up.
+/// How one login through the gateway's forms ended.
+enum Outcome {
+    /// In: the session, and what was answered.
+    Done(Session, Vec<Answered>),
+    /// The person closed a form.
+    Cancelled,
+    /// Why not, in words for the person.
+    Failed(String),
+}
+
+/// One login of `zone` through the gateway's forms (`cellward-oc-auth`):
+/// each form in the connect window, prefilled with what was kept; sent by
+/// itself when everything it asks is known — not a code, and not after a
+/// try that did not bring the network up (`note`).
+fn gateway_login(
+    tools: &Tools,
+    zone: &str,
+    asked: (Mode, Wants<'_>),
+    cfg: &OcConfig,
+    (saved, note): (&Saved, Option<&str>),
+) -> Outcome {
+    let helper = tools.core.with_file_name(OC_AUTH);
+    // Its environment from scratch, as the client's: no proxy of the
+    // session's between it and the gateway.
+    let env = std::env::vars_os().filter(|(key, _)| {
+        crate::openconnect::CLIENT_ENV_KEPT
+            .iter()
+            .any(|kept| key == OsStr::new(kept))
+    });
+    let spawned = Command::new(&helper)
+        .env_clear()
+        .envs(env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => return Outcome::Failed(format!("не запустить {}: {e}", helper.display())),
+    };
+    let (Some(mut to), Some(from)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Outcome::Failed("помощник входа без каналов".to_owned());
+    };
+    // Owning the helper's input: dropped, it is the end of it — a helper
+    // waiting for an answer that will not come reads that and stops.
+    let mut send = move |line: String| writeln!(to, "{line}").and_then(|()| to.flush()).is_ok();
+    if !send(oc_form::Request::of(cfg).encode()) {
+        let _ = child.wait();
+        return Outcome::Failed("помощник входа не принял запрос".to_owned());
+    }
+    let keyring = tools.secret_tool.is_file();
+    let mut auto = note.is_none();
+    let mut first = true;
+    let mut answered: BTreeMap<String, Answered> = BTreeMap::new();
+    let mut outcome = Outcome::Failed("помощник входа замолчал, не договорив".to_owned());
+    for line in BufReader::new(from).lines() {
+        let Ok(line) = line else { break };
+        let said = match Said::decode(&line) {
+            Ok(said) => said,
+            Err(e) => {
+                outcome = Outcome::Failed(format!("помощник входа сказал непонятное ({e})"));
+                break;
+            }
+        };
+        match said {
+            Said::Log { text } => eprintln!("cellward: вход в сеть {zone}: {text}"),
+            Said::Form(form) => {
+                let mut notes: Vec<String> = Vec::new();
+                if first {
+                    notes.extend(note.map(str::to_owned));
+                }
+                first = false;
+                let mut values = Vec::new();
+                let mut keeps = Vec::new();
+                for field in &form.fields {
+                    let before = answered.get(&field.name);
+                    let kept = match field.kind {
+                        Kind::Password if keyring => keyring_lookup(tools, zone, &field.name),
+                        Kind::Password | Kind::Token => None,
+                        Kind::Text | Kind::Select => known(saved, field),
+                    };
+                    // A choice kept that the gateway offers no more.
+                    if field.kind == Kind::Select {
+                        if let Some(gone) = saved
+                            .fields
+                            .get(&field.name)
+                            .filter(|v| !field.choices.iter().any(|c| &c.name == *v))
+                        {
+                            notes.push(format!(
+                                "Сохранённого выбора «{gone}» у шлюза больше нет — выбери из тех, \
+                                 что есть."
+                            ));
+                        }
+                    }
+                    let value = before
+                        .filter(|_| field.kind != Kind::Token)
+                        .map(|b| b.value.clone())
+                        .or_else(|| kept.clone())
+                        .unwrap_or_else(|| field.value.clone());
+                    // Ticked where it was kept before: in the file, or the keyring.
+                    let keep = before.map_or(
+                        (kept.is_some() && saved.fields.contains_key(&field.name))
+                            || (field.kind == Kind::Password && kept.is_some()),
+                        |b| b.keep,
+                    );
+                    values.push(value);
+                    keeps.push(keep);
+                }
+                let all_known = form.error.is_empty()
+                    && form
+                        .fields
+                        .iter()
+                        .zip(&values)
+                        .all(|(f, v)| f.kind != Kind::Token && !v.is_empty());
+                let answer = if auto && all_known {
+                    Some((values, keeps))
+                } else {
+                    auto = false;
+                    let request = form_request(
+                        zone,
+                        asked,
+                        cfg,
+                        &form,
+                        (&values, &keeps),
+                        (&notes, keyring),
+                    );
+                    show_form(tools, &request, &form)
+                };
+                let Some((values, keeps)) = answer else {
+                    send(oc_form::Answer::Cancel.encode());
+                    outcome = Outcome::Cancelled;
+                    break;
+                };
+                let mut given = BTreeMap::new();
+                for ((field, value), keep) in form.fields.iter().zip(values).zip(keeps) {
+                    given.insert(field.name.clone(), value.clone());
+                    answered.insert(
+                        field.name.clone(),
+                        Answered {
+                            field: field.clone(),
+                            value,
+                            keep,
+                        },
+                    );
+                }
+                if !send(oc_form::Answer::Values(given).encode()) {
+                    break;
+                }
+            }
+            Said::Done {
+                cookie,
+                connect_url,
+                fingerprint,
+                address,
+            } => {
+                outcome = Outcome::Done(
+                    Session {
+                        cookie,
+                        connect_url,
+                        fingerprint,
+                        address,
+                    },
+                    answered.into_values().collect(),
+                );
+                break;
+            }
+            Said::Failed { why } => {
+                outcome = if why == CANCELLED {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Failed(why)
+                };
+                break;
+            }
+            Said::Probe { .. } => {}
+        }
+    }
+    drop(send);
+    let _ = child.wait();
+    outcome
+}
+
+/// What `cellward-oc-auth` says when a form was closed.
+const CANCELLED: &str = "вход отменён";
+
+/// Keep what the person chose to keep of a login that brought the network
+/// up, and forget what they unticked.
+fn keep_answers(tools: &Tools, zone: &str, saved: &Saved, answered: &[Answered]) {
+    let keyring = tools.secret_tool.is_file();
+    let mut fields = saved.fields.clone();
+    for a in answered {
+        match a.field.kind {
+            Kind::Text | Kind::Select => {
+                if a.keep {
+                    fields.insert(a.field.name.clone(), a.value.clone());
+                } else {
+                    fields.remove(&a.field.name);
+                }
+            }
+            Kind::Password if keyring => keyring_keep(tools, zone, &a.field.name, &a.value, a.keep),
+            Kind::Password | Kind::Token => {}
+        }
+    }
+    store_saved(&tools.state, zone, &fields);
+}
+
+/// The login of `zone` through its gateway's forms, and the session handed
+/// to its holder while it starts; again, with what went wrong, until the
+/// network is up or the person gives up. Whether the person went through
+/// with it — up or not.
 fn log_in(tools: &Tools, zone: &str, (mode, wants): (Mode, Wants<'_>), cfg: &OcConfig) -> bool {
     let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|r| !r.is_empty()) else {
         eprintln!("cellward: XDG_RUNTIME_DIR не задан — вход в сеть {zone} передать некуда");
         return false;
     };
-    let (last_user, last_group) = last_login(&tools.state, zone);
-    let mut user = last_user.or_else(|| cfg.user.clone()).unwrap_or_default();
-    let mut group = last_group
-        .or_else(|| cfg.authgroup.clone())
-        .unwrap_or_default();
-    let keyring = tools.secret_tool.is_file();
-    let mut error: Option<String> = None;
+    let mut note: Option<String> = None;
     loop {
-        let remembered = keyring
-            .then(|| keyring_lookup(tools, zone, &user))
-            .flatten()
-            .unwrap_or_default();
-        let request = login_request(
-            zone,
-            (mode, wants),
-            cfg,
-            (&user, &group, &remembered),
-            (error.as_deref(), keyring),
-        );
-        let Some(answer) = login_form(tools, &request, &user, &group) else {
-            return false;
-        };
-        let offer = match Offer::open(Path::new(&runtime), zone, answer.login.clone()) {
+        let saved = load_saved(&tools.state, zone, cfg);
+        let (session, answered) =
+            match gateway_login(tools, zone, (mode, wants), cfg, (&saved, note.as_deref())) {
+                Outcome::Done(session, answered) => (session, answered),
+                Outcome::Cancelled => return false,
+                Outcome::Failed(why) => {
+                    eprintln!("cellward: вход в сеть {zone}: {why}");
+                    crate::dialog::notify(
+                        &tools.notify_send,
+                        None,
+                        "15000",
+                        &format!("Вход в сеть {zone} не удался"),
+                        &why,
+                    );
+                    return true;
+                }
+            };
+        let offer = match Offer::open(Path::new(&runtime), zone, session) {
             Ok(offer) => offer,
             Err(e) => {
                 eprintln!("cellward: {e}");
-                return false;
+                return true;
             }
         };
         Real(tools).start(zone, wants);
         let taken = offer.taken();
         if crate::cli::zone_up(&tools.state, OsStr::new(zone)).is_some() {
-            save_last_login(&tools.state, zone, &answer.login);
-            if keyring && (answer.remember || !remembered.is_empty()) {
-                keyring_keep(tools, zone, &answer.login, answer.remember);
-            }
+            keep_answers(tools, zone, &saved, &answered);
             return true;
         }
-        error = Some(if taken {
+        note = Some(if taken {
             format!(
-                "Сеть не подключилась: шлюз не принял вход — проверь пароль и код \
-                 (journalctl --user -u vpn-zone@{zone})."
+                "Шлюз впустил, но сеть не подключилась (journalctl --user -u vpn-zone@{zone}) — \
+                 ещё раз?"
             )
         } else {
             format!(
@@ -970,8 +1287,6 @@ fn log_in(tools: &Tools, zone: &str, (mode, wants): (Mode, Wants<'_>), cfg: &OcC
                  vpn-zone@{zone})."
             )
         });
-        user = answer.login.user;
-        group = answer.login.group;
     }
 }
 
@@ -1282,111 +1597,168 @@ mod tests {
         assert!(text.contains("остаётся в прежней"), "{text}");
     }
 
-    /// The login's lines there and back; never the password in a log.
+    /// The session's lines there and back; never the cookie in a log.
     #[test]
-    fn a_login_goes_there_and_back_and_is_not_logged() {
-        let login = Login {
-            user: "ivan".into(),
-            group: "staff".into(),
-            password: "Xq\t7\nZw".into(),
-            code: "123456".into(),
+    fn a_session_goes_there_and_back_and_its_cookie_is_not_logged() {
+        let session = Session {
+            cookie: "webvpn=Xq\t7\nZw".into(),
+            connect_url: "https://vpn.example.org/".into(),
+            fingerprint: "pin-sha256:abc=".into(),
+            address: "192.0.2.10".into(),
         };
-        let back = Login::decode(&login.encode()).unwrap();
-        assert_eq!(back.password, "Xq7Zw", "no tab, no line break");
+        let back = Session::decode(&session.encode()).unwrap();
+        assert_eq!(back.cookie, "webvpn=Xq7Zw", "no tab, no line break");
         assert_eq!(
-            (back.user.as_str(), back.group.as_str(), back.code.as_str()),
-            ("ivan", "staff", "123456")
+            (
+                back.connect_url.as_str(),
+                back.fingerprint.as_str(),
+                back.address.as_str()
+            ),
+            ("https://vpn.example.org/", "pin-sha256:abc=", "192.0.2.10")
         );
-        assert_eq!(Login::decode("user\tivan\n"), None, "no password: none");
-        let shown = format!("{login:?}");
+        assert_eq!(
+            Session::decode("url\thttps://x/\n"),
+            None,
+            "no cookie: none"
+        );
+        let shown = format!("{session:?}");
         assert!(
-            !shown.contains("Xq") && !shown.contains("Zw") && !shown.contains("123456"),
+            !shown.contains("Xq") && !shown.contains("webvpn"),
             "{shown}"
         );
     }
 
-    /// The form's request and its answer: prefilled, the box for the
-    /// keyring where there is one, what went wrong said.
+    fn gateway_form() -> Form {
+        let field = |name: &str, label: &str, kind| Field {
+            name: name.into(),
+            label: label.into(),
+            kind,
+            value: String::new(),
+            choices: vec![],
+        };
+        let mut group = field("group_list", "GROUP:", Kind::Select);
+        group.value = "Employees".into();
+        group.choices = vec![
+            oc_form::Choice {
+                name: "Employees".into(),
+                label: "Employees".into(),
+            },
+            oc_form::Choice {
+                name: "Contractors".into(),
+                label: "Подрядчики".into(),
+            },
+        ];
+        Form {
+            banner: String::new(),
+            message: "Please enter your username and password.".into(),
+            error: "Login failed.".into(),
+            fields: vec![
+                group,
+                field("username", "Username:", Kind::Text),
+                field("password", "Password:", Kind::Password),
+            ],
+            group: Some("group_list".into()),
+        }
+    }
+
+    /// The window's request for a gateway's form — its words as the
+    /// gateway's, its fields prefilled, a choice's choices, a box to keep
+    /// by each (a password's with a keyring only) — and the answer back.
     #[test]
-    fn the_form_is_prefilled_and_read_back() {
+    fn the_gateways_form_is_shown_prefilled_and_read_back() {
         let cfg = OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org\n").unwrap();
-        let req = login_request(
+        let form = gateway_form();
+        let values = ["Contractors".to_owned(), "ivan".to_owned(), String::new()];
+        let keeps = [true, true, false];
+        let notes = ["Сеть не подключилась.".to_owned()];
+        let req = form_request(
             "work",
             (Mode::Ask, Wants::Program("Wine")),
             &cfg,
-            ("ivan", "", "secret"),
-            (Some("Шлюз не принял вход"), true),
+            &form,
+            (&values, &keeps),
+            (&notes, true),
         );
         assert!(req.starts_with("title\tВход в сеть work\n"), "{req}");
         assert!(req.contains("note\t«Wine» хочет в сеть work. Шлюз vpn.example.org.\n"));
-        assert!(req.contains("note\tШлюз не принял вход\n"));
-        assert!(req.contains("field\tuser\tПользователь\ttext\tivan\n"));
-        assert!(req.contains("field\tpassword\tПароль\tsecret\tsecret\n"));
-        assert!(req.contains("\tcode\t\n"));
-        assert!(req.contains("remember\tЗапомнить пароль в связке ключей сеанса\t1\n"));
-        let plain = login_request(
+        assert!(req.contains("note\tСеть не подключилась.\n"));
+        assert!(req.contains("note\tШлюз: Please enter your username and password.\n"));
+        assert!(req.contains("note\t⚠ Шлюз: Login failed.\n"));
+        assert!(req.contains("field\tgroup_list\tGROUP:\tselect\tContractors\n"));
+        assert!(req.contains("choice\tgroup_list\tContractors\tПодрядчики\n"));
+        assert!(req.contains("field\tusername\tUsername:\ttext\tivan\n"));
+        assert!(req.contains("save\tusername\tСохранить\t1\n"));
+        assert!(req.contains("field\tpassword\tPassword:\tsecret\t\n"));
+        assert!(req.contains("save\tpassword\tСохранить в связке ключей сеанса\t0\n"));
+        let plain = form_request(
             "work",
             (Mode::Manual, Wants::Person),
             &cfg,
-            ("", "", ""),
-            (None, false),
+            &form,
+            (&values, &keeps),
+            (&[], false),
         );
+        assert!(!plain.contains("save\tpassword"), "no keyring: {plain}");
         assert!(
-            !plain.contains("remember") && !plain.contains("ждёт"),
+            !plain.contains("вручную") && !plain.contains("ждёт"),
             "{plain}"
         );
-        assert!(
-            !plain.contains("вручную"),
-            "the person connecting it: {plain}"
-        );
-        let manual = login_request(
-            "work",
-            (Mode::Manual, Wants::Program("Wine")),
-            &cfg,
-            ("", "", ""),
-            (None, false),
-        );
-        assert!(manual.contains("только вручную"), "{manual}");
-        let answer = parse_answer(
-            "field\tuser\tivan\nfield\tgroup\tstaff\nfield\tpassword\tp w\nfield\tcode\t42\n\
-             remember\t1\n",
+        let (values, keeps) = parse_form_answer(
+            "field\tgroup_list\tEmployees\nfield\tusername\tivan\nfield\tpassword\tp w\n\
+             save\tusername\t1\nsave\tpassword\t1\n",
+            &form,
         )
         .unwrap();
-        assert_eq!(answer.login.password, "p w");
-        assert_eq!(answer.login.code, "42");
-        assert!(answer.remember);
-        assert!(parse_answer("field\tuser\tivan\n").is_none());
+        assert_eq!(values, ["Employees", "ivan", "p w"]);
+        assert_eq!(keeps, [false, true, true]);
+        assert!(parse_form_answer("field\tusername\tivan\n", &form).is_none());
     }
 
-    /// The last login's user and group, for the next form.
+    /// What was kept is known by the gateway's field name; the file of
+    /// before and the config still name the user and the group.
     #[test]
-    fn the_last_user_and_group_are_remembered() {
-        let t = tools("last");
-        assert_eq!(last_login(&t.state, "work"), (None, None));
-        let login = Login {
-            user: "ivan".into(),
-            password: "x".into(),
-            ..Login::default()
-        };
-        save_last_login(&t.state, "work", &login);
-        assert_eq!(last_login(&t.state, "work"), (Some("ivan".into()), None));
+    fn what_was_kept_is_known_by_field_and_the_old_file_still_counts() {
+        let t = tools("kept");
+        let cfg =
+            OcConfig::parse("[OpenConnect]\nServer = a.b\nAuthGroup = Подрядчики\n".as_bytes())
+                .unwrap();
+        fs::write(
+            t.state.join("work").join(LAST_LOGIN),
+            "user\tivan\ngroup\t\n",
+        )
+        .unwrap();
+        let saved = load_saved(&t.state, "work", &cfg);
+        let form = gateway_form();
+        assert_eq!(known(&saved, &form.fields[1]).as_deref(), Some("ivan"));
+        assert_eq!(
+            known(&saved, &form.fields[0]).as_deref(),
+            Some("Contractors"),
+            "the config's group, by its label"
+        );
+        assert_eq!(known(&saved, &form.fields[2]), None, "never a password");
+        let mut fields = BTreeMap::new();
+        fields.insert("username".to_owned(), "petr".to_owned());
+        store_saved(&t.state, "work", &fields);
+        let saved = load_saved(&t.state, "work", &cfg);
+        assert_eq!(known(&saved, &form.fields[1]).as_deref(), Some("petr"));
         let text = fs::read_to_string(t.state.join("work").join(LAST_LOGIN)).unwrap();
-        assert!(!text.contains('x'), "no password there: {text}");
+        assert_eq!(text, "field\tusername\tpetr\n");
+        assert!(asks_user(&form.fields[1]) && !asks_user(&form.fields[2]));
     }
 
-    /// The login served to the network's holder alone: a process of any
+    /// The session served to the network's holder alone: a process of any
     /// other unit (this test's) is closed on with nothing; the offer taken
     /// back ends the wait.
     #[test]
-    fn a_login_is_served_to_the_holder_alone() {
+    fn a_session_is_served_to_the_holder_alone() {
         let runtime = std::env::temp_dir().join(format!("vz-connect-offer-{}", std::process::id()));
         let _ = fs::remove_dir_all(&runtime);
         fs::create_dir_all(&runtime).unwrap();
-        let login = Login {
-            password: "x".into(),
-            ..Login::default()
+        let session = Session {
+            cookie: "x".into(),
+            ..Session::default()
         };
-        let offer = Offer::open(&runtime, "work", login).unwrap();
+        let offer = Offer::open(&runtime, "work", session).unwrap();
         let path = login_socket(&runtime, "work");
         let mut stream = UnixStream::connect(&path).unwrap();
         let mut got = String::new();

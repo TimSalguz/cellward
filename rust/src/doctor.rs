@@ -2404,9 +2404,11 @@ pub fn pipewire_check(
             Some(State::NoPolicy) => Check::new(
                 "pipewire",
                 Level::Warn,
-                "политики WirePlumber cellward нет — PipeWire зоне закрыт, звук только \
-                 через pulse (services.cellward.pipewirePolicy или \
-                 programs.cellward.pipewirePolicy)",
+                "политики WirePlumber cellward нет — PipeWire зоне закрыт; звук через \
+                 фильтр Pulse работает, но ALSA/PipeWire-программы (например, Helium) \
+                 могут остаться без звука. Включи services.cellward.pipewirePolicy.enable \
+                 или programs.cellward.pipewirePolicy, примени конфигурацию и перезапусти \
+                 WirePlumber",
             ),
             Some(State::NoPipewire) => Check::new(
                 "pipewire",

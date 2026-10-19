@@ -66,6 +66,32 @@ pub const RUN_DIR: &str = "/run/vpn-zones/system";
 /// The declared zones, one name per line, written by the NixOS module. What
 /// `vpn-zone status --json` lists.
 pub const DECLARED: &str = "/etc/vpn-zones/system-zones";
+/// Present only when the NixOS module's strict system-route publication is
+/// enabled. A configured system VPN not on the list may exist in the pool,
+/// but must not dial directly — even through `systemctl start` or a probe.
+pub const DIRECT_ROUTES: &str = "/etc/vpn-zones/system-direct-routes";
+
+fn direct_route_allowed_at(path: &Path, name: &str) -> Result<bool, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(format!("cannot read system route policy: {e}")),
+    };
+    let mut allowed = false;
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        check_name(line).map_err(|e| format!("system route policy line {}: {e}", n + 1))?;
+        allowed |= line == name;
+    }
+    Ok(allowed)
+}
+
+pub fn direct_route_allowed(name: &str) -> Result<bool, String> {
+    direct_route_allowed_at(Path::new(DIRECT_ROUTES), name)
+}
 /// `services.cellward.system.users`, one per line: who may add zones.
 pub const ADDERS: &str = "/etc/vpn-zones/system-adders";
 /// Namespaces are `vz-<name>`: apart from anybody else's `ip netns add`.
@@ -543,6 +569,12 @@ fn ns_down(args: &Args) {
 // --- THE TUNNEL --------------------------------------------------------------
 
 fn up(args: &Args) -> Result<(), String> {
+    if !direct_route_allowed(&args.name)? {
+        return Err(
+            "direct system route is not published; this node must not dial from the host"
+                .to_owned(),
+        );
+    }
     if uplink_invalid(&args.name) {
         return Err(
             "its uplink names no interface — it goes out through that one or not at all".to_owned(),
@@ -1640,6 +1672,19 @@ fn write_group_readable(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_system_routes_do_not_dial_unpublished_nodes() {
+        let path =
+            std::env::temp_dir().join(format!("cellward-system-routes-{}", std::process::id()));
+        assert!(direct_route_allowed_at(&path, "nl").unwrap()); // legacy
+        fs::write(&path, "nl\nhome\n").unwrap();
+        assert!(direct_route_allowed_at(&path, "nl").unwrap());
+        assert!(!direct_route_allowed_at(&path, "ch").unwrap());
+        fs::write(&path, "nl\n../ch\n").unwrap();
+        assert!(direct_route_allowed_at(&path, "nl").is_err());
+        fs::remove_file(&path).unwrap();
+    }
 
     /// Plain zones' pasta keeps away from the host's own addresses, whatever
     /// the egress policy says, in a table made anew in one go.

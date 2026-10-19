@@ -62,6 +62,62 @@ struct Net {
     /// What the tunnel watch last found: `alive`, `idle`, `dead`,
     /// `suspect`, `unknown`; `-` not looked at.
     tunnel: String,
+    /// The immediate upstream zone, system or user, if it has one.
+    upstream: String,
+    /// `chain`: over a system VPN; `chain-user`: over another user VPN;
+    /// `system`: it borrows the outer tunnel directly.
+    route: String,
+    published: bool,
+}
+
+/// The route represented by a zone. Show both namespace and remote-server
+/// boundaries: the inner encrypted packet passes through the outer tunnel,
+/// then each server removes only its own layer. A response follows the same
+/// path backwards; this is not a second exit from the host network.
+fn route_path(net: &Net, networks: &[Net], who: &str) -> String {
+    if net.route == "system" {
+        return format!("{who} → системная зона {} (awg0) → Интернет", net.upstream);
+    }
+    if net.route != "chain" && net.route != "chain-user" {
+        return format!("{who} → {} → Интернет", network_text(&net.name));
+    }
+    let mut inner_to_outer = vec![net.name.clone()];
+    let mut current = net;
+    for _ in 0..networks.len() + 1 {
+        if current.route != "chain" && current.route != "chain-user" {
+            break;
+        }
+        if current.upstream.is_empty() || inner_to_outer.contains(&current.upstream) {
+            return format!(
+                "{who} → {} → маршрут недоступен (цикл или отсутствует звено)",
+                net.name
+            );
+        }
+        inner_to_outer.push(current.upstream.clone());
+        if current.route == "chain" {
+            break;
+        }
+        let Some(next) = networks.iter().find(|n| n.name == current.upstream) else {
+            return format!(
+                "{who} → {} → маршрут недоступен (нет внешней зоны)",
+                net.name
+            );
+        };
+        current = next;
+    }
+    let hops = inner_to_outer;
+    let mut path = who.to_owned();
+    for (index, hop) in hops.iter().enumerate() {
+        if index > 0 {
+            path.push_str(" → uplink (hostif)");
+        }
+        path.push_str(&format!(" → {hop} (awg0: слой {})", index + 1));
+    }
+    for (index, hop) in hops.iter().enumerate().rev() {
+        path.push_str(&format!(" → сервер {hop} (снят слой {})", index + 1));
+    }
+    path.push_str(" → Интернет\nОтвет ← теми же звеньями в обратном порядке");
+    path
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -186,6 +242,35 @@ fn parse(text: &str) -> Data {
                     c.paths.push(((*path).to_owned(), num(until)));
                 }
             }
+            ["network", name, kind, up, color, locked, tunnel, upstream, route, published] => {
+                d.networks.push(Net {
+                    name: (*name).to_owned(),
+                    kind: (*kind).to_owned(),
+                    up: *up == "1",
+                    color: color_of(color),
+                    locked: *locked == "1",
+                    tunnel: (*tunnel).to_owned(),
+                    upstream: (*upstream).to_owned(),
+                    route: (*route).to_owned(),
+                    published: *published == "1",
+                })
+            }
+            ["network", name, kind, up, color, locked, tunnel, upstream, route] => {
+                d.networks.push(Net {
+                    name: (*name).to_owned(),
+                    kind: (*kind).to_owned(),
+                    up: *up == "1",
+                    color: color_of(color),
+                    locked: *locked == "1",
+                    tunnel: (*tunnel).to_owned(),
+                    upstream: (*upstream).to_owned(),
+                    route: (*route).to_owned(),
+                    published: true,
+                })
+            }
+            // A panel backend from the previous generation, while a
+            // home-manager switch replaces the window and backend in either
+            // order. It has no chain field, but its networks must not vanish.
             ["network", name, kind, up, color, locked, tunnel] => d.networks.push(Net {
                 name: (*name).to_owned(),
                 kind: (*kind).to_owned(),
@@ -193,6 +278,9 @@ fn parse(text: &str) -> Data {
                 color: color_of(color),
                 locked: *locked == "1",
                 tunnel: (*tunnel).to_owned(),
+                upstream: String::new(),
+                route: String::new(),
+                published: true,
             }),
             ["setting", name, value, source] => d.settings.push((
                 (*name).to_owned(),
@@ -1705,6 +1793,84 @@ impl Panel {
     }
 
     fn view_network(&self) -> Element<'_, Msg> {
+        let mut paths = column![text("Путь трафика").size(17)].spacing(4);
+        let has_paths = self.data.networks.iter().any(|n| !n.route.is_empty())
+            || !self.data.instances.is_empty();
+        let configured = self.data.networks.iter().filter(|n| !n.route.is_empty());
+        for net in configured {
+            let users: Vec<&str> = self
+                .data
+                .instances
+                .iter()
+                .filter(|i| i.network == net.name)
+                .map(|i| {
+                    if i.container == "-" {
+                        i.id.as_str()
+                    } else {
+                        i.container.as_str()
+                    }
+                })
+                .collect();
+            let who = if users.is_empty() {
+                "Приложение".to_owned()
+            } else {
+                users.join(", ")
+            };
+            let state = if net.up {
+                "поднята"
+            } else {
+                "опущена"
+            };
+            paths = paths.push(
+                row![
+                    text("●")
+                        .size(14)
+                        .color(net.color.unwrap_or(Color::from_rgb8(0x88, 0x88, 0x88))),
+                    text(format!(
+                        "{} ({state})",
+                        route_path(net, &self.data.networks, &who)
+                    ))
+                    .size(14)
+                ]
+                .spacing(8),
+            );
+            if net.route == "chain" || net.route == "chain-user" {
+                paths = paths.push(
+                    text(
+                        "Провайдер видит только первый VPN. Каждый промежуточный VPN видит адрес \
+                         следующего сервера, но не содержимое следующего туннеля; последний VPN \
+                         видит назначения. DNS программ идёт через последний VPN, адреса внутренних \
+                         серверов заданы без DNS хоста. Ping здесь не измеряется: каждое звено может \
+                         увеличить задержку.",
+                    )
+                    .size(12),
+                );
+            }
+        }
+        for i in self.data.instances.iter().filter(|i| {
+            !self
+                .data
+                .networks
+                .iter()
+                .any(|n| n.name == i.network && !n.route.is_empty())
+        }) {
+            let who = if i.container == "-" {
+                &i.id
+            } else {
+                &i.container
+            };
+            paths = paths.push(
+                row![
+                    text("●").size(14).color(self.color_of_instance(i)),
+                    text(format!("{who} → {} → Интернет", network_text(&i.network))).size(14)
+                ]
+                .spacing(8),
+            );
+        }
+        if !has_paths {
+            paths =
+                paths.push(text("появится после добавления сети или запуска контейнера").size(13));
+        }
         let mut now = column![text("Сейчас").size(17)].spacing(4);
         if self.data.instances.is_empty() {
             now = now.push(text("ни один контейнер сейчас не работает").size(13));
@@ -1735,6 +1901,7 @@ impl Panel {
             );
         }
         let page = column![
+            paths,
             now,
             self.view_flows(),
             self.view_programs(),
@@ -2942,7 +3109,7 @@ impl Panel {
                 "host" => "host (сеть хоста, без VPN)".to_owned(),
                 _ => n.name.clone(),
             };
-            let state = if n.kind == "offline" {
+            let mut state = if n.kind == "offline" {
                 if n.locked {
                     "заперта".to_owned()
                 } else {
@@ -2951,6 +3118,12 @@ impl Panel {
             } else {
                 tunnel_text(n)
             };
+            if !n.upstream.is_empty() {
+                state.push_str(&format!(" · через {}", n.upstream));
+            }
+            if !n.published {
+                state.push_str(" · маршрут не разрешён");
+            }
             let mut buttons = row![].spacing(6);
             if n.kind == "zone" || n.kind == "host" {
                 if n.up {
@@ -2966,7 +3139,7 @@ impl Panel {
                             Msg::ZoneDo(n.name.clone(), "check"),
                             false,
                         ));
-                } else {
+                } else if n.published {
                     buttons =
                         buttons.push(act("Поднять", Msg::ZoneDo(n.name.clone(), "up"), false));
                 }
@@ -3239,9 +3412,10 @@ mod tests {
         path\twork\t/home/a/share\t0\n\
         path\tnobody\t/x\t0\n\
         container\tbank\tprivate\task\t#808080\n\
-        network\tnl\tzone\t1\t#3366ff\t0\talive\n\
-        network\toffline\toffline\t1\t#808080\t1\t-\n\
-        network\told\tzone\t1\t#808080\n\
+        network\tnl\tzone\t1\t#3366ff\t0\talive\tcorp\tchain\n\
+        network\tch\tzone\t0\t#808080\t0\t-\tnl\tchain\t0\n\
+        network\toffline\toffline\t1\t#808080\t1\t-\t\t\n\
+        network\told\tzone\t1\t#808080\t0\tunknown\n\
         setting\tdefault\toffline\tdefault\n\
         pin\tfirefox\tFirefox\twork\n\
         instance\twork\twork\tnl\t1500\t3000\t1790000000\n\
@@ -3312,10 +3486,19 @@ mod tests {
             d.containers[0].color,
             Some(Color::from_rgb8(0x33, 0x66, 0xff))
         );
-        // A network line of the old shape is skipped, not misread.
-        assert_eq!(d.networks.len(), 2);
+        // The previous generation's seven-field network line stays readable
+        // while a home-manager switch replaces backend and window in either
+        // order; it simply has no upstream yet.
+        assert_eq!(d.networks.len(), 4);
+        assert!(!d.networks[1].published);
+        assert!(d.networks[3].upstream.is_empty());
         assert!(d.networks[0].up && !d.networks[0].locked);
-        assert!(d.networks[1].locked);
+        assert_eq!(d.networks[0].route, "chain");
+        let path = route_path(&d.networks[0], &d.networks, "work");
+        assert!(path.contains("work → nl (awg0: слой 1) → uplink (hostif) → corp (awg0: слой 2)"));
+        assert!(path.contains("сервер corp (снят слой 2) → сервер nl (снят слой 1)"));
+        assert!(path.contains("Ответ ← теми же звеньями в обратном порядке"));
+        assert!(d.networks[2].locked);
         assert_eq!(tunnel_text(&d.networks[0]), "поднята · туннель жив");
         assert_eq!(
             d.settings,
@@ -3506,6 +3689,29 @@ mod tests {
         assert!(p.blocked("work", "api.github.com"));
         assert!(!p.blocked("work", "notgithub.com"));
         assert!(!p.blocked("app-chat", "github.com"));
+    }
+
+    #[test]
+    fn a_three_hop_route_shows_every_namespace_and_server_in_order() {
+        let networks = vec![
+            Net {
+                name: "vps".into(),
+                upstream: "ch".into(),
+                route: "chain-user".into(),
+                ..Net::default()
+            },
+            Net {
+                name: "ch".into(),
+                upstream: "nl".into(),
+                route: "chain".into(),
+                ..Net::default()
+            },
+        ];
+        let path = route_path(&networks[0], &networks, "game");
+        assert!(path.contains("game → vps (awg0: слой 1) → uplink (hostif) → ch (awg0: слой 2) → uplink (hostif) → nl (awg0: слой 3)"));
+        assert!(path.contains(
+            "сервер nl (снят слой 3) → сервер ch (снят слой 2) → сервер vps (снят слой 1)"
+        ));
     }
 
     #[test]

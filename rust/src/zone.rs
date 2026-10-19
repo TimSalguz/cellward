@@ -222,7 +222,7 @@ pub(crate) const TUN_IFACE: &str = "awg0";
 /// because pasta otherwise copies the name of the host's outbound interface —
 /// and if the host is itself under a VPN and that interface is called `awg0`,
 /// the name would collide with the zone's own tunnel. (`docs/GOTCHAS.md` §2)
-const PASTA_IFACE: &str = "hostif";
+pub(crate) const PASTA_IFACE: &str = "hostif";
 /// wg-quick's default, used when the config carries no `MTU`.
 pub(crate) const DEFAULT_MTU: u32 = 1420;
 /// The IPv4 address and gateway a host-interface zone gets on its side of
@@ -951,6 +951,73 @@ pub fn run(args: Args) -> u8 {
         );
         return 1;
     }
+    // The system configuration may have changed since `cellward add`. Check
+    // the route again as the host user, before entering the user namespace:
+    // the system broker identifies callers by their host uid, whereas uid 0
+    // inside our namespace is a subordinate uid and cannot ask it.
+    if !zone.is_offline() {
+        let verify = || -> Result<Vec<String>, String> {
+            let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
+            let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+            if zone.name() != crate::launch::HOST
+                && !crate::chain::published(
+                    zone.dir.parent().ok_or("zone has no state directory")?,
+                    &zone.name(),
+                    &ini,
+                )?
+            {
+                return Err(
+                    "route is not published in .routes — cellward routes allow <zone>".to_owned(),
+                );
+            }
+            crate::chain::refuse_user_shortcut(
+                zone.dir.parent().ok_or("zone has no state directory")?,
+                &zone.name(),
+                &ini,
+            )?;
+            if crate::chain::ChainConfig::from_ini(&ini)?.is_some() {
+                crate::chain::ChainConfig::validate_transport(&ini)?;
+                crate::chain::ChainConfig::refuse_system_duplicate(
+                    &ini,
+                    crate::sysrun::request_key_owner,
+                )?;
+            }
+            crate::chain::user_upstreams(
+                zone.dir.parent().ok_or("zone has no state directory")?,
+                &zone.name(),
+                &ini,
+            )
+        };
+        let upstreams = match verify() {
+            Ok(upstreams) => upstreams,
+            Err(e) => {
+                eprintln!("zone {}: unsafe route in {CONFIG}: {e}", zone.name());
+                return 1;
+            }
+        };
+        for upstream in upstreams {
+            let state = zone.dir.parent().expect("verified state directory");
+            if crate::cli::zone_up(state, std::ffi::OsStr::new(&upstream)).is_none()
+                && crate::connect::mode(state, &config, &upstream).0 != crate::connect::Mode::Auto
+            {
+                eprintln!("zone {}: upstream {upstream} asks before connecting or is manual — bring it up explicitly first", zone.name());
+                return 1;
+            }
+            let status = Command::new(&zone.tools.runner)
+                .arg("up")
+                .arg(&upstream)
+                .status();
+            if !status.is_ok_and(|s| s.success())
+                || crate::cli::zone_up(state, std::ffi::OsStr::new(&upstream)).is_none()
+            {
+                eprintln!(
+                    "zone {}: upstream user route {upstream} did not come up",
+                    zone.name()
+                );
+                return 1;
+            }
+        }
+    }
     // Leftovers of a previous run would make `vpn-zone up` and the picker
     // believe this zone is already up.
     let _ = fs::remove_file(zone.path(PID));
@@ -1229,7 +1296,7 @@ const CLIENT_ID: u32 = 1;
 /// OpenConnect one in between gets a client that cannot become its id, and
 /// the zone does not come up.)
 fn runs_a_client(zone: &Zone) -> bool {
-    fs::read(zone.path(CONFIG))
+    crate::chain::read_zone_config_dir(&zone.dir)
         .ok()
         .and_then(|raw| WgConfig::parse(&raw).ok())
         .is_some_and(|cfg| openconnect::is_openconnect(&cfg))
@@ -3724,6 +3791,11 @@ impl Transport {
         if !crate::instance::valid_network(to) || !dir.join(CONFIG).is_file() {
             return Target::Unknown;
         }
+        if to != crate::launch::HOST
+            && !crate::chain::published_zone(&self.state, to).unwrap_or(false)
+        {
+            return Target::Unknown;
+        }
         Target::Zone {
             up: crate::cli::zone_up(&self.state, OsStr::new(to)).is_some(),
             carries: crate::bridge::carries(&dir),
@@ -4433,16 +4505,14 @@ pub enum Backend {
 /// An OpenConnect zone, ready to be started.
 pub struct OcZone {
     pub cfg: OcConfig,
-    /// The gateway's address, resolved in the HOST's network before either
-    /// namespace exists — the same rule the WireGuard endpoint follows, and for
-    /// the same two reasons: the uplink has no resolver of its own, and its
-    /// filter would not let a lookup out even if it had one. The client is then
-    /// told the answer with `--resolve`, so it never asks either.
+    /// The gateway's address: the authentication helper's exact address for
+    /// an interactive login, otherwise resolved before either namespace
+    /// exists. The uplink has no resolver of its own. The client is told the
+    /// answer with `--resolve`, so it never asks either.
     pub addr: IpAddr,
-    /// The login the connect window took (no `PasswordFile`, `crate::connect`):
-    /// taken over its socket while still in the host's namespaces, handed
-    /// to the client on its standard input.
-    pub login: Option<crate::connect::Login>,
+    /// The session the connect window obtained (no `PasswordFile`): taken
+    /// over its socket and handed to the client on standard input.
+    pub login: Option<crate::connect::Session>,
 }
 
 impl Backend {
@@ -4504,11 +4574,11 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
     // Read the config and resolve its endpoints HERE: this is the last place
     // with the host's network and the host's resolver. An offline zone has no
     // config at all — and no uplink, and no pasta.
-    let (cfg, config_seed) = if zone.is_offline() {
-        (None, 0)
+    let (cfg, config_seed, chain) = if zone.is_offline() {
+        (None, 0, None)
     } else {
-        let (backend, seed) = prepare(zone)?;
-        (Some(backend), seed)
+        let (backend, seed, chain) = prepare(zone)?;
+        (Some(backend), seed, chain)
     };
     // A host-interface zone's pasta is in the host's network, and so is the
     // pasta of the host's own: the host's own addresses, taken here where
@@ -4757,7 +4827,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
             kill_and_reap(zone_pid);
             return Err(e);
         }
-        match start_system_uplink(&sys.zone, zone_pid) {
+        match start_system_uplink(&sys.zone, zone_pid, TUN_IFACE) {
             Ok((child, resolvers)) => {
                 PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
                 pasta = Some(child);
@@ -4823,45 +4893,89 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
         drop(ready);
 
         let netns = format!("/proc/{pid}/ns/net");
-        // Its word that it is done (`PastaWord`), passed on to the uplink as
-        // `PASTA_DONE` (`wait_for_default_route`).
         let _ = fs::remove_file(zone.path(PASTA_DONE));
-        let word = PastaWord::new();
-        match word
-            .as_ref()
-            .map_err(|e| io::Error::other(format!("no directory for its pid file: {e}")))
-            .and_then(|word| {
-                Command::new(&zone.tools.pasta)
-                    .arg("--netns")
-                    .arg(&netns)
-                    .args(["--config-net", "-q", "-I", PASTA_IFACE, "-f"])
-                    .arg("-P")
-                    .arg(word.path())
-                    .args(PASTA_CLOSED)
-                    .spawn()
-            }) {
-            Ok(mut child) => {
-                PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
-                // Ended first: `wait_any` below sees it, and takes the zone
-                // down.
-                if word.as_ref().is_ok_and(|word| word.wait(&mut child)) {
+        if let Some(chain) = chain.as_ref() {
+            // The preceding VPN zone's pasta is attached to the INNER
+            // tunnel's uplink, not to its app namespace. Thus only this
+            // tunnel's encrypted transport crosses the preceding one. The
+            // watcher is supervised like local pasta: either hop ending takes
+            // the inner zone down, with no host-network fallback.
+            let uplink = if chain.user {
+                let state = zone.dir.parent().ok_or("zone has no state directory")?;
+                crate::chain::validate_user_source(state, &chain.via)?;
+                let source = crate::cli::zone_up(state, std::ffi::OsStr::new(&chain.via))
+                    .ok_or_else(|| format!("upstream user route {} is no longer up", chain.via))?;
+                let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
+                let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
+                start_user_uplink(
+                    source,
+                    pid,
+                    PASTA_IFACE,
+                    crate::chain::ChainConfig::needs_ipv6_transport(&ini)?,
+                )
+            } else {
+                start_system_uplink(&chain.via, pid, PASTA_IFACE)
+            };
+            match uplink {
+                Ok((child, _resolvers)) => {
+                    PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
+                    pasta = Some(child);
                     if let Err(e) = touch(&zone.path(PASTA_DONE)) {
                         eprintln!(
-                            "zone {}: cannot tell the uplink pasta is done: {e}",
+                            "zone {}: cannot tell the chained uplink it is ready: {e}",
                             zone.name()
                         );
                     }
                 }
-                pasta = Some(child);
+                Err(e) => {
+                    kill_and_reap(pid);
+                    kill_and_reap(zone_pid);
+                    return Err(format!(
+                        "no way out through the outer zone {} — {e}",
+                        chain.via
+                    ));
+                }
             }
-            Err(e) => {
-                // The uplink waits for pasta's route as long as it takes:
-                // without pasta that is for ever, so the zone goes now.
-                kill_and_reap(pid);
-                kill_and_reap(zone_pid);
-                return Err(format!(
-                    "cannot start pasta ({e}) — the zone has no way out"
-                ));
+        } else {
+            // Its word that it is done (`PastaWord`), passed on to the uplink as
+            // `PASTA_DONE` (`wait_for_default_route`).
+            let word = PastaWord::new();
+            match word
+                .as_ref()
+                .map_err(|e| io::Error::other(format!("no directory for its pid file: {e}")))
+                .and_then(|word| {
+                    Command::new(&zone.tools.pasta)
+                        .arg("--netns")
+                        .arg(&netns)
+                        .args(["--config-net", "-q", "-I", PASTA_IFACE, "-f"])
+                        .arg("-P")
+                        .arg(word.path())
+                        .args(PASTA_CLOSED)
+                        .spawn()
+                }) {
+                Ok(mut child) => {
+                    PASTA_CHILD.store(child.id() as i32, Ordering::SeqCst);
+                    // Ended first: `wait_any` below sees it, and takes the zone
+                    // down.
+                    if word.as_ref().is_ok_and(|word| word.wait(&mut child)) {
+                        if let Err(e) = touch(&zone.path(PASTA_DONE)) {
+                            eprintln!(
+                                "zone {}: cannot tell the uplink pasta is done: {e}",
+                                zone.name()
+                            );
+                        }
+                    }
+                    pasta = Some(child);
+                }
+                Err(e) => {
+                    // The uplink waits for pasta's route as long as it takes:
+                    // without pasta that is for ever, so the zone goes now.
+                    kill_and_reap(pid);
+                    kill_and_reap(zone_pid);
+                    return Err(format!(
+                        "cannot start pasta ({e}) — the zone has no way out"
+                    ));
+                }
             }
         }
     } else {
@@ -4914,12 +5028,29 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
 /// the note on `getaddrinfo` in the module docs. A name that does not resolve
 /// is fatal on purpose — the alternative is `wg setconf` retrying DNS for a
 /// minute and a half inside a namespace that has none, and then failing anyway.
-fn prepare(zone: &Zone) -> Result<(Backend, u64), String> {
-    let raw = fs::read(zone.path(CONFIG)).map_err(|e| format!("cannot read {CONFIG}: {e}"))?;
+fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfig>), String> {
+    let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
     // The config as this run reads it, for the zone's fingerprint
     // (`bridge::fingerprint`): the very bytes it comes up with.
     let seed = crate::bridge::config_seed(&raw);
-    prepare_backend(zone, &raw).map(|backend| (backend, seed))
+    let ini = WgConfig::parse(&raw).map_err(|e| format!("{CONFIG}: {e}"))?;
+    let chain = crate::chain::ChainConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
+    if chain.is_some() {
+        crate::chain::ChainConfig::validate_transport(&ini)
+            .map_err(|e| format!("{CONFIG}: {e}"))?;
+    }
+    let backend = prepare_backend(zone, &raw)?;
+    if chain.is_some()
+        && matches!(
+            backend,
+            Backend::HostIf(_) | Backend::HostNet | Backend::SysZone(_)
+        )
+    {
+        return Err(format!(
+            "{CONFIG}: [Chain] is for a zone with its own WireGuard/AmneziaWG or OpenConnect tunnel"
+        ));
+    }
+    Ok((backend, seed, chain))
 }
 
 /// [`prepare`] of the config's bytes.
@@ -5050,46 +5181,53 @@ fn prepare_openconnect(zone: &Zone, ini: &WgConfig) -> Result<Backend, String> {
     // before it is handed to the client (`spawn_openconnect`).
     cfg.check_password_file()
         .map_err(|e| format!("{CONFIG}: {e}"))?;
-    // A login asked when the zone starts (no `PasswordFile`): taken now, over the
+    // A session obtained when the zone starts (no `PasswordFile`): taken now, over the
     // socket of the user's runtime directory whoever started the zone holds
     // (`connect::Offer`) — here, before a namespace of the zone exists.
     let login = if cfg.login {
-        Some(crate::connect::fetch_login(&zone.name())?)
+        Some(crate::connect::fetch_session(&zone.name())?)
     } else {
         None
     };
 
-    let addr = match cfg.server_literal() {
-        Some(addr) => addr,
-        None => {
-            let port = cfg.port.unwrap_or(443);
-            let addrs: Vec<IpAddr> = (cfg.server.as_str(), port)
-                .to_socket_addrs()
-                .map_err(|e| {
-                    format!(
-                        "cannot resolve the gateway {} ({e}) — it has to be an address by the \
+    let addr = if let Some(session) = &login {
+        // Authentication is allowed to visit only the configured gateway.
+        // The transport must use precisely the address and certificate that
+        // the authentication helper saw, never a fresh host DNS lookup.
+        session_gateway(&cfg, session)?
+    } else {
+        match cfg.server_literal() {
+            Some(addr) => addr,
+            None => {
+                let port = cfg.port.unwrap_or(443);
+                let addrs: Vec<IpAddr> = (cfg.server.as_str(), port)
+                    .to_socket_addrs()
+                    .map_err(|e| {
+                        format!(
+                            "cannot resolve the gateway {} ({e}) — it has to be an address by the \
                          time the zone starts, because the uplink has no resolver of its own",
-                        cfg.server
-                    )
-                })?
-                .map(|a| a.ip())
-                .collect();
-            // v4 first, as everywhere else in this file. A name that resolves
-            // ONLY to IPv6 is refused rather than half-supported: `--resolve`
-            // takes `HOST:IP` and cannot express a v6 address unambiguously, so
-            // the client would be handed a mangled one. Writing the literal
-            // into `Server =` works and is what the message asks for.
-            match addrs.iter().copied().find(IpAddr::is_ipv4) {
-                Some(addr) => addr,
-                None if addrs.is_empty() => {
-                    return Err(format!("the gateway {} resolved to nothing", cfg.server))
-                }
-                None => {
-                    return Err(format!(
+                            cfg.server
+                        )
+                    })?
+                    .map(|a| a.ip())
+                    .collect();
+                // v4 first, as everywhere else in this file. A name that resolves
+                // ONLY to IPv6 is refused rather than half-supported: `--resolve`
+                // takes `HOST:IP` and cannot express a v6 address unambiguously, so
+                // the client would be handed a mangled one. Writing the literal
+                // into `Server =` works and is what the message asks for.
+                match addrs.iter().copied().find(IpAddr::is_ipv4) {
+                    Some(addr) => addr,
+                    None if addrs.is_empty() => {
+                        return Err(format!("the gateway {} resolved to nothing", cfg.server))
+                    }
+                    None => {
+                        return Err(format!(
                         "the gateway {} resolves only to IPv6; write that address into Server = \
                          instead — `--resolve` cannot carry one unambiguously",
                         cfg.server
                     ))
+                    }
                 }
             }
         }
@@ -5099,6 +5237,42 @@ fn prepare_openconnect(zone: &Zone, ini: &WgConfig) -> Result<Backend, String> {
     // tunnel is already up the moment it looks.
     let _ = fs::remove_file(zone.path(openconnect::PLAN_FILE));
     Ok(Backend::Oc(Box::new(OcZone { cfg, addr, login })))
+}
+
+/// Check the helper's connection URL before giving it to the client. A
+/// redirected gateway is not an implicit new route, even with a valid cookie.
+fn session_gateway(cfg: &OcConfig, session: &crate::connect::Session) -> Result<IpAddr, String> {
+    let authority = session
+        .connect_url
+        .strip_prefix("https://")
+        .and_then(|url| url.split(['/', '?', '#']).next())
+        .ok_or("the OpenConnect login returned no HTTPS gateway URL")?;
+    let host = if cfg.server.contains(':') {
+        format!("[{}]", cfg.server)
+    } else {
+        cfg.server.clone()
+    };
+    let expected = format!("{host}:{}", cfg.port.unwrap_or(443));
+    if authority != expected && !(cfg.port.is_none_or(|port| port == 443) && authority == host) {
+        return Err(format!(
+            "the OpenConnect login changed the gateway from {host} to {authority} — refused"
+        ));
+    }
+    if session.fingerprint.is_empty() || session.cookie.is_empty() {
+        return Err("the OpenConnect login returned no certificate or session".to_owned());
+    }
+    let address = session
+        .address
+        .parse::<IpAddr>()
+        .map_err(|_| "the OpenConnect login returned no valid gateway address".to_owned())?;
+    if let Some(literal) = cfg.server_literal() {
+        if address != literal {
+            return Err("the OpenConnect login changed the literal gateway address".to_owned());
+        }
+    } else if !address.is_ipv4() {
+        return Err("the OpenConnect login returned an IPv6 address for a named gateway; --resolve cannot pin it".to_owned());
+    }
+    Ok(address)
 }
 
 // --- PROCESS 3: THE UPLINK ---------------------------------------------------
@@ -7623,11 +7797,16 @@ fn wait_for_pasta_link(zone: &Zone) -> Result<(), String> {
 /// (docs/SYSTEM.md §7b). The asking is done by our own binary, `system-uplink`,
 /// which then holds the connection for as long as it runs: its first line
 /// says whether the way out is there, and with it the system zone's resolvers.
-fn start_system_uplink(system: &str, zone_pid: i32) -> Result<(Child, Vec<String>), String> {
+fn start_system_uplink(
+    system: &str,
+    zone_pid: i32,
+    interface: &str,
+) -> Result<(Child, Vec<String>), String> {
     let mut child = Command::new("/proc/self/exe")
         .arg("system-uplink")
         .arg(system)
         .arg(zone_pid.to_string())
+        .arg(interface)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .spawn()
@@ -7648,6 +7827,46 @@ fn start_system_uplink(system: &str, zone_pid: i32) -> Result<(Child, Vec<String
     Err(line
         .strip_prefix("ERR ")
         .unwrap_or("the watcher said nothing")
+        .to_owned())
+}
+
+/// Attach an inner tunnel's uplink to another user VPN zone's app namespace.
+/// The helper's connection to the system broker is the link's lifetime: if
+/// the outer zone dies or changes namespace, the inner holder loses its way
+/// out and tears the inner zone down rather than falling back to the host.
+fn start_user_uplink(
+    source: i32,
+    target: i32,
+    interface: &str,
+    needs_ipv6: bool,
+) -> Result<(Child, Vec<String>), String> {
+    let mut child = Command::new("/proc/self/exe")
+        .arg("user-uplink")
+        .arg(source.to_string())
+        .arg(target.to_string())
+        .arg(interface)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot start user-uplink watcher: {e}"))?;
+    let mut line = String::new();
+    if let Some(out) = child.stdout.take() {
+        let _ = BufReader::new(out).read_line(&mut line);
+    }
+    let line = line.trim_end();
+    if line == "OK 6" || line == "OK 4" {
+        if !needs_ipv6 || line == "OK 6" {
+            return Ok((child, Vec::new()));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the upstream user VPN has no IPv6 route to this tunnel endpoint".to_owned());
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(line
+        .strip_prefix("ERR ")
+        .unwrap_or("the user-uplink watcher said nothing")
         .to_owned())
 }
 
@@ -8047,10 +8266,7 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 ///   arrives — keeps meaning what it says.
 /// * `--non-inter` because a zone is started by a systemd unit and there is no
 ///   terminal to ask anything on; a prompt would hang the zone instead of
-///   failing it. Not with a one-time code of the connect window's login
-///   (no `PasswordFile`): the gateway's second prompt reads it from standard
-///   input, the line after the password — and a prompt past those finds the
-///   input closed, and fails.
+///   failing it. The connect window has already completed all login forms.
 /// * `--no-external-auth` so that authentication never tries to open a browser
 ///   OUTSIDE the zone — the exact move `docs/LEAK-MODEL.md` spends a section on.
 /// * No `--disable-ipv6` (it was there until 2026-09-27): IPv6 the gateway
@@ -8059,11 +8275,8 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 ///   `--resolve` names the gateway by the address resolved above.
 /// * `--resolve` hands over the address resolved in the host's network, so the
 ///   client never needs a resolver in a namespace that has none.
-/// * `--passwd-on-stdin` with the password written on one line and the pipe
-///   closed. Not a command-line argument: `/proc/<pid>/cmdline` is world
-///   readable, and not an environment variable either, for the same reason.
-///   The password is the file's (`PasswordFile`) or the login's; the login's
-///   user and group, where given, come before the config's.
+/// * `--passwd-on-stdin` for a configured password, or `--cookie-on-stdin`
+///   for a completed login session. Neither secret enters argv or env.
 ///
 /// And the environment is BUILT rather than inherited
 /// ([`crate::openconnect::client_env`]): `openconnect` honours `https_proxy`
@@ -8076,23 +8289,11 @@ fn real_program(program: &Path) -> Result<PathBuf, String> {
 fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, String> {
     let cfg = &oc.cfg;
     let login = oc.login.as_ref();
-    let (password, code) = match login {
-        Some(login) => (
-            Some(login.password.clone()),
-            Some(login.code.clone()).filter(|code| !code.is_empty()),
-        ),
-        None => (
-            cfg.read_password().map_err(|e| format!("{CONFIG}: {e}"))?,
-            None,
-        ),
+    let password = if login.is_some() {
+        None
+    } else {
+        cfg.read_password().map_err(|e| format!("{CONFIG}: {e}"))?
     };
-    let given = |value: &str| Some(value.to_owned()).filter(|v| !v.is_empty());
-    let user = login
-        .and_then(|l| given(&l.user))
-        .or_else(|| cfg.user.clone());
-    let group = login
-        .and_then(|l| given(&l.group))
-        .or_else(|| cfg.authgroup.clone());
 
     // `openconnect` runs its `--script` through `/bin/sh -c`, so the string is
     // shell-parsed. Store paths never contain anything a shell would look at,
@@ -8129,28 +8330,31 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         .arg("--script")
         .arg(format!("{exe} oc-script"))
         .arg("--no-external-auth");
-    if code.is_none() {
-        cmd.arg("--non-inter");
-    }
+    cmd.arg("--non-inter");
     if cfg.server_literal().is_none() {
         cmd.arg(format!("--resolve={}:{}", cfg.server, oc.addr));
     }
-    if let Some(pin) = &cfg.server_cert {
+    if let Some(pin) = login
+        .map(|session| &session.fingerprint)
+        .or(cfg.server_cert.as_ref())
+    {
         cmd.arg(format!("--servercert={pin}"));
     }
-    if let Some(user) = &user {
+    if let Some(user) = &cfg.user {
         cmd.arg(format!("--user={user}"));
     }
-    if let Some(group) = &group {
+    if let Some(group) = &cfg.authgroup {
         cmd.arg(format!("--authgroup={group}"));
     }
-    if password.is_some() {
+    if login.is_some() {
+        cmd.arg("--cookie-on-stdin");
+    } else if password.is_some() {
         cmd.arg("--passwd-on-stdin");
     }
     for extra in &cfg.extra {
         cmd.arg(extra);
     }
-    cmd.arg(cfg.server_arg());
+    cmd.arg(login.map_or_else(|| cfg.server_arg(), |session| session.connect_url.clone()));
 
     // THE CLIENT STARTS WITH AN EMPTY ENVIRONMENT, not with ours. `openconnect`
     // honours `https_proxy` and its relatives, so an environment carried in
@@ -8178,7 +8382,7 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
     }
     cmd.env_clear().envs(env);
     let root = client_root(Path::new(CLIENT_ROOT), dir, &files)?;
-    cmd.stdin(if password.is_some() {
+    cmd.stdin(if password.is_some() || login.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
@@ -8286,26 +8490,19 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
             )
         }
     })?;
-    if let Some(password) = password {
+    if let Some(secret) = login.map(|session| &session.cookie).or(password.as_ref()) {
         let Some(mut stdin) = child.stdin.take() else {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("openconnect was given no stdin to read the password from".to_string());
+            return Err("openconnect was given no stdin to read the session from".to_string());
         };
-        // One line, then EOF: `--non-inter` means nothing else will be asked
-        // — or, with a one-time code, its line after the password's, for the
-        // gateway's second prompt.
-        let mut lines = format!("{password}\n");
-        if let Some(code) = &code {
-            lines.push_str(code);
-            lines.push('\n');
-        }
-        let written = stdin.write_all(lines.as_bytes());
+        // Neither the session cookie nor the password enters argv or env.
+        let written = stdin.write_all(format!("{secret}\n").as_bytes());
         drop(stdin);
         if let Err(e) = written {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("cannot hand the password to openconnect: {e}"));
+            return Err(format!("cannot hand the session to openconnect: {e}"));
         }
     }
     Ok(child)
@@ -10414,6 +10611,38 @@ mod tests {
         let reply = question.wait_with_output().unwrap();
         assert!(reply.status.success());
         assert_eq!(reply.stdout, b"action\tnow\n");
+    }
+
+    #[test]
+    fn openconnect_session_cannot_redirect_the_transport() {
+        let cfg = OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org:4443\n").unwrap();
+        let mut session = crate::connect::Session {
+            cookie: "secret".into(),
+            connect_url: "https://vpn.example.org:4443/path".into(),
+            fingerprint: "pin-sha256:abc=".into(),
+            address: "192.0.2.10".into(),
+        };
+        assert_eq!(
+            session_gateway(&cfg, &session),
+            Ok("192.0.2.10".parse().unwrap())
+        );
+        session.address = "2001:db8::10".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        session.address = "192.0.2.10".into();
+        session.connect_url = "https://vpn.example.org/path".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        session.connect_url = "https://other.example.org:4443/path".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        session.connect_url = "http://vpn.example.org:4443/path".into();
+        assert!(session_gateway(&cfg, &session).is_err());
+        let literal = OcConfig::parse(b"[OpenConnect]\nServer = 192.0.2.11\n").unwrap();
+        session.connect_url = "https://192.0.2.11/".into();
+        assert!(session_gateway(&literal, &session).is_err());
+        let default = OcConfig::parse(b"[OpenConnect]\nServer = vpn.example.org\n").unwrap();
+        session.connect_url = "https://vpn.example.org/".into();
+        assert!(session_gateway(&default, &session).is_ok());
+        session.fingerprint.clear();
+        assert!(session_gateway(&default, &session).is_err());
     }
 
     /// The host's own network: pasta bound to no interface, the host's

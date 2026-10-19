@@ -184,6 +184,12 @@ Without NixOS, or with a standalone home-manager, as before:
 }
 ```
 
+The home-manager entry also installs the restricted PipeWire policy by
+default. Set `programs.cellward.pipewirePolicy = false` only if you deliberately
+want hermetic zones to use the filtered PulseAudio socket alone; ALSA clients
+using PipeWire (including browsers that fall back to ALSA) will then have no
+sound. Restart WirePlumber after activating a changed policy.
+
 The options were called `programs.vpn-zones.*` and `services.vpn-zones.*`
 before the rename; the old names still work, through
 `lib.mkRenamedOptionModule`, with a warning on every use.
@@ -219,7 +225,8 @@ a PipeWire socket of the zone's own, whose clients see what a WirePlumber
 policy of this project lets them: their own streams, the outputs to play to,
 the microphone only as `cellward microphone` says — never what the host plays,
 never another program's stream. `programs.cellward.enable` switches the policy
-on with WirePlumber; otherwise it is switched on once:
+on with WirePlumber, in NixOS and standalone home-manager. To enable it
+explicitly in an existing configuration:
 
 ```nix
 services.cellward.pipewirePolicy.enable = true;  # NixOS: nixosModules.default
@@ -229,7 +236,8 @@ programs.cellward.audioManager = [ "mixer" ];    # a zone for pavucontrol/qpwgra
 ```
 
 Without the policy a hermetic zone has no PipeWire at all — the PulseAudio path
-only, which most programs use (`docs/LEAK-MODEL.md` §20).
+only. Programs using PipeWire directly or ALSA through PipeWire may have no
+sound, even when another browser using PulseAudio works (`docs/LEAK-MODEL.md` §20).
 
 A screen cast goes through the portal only, and has a switch per zone too:
 `cellward screencast <zone> ask (default)|yes|no`. `ask` is the
@@ -413,10 +421,35 @@ Such a zone does **not** encrypt anything: `status --json` calls it
 `host-interface`. The zone's side of it is `10.255.255.253/30`, whatever the
 host's addresses are.
 
+### A VPN chain
+
+A user zone's own tunnel can use a system zone as its outer transport:
+
+```sh
+cellward add inner ./inner.conf --via outer
+```
+
+The path is `program → VPN inner → system zone outer → Internet`. The inner
+tunnel's encrypted transport, rather than its applications, is attached to
+`outer`; losing either hop takes `inner` down, with no fallback to the host
+network. The cellward window shows this path on the Network tab, and
+`status --json` exposes the outer hop as `upstream`.
+
+For now the outer hop must be a system zone and the inner VPN server must be
+a literal IPv4/IPv6 address: resolving its name through the host before the
+chain exists would leak around `outer`. A SOCKS/HTTP hop still depends on the
+planned proxy-zone backend.
+The outer system zone must itself be a VPN. A plain zone would expose the
+inner gateway to the access provider, so Cellward refuses that chain.
+Interactive OpenConnect login is refused in a chain because its helper would
+contact the inner gateway before the outer tunnel exists. Use `PasswordFile`
+or a gateway that needs no login (`AskLogin = no`).
+
 Then just launch programs from the launcher. The same from the terminal:
 
 ```sh
 cellward add <zone> <file.conf>                # a zone from an AmneziaWG/WireGuard/OpenConnect config
+cellward add <zone> <file.conf> --via <system zone>  # an inner VPN through an outer one
 cellward add <zone> --system <system zone>     # a zone through a system zone's tunnel
 cellward list                                  # zones and their state
 cellward up <zone> / down <zone>

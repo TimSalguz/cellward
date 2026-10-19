@@ -78,9 +78,12 @@ Usage:
         table and lifts the restriction — the emergency key; `apply` puts it
         back.
 
-  vpn-zone-core system-uplink <system zone> <pid>
+  vpn-zone-core system-uplink <system zone> <pid> [interface]
+  vpn-zone-core user-uplink <outer-zone-pid> <inner-zone-pid> [interface]
         A user zone's way out through a system zone (docs/SYSTEM.md §7b),
-        asked for the namespaces of <pid> — what the zone's holder runs. Prints
+        asked for the namespaces of <pid> — what the zone's holder runs. The
+        optional interface is `hostif` for an inner tunnel's uplink (`awg0`
+        for a zone borrowing the system tunnel directly). Prints
         `OK <resolvers>` or `ERR <why>`, then holds the way out until pasta
         ends or this is stopped. Not meant to be run by hand.
 
@@ -254,6 +257,7 @@ fn main() -> ExitCode {
         Some("system-run") => ExitCode::from(sysrun::client(&args[1..])),
         Some("system-run-service") => ExitCode::from(sysrun::broker()),
         Some("system-uplink") => ExitCode::from(sysrun::uplink_main(&args[1..])),
+        Some("user-uplink") => ExitCode::from(sysrun::user_uplink_main(&args[1..])),
         Some("oc-script") => {
             let env = openconnect::environment();
             match openconnect::Args::from_env(&args[1..], &env) {

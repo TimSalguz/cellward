@@ -29,6 +29,15 @@ PipeWire policy, the home-manager module for every user — but not this tier:
 Stages 1–3 carry WireGuard/AmneziaWG zones only. OpenConnect and host-interface configs are
 refused with a message; they need the uplink to be a namespace of its own and come later.
 
+For a pool containing VPN configs that must not dial directly, set
+`services.cellward.system.directRoutes = [ "nl" "home" ];`. This is a strict
+allowlist of system zones allowed to make a host-side tunnel; `null` keeps
+the legacy behavior. An omitted zone must have `autoStart = false`, and its
+holder refuses a manual or diagnostic start too. Applying a new strict list
+stops already running system tunnels omitted from it: programs in their
+namespaces keep running without network. User-zone route publication is a
+separate list (`cellward routes`, `docs/CHAIN-ROUTES.md`).
+
 ### 1a. Plain zones
 
 `zones.<name>.kind = "plain"`: the same namespace, no tunnel. pasta attaches to it and
@@ -377,6 +386,24 @@ system zone they may not use is a refusal, never a second tunnel behind its back
   closed, never open — and it comes back without a restart.
 - **Not yet.** IPv6 through such a zone: pasta is started with `-4`, so the zone has no IPv6
   route and its programs fall back to IPv4 at once.
+
+### An inner tunnel through it
+
+`cellward add inner inner.conf --via outer` keeps the inner user zone's own
+tunnel and attaches the system zone's pasta to the inner **uplink** namespace
+as `hostif` (the direct borrowing above attaches it to the app namespace as
+`awg0`). The topology is therefore:
+
+```text
+container → inner awg0 → inner uplink/hostif → outer awg0 → Internet
+```
+
+Only the inner tunnel transport reaches `outer`; the container never gets an
+interface beside its inner `awg0`. The same watcher owns the bridge, so a dead
+outer hop ends the inner zone instead of rerouting it. The system request is
+`VZP2` and names the target interface; the existing `VZP1` shape stays intact
+and always means `awg0`, so a new user generation cannot silently attach a
+chain to the wrong interface through an old system generation.
 
 ## 7a. The TTY console
 

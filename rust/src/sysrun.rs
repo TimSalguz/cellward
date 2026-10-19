@@ -795,9 +795,17 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
     if let Some(body) = data.strip_prefix(UP_MAGIC) {
         return serve_up(uid, &decode_up(body)?).map(|d| answer_done(&d));
     }
+    if let Some(body) = data.strip_prefix(CHAIN_UPLINK_MAGIC) {
+        let (zone, pid, interface) = decode_uplink(body, true)?;
+        return serve_uplink(sock, uid, &zone, pid, &interface, fds);
+    }
+    if let Some(body) = data.strip_prefix(USER_UPLINK_MAGIC) {
+        let (source, target, interface) = decode_user_uplink(body)?;
+        return serve_user_uplink(sock, uid, source, target, &interface, fds);
+    }
     if let Some(body) = data.strip_prefix(UPLINK_MAGIC) {
-        let (zone, pid) = decode_uplink(body)?;
-        return serve_uplink(sock, uid, &zone, pid, fds);
+        let (zone, pid, interface) = decode_uplink(body, false)?;
+        return serve_uplink(sock, uid, &zone, pid, &interface, fds);
     }
     if let Some(body) = data.strip_prefix(KEY_MAGIC) {
         let key = std::str::from_utf8(body).map_err(|_| "the key is not UTF-8")?;
@@ -814,9 +822,14 @@ fn serve_any(sock: RawFd) -> Result<Vec<u8>, String> {
 // the zone letting go of it takes pasta down, and pasta ending is said on it.
 
 /// `VZP1\0`, the system zone, a NUL, the pid of the zone's app namespace, a
-/// NUL; two descriptors: that process's user and network namespaces. Answered
-/// `OK <resolvers>` once pasta runs, and `EXIT <code>` when it has ended.
+/// NUL; two descriptors: that process's user and network namespaces. VZP1 is
+/// deliberately unchanged for generation compatibility and always creates
+/// `awg0`. VZP2 adds a third, interface-name field for a chained tunnel's
+/// uplink. Answered `OK <resolvers>` once pasta runs, and `EXIT <code>` when
+/// it has ended.
 const UPLINK_MAGIC: &[u8] = b"VZP1\0";
+const CHAIN_UPLINK_MAGIC: &[u8] = b"VZP2\0";
+const USER_UPLINK_MAGIC: &[u8] = b"VZP3\0";
 /// `VZK1\0` and a private key: which system zone holds it.
 const KEY_MAGIC: &[u8] = b"VZK1\0";
 /// How the module names pasta for the service.
@@ -835,16 +848,55 @@ const NS_GET_USERNS: libc::c_ulong = 0xb701;
 const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
 const NS_GET_OWNER_UID: libc::c_ulong = 0xb704;
 
-pub fn encode_uplink(zone: &str, pid: i32) -> Vec<u8> {
-    let mut out = UPLINK_MAGIC.to_vec();
+pub fn encode_uplink(zone: &str, pid: i32, interface: &str) -> Vec<u8> {
+    let mut out = if interface == crate::zone::TUN_IFACE {
+        UPLINK_MAGIC.to_vec()
+    } else {
+        CHAIN_UPLINK_MAGIC.to_vec()
+    };
     out.extend_from_slice(zone.as_bytes());
     out.push(0);
     out.extend_from_slice(pid.to_string().as_bytes());
     out.push(0);
+    if interface != crate::zone::TUN_IFACE {
+        out.extend_from_slice(interface.as_bytes());
+        out.push(0);
+    }
     out
 }
 
-pub fn decode_uplink(body: &[u8]) -> Result<(String, i32), String> {
+pub fn encode_user_uplink(source: i32, target: i32, interface: &str) -> Vec<u8> {
+    let mut out = USER_UPLINK_MAGIC.to_vec();
+    out.extend_from_slice(format!("{source}\0{target}\0{interface}\0").as_bytes());
+    out
+}
+
+pub fn decode_user_uplink(body: &[u8]) -> Result<(i32, i32, String), String> {
+    let mut parts = body.split(|&b| b == 0);
+    let pid = |bytes: Option<&[u8]>| {
+        bytes
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .and_then(|p| p.parse::<i32>().ok())
+            .filter(|&p| p > 1)
+            .ok_or("a bad pid in the user uplink request")
+    };
+    let source = pid(parts.next())?;
+    let target = pid(parts.next())?;
+    let interface = parts
+        .next()
+        .and_then(|p| std::str::from_utf8(p).ok())
+        .ok_or("a bad interface")?;
+    if source == target
+        || interface != crate::zone::PASTA_IFACE
+        || parts.next() != Some(&b""[..])
+        || parts.next().is_some()
+    {
+        return Err("a bad user uplink request".to_owned());
+    }
+    Ok((source, target, interface.to_owned()))
+}
+
+pub fn decode_uplink(body: &[u8], chained: bool) -> Result<(String, i32, String), String> {
     let mut parts = body.split(|&b| b == 0);
     let zone = std::str::from_utf8(parts.next().unwrap_or_default())
         .map_err(|_| "the zone's name is not UTF-8")?
@@ -856,7 +908,22 @@ pub fn decode_uplink(body: &[u8]) -> Result<(String, i32), String> {
         .and_then(|p| p.parse::<i32>().ok())
         .filter(|&p| p > 1)
         .ok_or("a bad pid in the request")?;
-    Ok((zone, pid))
+    let interface = if chained {
+        parts
+            .next()
+            .and_then(|p| std::str::from_utf8(p).ok())
+            .filter(|p| !p.is_empty())
+            .ok_or("no interface in a chained uplink request")?
+            .to_owned()
+    } else {
+        crate::zone::TUN_IFACE.to_owned()
+    };
+    if !crate::hostif::valid_interface_name(&interface)
+        || ![crate::zone::TUN_IFACE, crate::zone::PASTA_IFACE].contains(&interface.as_str())
+    {
+        return Err("a bad interface in the uplink request".to_owned());
+    }
+    Ok((zone, pid, interface))
 }
 
 pub fn encode_key(key: &str) -> Vec<u8> {
@@ -878,7 +945,11 @@ pub fn request_key_owner(key: &str) -> Result<Option<String>, String> {
 /// process `pid` (the zone's app namespace). Returns the connection — keep it
 /// open for as long as the zone wants its way out, and read the end from it
 /// with [`wait_uplink`] — and the system zone's resolvers.
-pub fn request_uplink(zone: &str, pid: i32) -> Result<(OwnedFd, Vec<String>), String> {
+pub fn request_uplink(
+    zone: &str,
+    pid: i32,
+    interface: &str,
+) -> Result<(OwnedFd, Vec<String>), String> {
     let userns = File::open(format!("/proc/{pid}/ns/user"))
         .map_err(|e| format!("cannot open the zone's user namespace: {e}"))?;
     let netns = File::open(format!("/proc/{pid}/ns/net"))
@@ -891,7 +962,7 @@ pub fn request_uplink(zone: &str, pid: i32) -> Result<(OwnedFd, Vec<String>), St
     })?;
     sys::send_with_fds(
         sock.as_raw_fd(),
-        &encode_uplink(zone, pid),
+        &encode_uplink(zone, pid, interface),
         &[userns.as_raw_fd(), netns.as_raw_fd()],
     )
     .map_err(|e| format!("cannot send the request: {e}"))?;
@@ -910,6 +981,70 @@ pub fn request_uplink(zone: &str, pid: i32) -> Result<(OwnedFd, Vec<String>), St
     }
 }
 
+/// Connect an inner user tunnel's transport namespace to the app namespace
+/// of its already-running outer user tunnel. The inner process cannot open
+/// another zone's `/proc/<pid>/ns/net` (different subordinate uid), so only
+/// its OWN namespace descriptors are sent. The broker opens and validates
+/// the outer one's pid itself before starting pasta inside it.
+pub fn request_user_uplink(
+    source: i32,
+    target: i32,
+    interface: &str,
+) -> Result<(OwnedFd, bool), String> {
+    let target_user = File::open(format!("/proc/{target}/ns/user"))
+        .map_err(|e| format!("cannot open inner user namespace: {e}"))?;
+    let target_net = File::open(format!("/proc/{target}/ns/net"))
+        .map_err(|e| format!("cannot open inner network namespace: {e}"))?;
+    let sock = connect(SOCKET).map_err(|e| format!("cannot reach {SOCKET}: {e}"))?;
+    sys::send_with_fds(
+        sock.as_raw_fd(),
+        &encode_user_uplink(source, target, interface),
+        &[target_user.as_raw_fd(), target_net.as_raw_fd()],
+    )
+    .map_err(|e| format!("cannot send user uplink request: {e}"))?;
+    let mut buf = [0u8; 4096];
+    // SAFETY: a valid socket and a buffer of the length given.
+    let n = unsafe { libc::recv(sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+    if n <= 0 {
+        return Err("the user-uplink service went away without an answer".to_owned());
+    }
+    match parse_done(&buf[..n.unsigned_abs()])? {
+        Done::Ok(family) if family == "4" || family == "6" => Ok((sock, family == "6")),
+        Done::Ok(_) => Err("a strange IPv6 capability answer to a user uplink".to_owned()),
+        Done::Same(_) => Err("a strange answer to a user uplink".to_owned()),
+    }
+}
+
+pub fn user_uplink_main(args: &[OsString]) -> u8 {
+    let (Some(source), Some(target)) = (
+        args.first()
+            .and_then(|a| a.to_str())
+            .and_then(|s| s.parse::<i32>().ok()),
+        args.get(1)
+            .and_then(|a| a.to_str())
+            .and_then(|s| s.parse::<i32>().ok()),
+    ) else {
+        eprintln!("usage: vpn-zone-core user-uplink <source-pid> <target-pid> [interface]");
+        return 2;
+    };
+    let interface = args
+        .get(2)
+        .and_then(|a| a.to_str())
+        .unwrap_or(crate::zone::PASTA_IFACE);
+    let mut out = io::stdout();
+    match request_user_uplink(source, target, interface) {
+        Ok((sock, ipv6)) => {
+            let _ = writeln!(out, "OK {}", if ipv6 { "6" } else { "4" });
+            let _ = out.flush();
+            wait_uplink(&sock)
+        }
+        Err(e) => {
+            let _ = writeln!(out, "ERR {e}");
+            1
+        }
+    }
+}
+
 /// `vpn-zone-core system-uplink <system zone> <pid>`: what a user zone's holder
 /// runs as its way out through a system zone. Says `OK <resolvers>` or
 /// `ERR <why>` on its first line, then holds the uplink and exits with its
@@ -922,11 +1057,15 @@ pub fn uplink_main(args: &[OsString]) -> u8 {
             .and_then(|a| a.to_str())
             .and_then(|p| p.parse::<i32>().ok()),
     ) else {
-        eprintln!("usage: vpn-zone-core system-uplink <system zone> <pid>");
+        eprintln!("usage: vpn-zone-core system-uplink <system zone> <pid> [interface]");
         return 2;
     };
+    let interface = args
+        .get(2)
+        .and_then(|a| a.to_str())
+        .unwrap_or(crate::zone::TUN_IFACE);
     let mut out = io::stdout();
-    match request_uplink(zone, pid) {
+    match request_uplink(zone, pid, interface) {
         Ok((sock, resolvers)) => {
             let _ = writeln!(out, "OK {}", resolvers.join(" "));
             let _ = out.flush();
@@ -1044,6 +1183,7 @@ fn spawn_uplink_pasta(
     netns: &OwnedFd,
     pid: i32,
     user: &User,
+    interface: &str,
     pid_file: Option<&Path>,
     ipv6: bool,
 ) -> Result<std::process::Child, String> {
@@ -1076,7 +1216,7 @@ fn spawn_uplink_pasta(
         .arg(&user_path)
         .arg("--netns")
         .arg(&net_path)
-        .args(["--config-net", "-q", "-I", zone::TUN_IFACE, "-f"])
+        .args(["--config-net", "-q", "-I", interface, "-f"])
         // IPv6 when the system zone's network carries it (`system::IPV6_MARK`):
         // pasta's sockets are in that network, whose only way out is its
         // tunnel (or a plain zone's one interface), so IPv6 has nowhere else
@@ -1151,8 +1291,14 @@ fn serve_uplink(
     uid: u32,
     zone: &str,
     pid: i32,
+    interface: &str,
     mut fds: Vec<OwnedFd>,
 ) -> Result<Vec<u8>, String> {
+    if !system::direct_route_allowed(zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     let user = zone_owner(uid)?;
     if user.uid == 0 {
         return Err("root's services go into a system zone directly".to_owned());
@@ -1174,6 +1320,11 @@ fn serve_uplink(
         ));
     }
     let plain = system::settings(zone).is_some_and(|s| s.plain);
+    if interface == crate::zone::PASTA_IFACE && plain {
+        return Err(format!(
+            "the outer system zone {zone} is plain: it would expose the inner VPN endpoint directly; a chained uplink needs a system VPN zone"
+        ));
+    }
     if fds.len() != 2 {
         return Err("an uplink comes with the zone's two namespaces".to_owned());
     }
@@ -1226,8 +1377,16 @@ fn serve_uplink(
     let pid_file =
         Path::new(system::PASTA_PID_DIR).join(format!("sysrun-{}.pid", std::process::id()));
     let ipv6 = system::run_dir(zone).join(system::IPV6_MARK).is_file();
-    let mut pasta =
-        spawn_uplink_pasta(&sysnet, &userns, &netns, pid, &user, Some(&pid_file), ipv6)?;
+    let mut pasta = spawn_uplink_pasta(
+        &sysnet,
+        &userns,
+        &netns,
+        pid,
+        &user,
+        interface,
+        Some(&pid_file),
+        ipv6,
+    )?;
     // The namespace pasta was started in: the one to follow if it changes.
     let mut serving = file_ns_id(&sysnet);
     drop(sysnet);
@@ -1326,7 +1485,8 @@ fn serve_uplink(
                     return Ok(answer_exit(1));
                 }
                 let ipv6 = system::run_dir(zone).join(system::IPV6_MARK).is_file();
-                match spawn_uplink_pasta(&file, &userns, &netns, pid, &user, None, ipv6) {
+                match spawn_uplink_pasta(&file, &userns, &netns, pid, &user, interface, None, ipv6)
+                {
                     Ok(child) => {
                         pasta = Some(child);
                         serving = Some(id);
@@ -1354,6 +1514,158 @@ fn serve_uplink(
             return Ok(answer_exit(0));
         }
     }
+}
+
+/// A root broker is needed only for `setns` into the outer user namespace's
+/// network. The pasta process immediately drops to the owning host user; the
+/// source cannot be the host or a system netns, and both target namespaces
+/// must belong to the same user. Source exit or replacement ends the inner
+/// route instead of reconnecting it through a different namespace.
+fn serve_user_uplink(
+    sock: RawFd,
+    uid: u32,
+    source_pid: i32,
+    target_pid: i32,
+    interface: &str,
+    mut fds: Vec<OwnedFd>,
+) -> Result<Vec<u8>, String> {
+    let user = zone_owner(uid)?;
+    if user.uid == 0 || fds.len() != 2 || interface != crate::zone::PASTA_IFACE {
+        return Err(
+            "a user uplink needs the inner namespaces and the tunnel transport interface"
+                .to_owned(),
+        );
+    }
+    let target_net = fds.pop().expect("two");
+    let target_user = fds.pop().expect("two");
+    let source_path = format!("/proc/{source_pid}/ns/net");
+    let source_file = File::open(&source_path)
+        .map_err(|e| format!("cannot open upstream network namespace: {e}"))?;
+    for (fd, kind) in [
+        (&target_net, libc::CLONE_NEWNET),
+        (&target_user, libc::CLONE_NEWUSER),
+    ] {
+        if ns_ioctl(fd.as_raw_fd(), NS_GET_NSTYPE, std::ptr::null_mut()) != kind {
+            return Err("a user uplink received a wrong namespace kind".to_owned());
+        }
+    }
+    if ns_owner_uid(&target_user)? != user.uid {
+        return Err("the inner namespace belongs to another user".to_owned());
+    }
+    if ns_ioctl(source_file.as_raw_fd(), NS_GET_NSTYPE, std::ptr::null_mut()) != libc::CLONE_NEWNET
+    {
+        return Err("the upstream pid has no network namespace".to_owned());
+    }
+    for net in [source_file.as_raw_fd(), target_net.as_raw_fd()] {
+        let owner = ns_ioctl(net, NS_GET_USERNS, std::ptr::null_mut());
+        if owner < 0 {
+            return Err(format!(
+                "network namespace has no owner: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: NS_GET_USERNS returned a new descriptor.
+        let owner = unsafe { OwnedFd::from_raw_fd(owner) };
+        if ns_owner_uid(&owner)? != user.uid {
+            return Err("the outer network is not a user VPN namespace".to_owned());
+        }
+        if net == target_net.as_raw_fd() && !same_ns(&owner, &target_user) {
+            return Err("the inner network is not owned by its user namespace".to_owned());
+        }
+    }
+    let source_id = file_ns_id(&source_file).ok_or("cannot stat upstream namespace")?;
+    if ns_id(&target_net) == Some(source_id) {
+        return Err("an uplink cannot connect a namespace to itself".to_owned());
+    }
+    let target_path = format!("/proc/{target_pid}/ns/net");
+    let current_target =
+        File::open(&target_path).map_err(|e| format!("inner zone stopped: {e}"))?;
+    if file_ns_id(&current_target) != ns_id(&target_net) {
+        return Err("inner zone changed namespace".to_owned());
+    }
+    // IPv6 is offered only when the pinned upstream VPN namespace has a
+    // global address and a default route through its tunnel. A failed probe
+    // means IPv4-only pasta, never an IPv6 route inherited from the host.
+    let ipv6 = user_vpn_ipv6(source_pid, source_id);
+    system::make_pasta_pid_dir()?;
+    let pid_file =
+        Path::new(system::PASTA_PID_DIR).join(format!("sysrun-{}.pid", std::process::id()));
+    let mut pasta = spawn_uplink_pasta(
+        &source_file,
+        &target_user,
+        &target_net,
+        target_pid,
+        &user,
+        interface,
+        Some(&pid_file),
+        ipv6,
+    )?;
+    let attached = match sys::pidfd_open(pasta.id() as i32) {
+        Some(pidfd) => sys::wait_for_entry_or(&pid_file, Some(&pidfd), Some(sock), sys::written),
+        None if sys::wait_for_child_entry(&pid_file, &mut pasta, sys::written) => {
+            sys::Waited::There
+        }
+        None => sys::Waited::MakerGone,
+    };
+    let _ = fs::remove_file(&pid_file);
+    match attached {
+        sys::Waited::There => {}
+        sys::Waited::PeerGone => {
+            let _ = pasta.kill();
+            let _ = pasta.wait();
+            return Err("inner zone went before pasta was done".to_owned());
+        }
+        sys::Waited::MakerGone => {
+            return Err(format!(
+                "pasta could not attach ({})",
+                pasta
+                    .wait()
+                    .map_or_else(|e| e.to_string(), |s| s.to_string())
+            ));
+        }
+    }
+    send_on(
+        sock,
+        &answer_done(&Done::Ok(if ipv6 { "6" } else { "4" }.to_owned())),
+    );
+    loop {
+        if File::open(&source_path).ok().and_then(|f| file_ns_id(&f)) != Some(source_id) {
+            let _ = pasta.kill();
+            let _ = pasta.wait();
+            return Ok(answer_exit(1));
+        }
+        if let Ok(Some(status)) = pasta.try_wait() {
+            return Ok(answer_exit(
+                status
+                    .code()
+                    .and_then(|c| u8::try_from(c).ok())
+                    .unwrap_or(1)
+                    .max(1),
+            ));
+        }
+        let mut pfd = libc::pollfd {
+            fd: sock,
+            events: libc::POLLIN | libc::POLLRDHUP,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd.
+        if unsafe { libc::poll(&mut pfd, 1, 1000) } > 0 && pfd.revents != 0 {
+            let _ = pasta.kill();
+            let _ = pasta.wait();
+            return Ok(answer_exit(0));
+        }
+    }
+}
+
+fn user_vpn_ipv6(pid: i32, source_id: (u64, u64)) -> bool {
+    let path = format!("/proc/{pid}/ns/net");
+    if File::open(&path).ok().and_then(|f| file_ns_id(&f)) != Some(source_id) {
+        return false;
+    }
+    let inet6 = fs::read_to_string(format!("/proc/{pid}/net/if_inet6")).unwrap_or_default();
+    let routes = fs::read_to_string(format!("/proc/{pid}/net/ipv6_route")).unwrap_or_default();
+    File::open(&path).ok().and_then(|f| file_ns_id(&f)) == Some(source_id)
+        && crate::hostif::ipv6_usable(crate::zone::TUN_IFACE, &inet6, &routes)
 }
 
 /// [`ns_id`] of an opened namespace file.
@@ -1414,6 +1726,11 @@ fn serve_key(uid: u32, key: &str) -> Result<Done, String> {
 /// two devices with one key, and they knock each other off.
 fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
     let zone = request.zone.as_str();
+    if !system::direct_route_allowed(zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     if uid == 0 {
         return Err("root adds a zone by declaring it".to_owned());
     }
@@ -1505,6 +1822,11 @@ fn serve_add(uid: u32, request: &AddRequest) -> Result<Done, String> {
 
 /// Bring a zone up for one of its users.
 fn serve_up(uid: u32, zone: &str) -> Result<Done, String> {
+    if !system::direct_route_allowed(zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     let settings =
         system::settings(zone).ok_or_else(|| format!("there is no system zone {zone}"))?;
     let user = user_of(uid)?;
@@ -1520,6 +1842,11 @@ fn serve(sock: RawFd, uid: u32, data: &[u8], fds: Vec<OwnedFd>) -> Result<u8, St
     let request = Request::decode(data)?;
     let zone = request.zone.clone();
     check_name(&zone)?;
+    if !system::direct_route_allowed(&zone)? {
+        return Err(format!(
+            "the system route {zone} is not published for direct use"
+        ));
+    }
     if system::settings(&zone).is_none() {
         return Err(format!("there is no system zone {zone}"));
     }
@@ -2638,6 +2965,28 @@ mod tests {
             parse_users("alice\n\n bob \nroot\nBad\n../x\n_svc\nw.x-y\n"),
             ["alice", "bob", "root", "_svc", "w.x-y"]
         );
+    }
+
+    #[test]
+    fn an_uplink_request_names_the_interface_and_reads_the_old_shape() {
+        let new = encode_uplink("outer", 123, crate::zone::PASTA_IFACE);
+        assert_eq!(
+            decode_uplink(new.strip_prefix(CHAIN_UPLINK_MAGIC).unwrap(), true),
+            Ok(("outer".to_owned(), 123, "hostif".to_owned()))
+        );
+        let old = encode_uplink("outer", 123, crate::zone::TUN_IFACE);
+        assert_eq!(
+            decode_uplink(old.strip_prefix(UPLINK_MAGIC).unwrap(), false),
+            Ok(("outer".to_owned(), 123, "awg0".to_owned()))
+        );
+        assert!(decode_uplink(b"outer\0\x31\x32\x33\0eth0\0", true).is_err());
+        let user = encode_user_uplink(123, 456, crate::zone::PASTA_IFACE);
+        assert_eq!(
+            decode_user_uplink(user.strip_prefix(USER_UPLINK_MAGIC).unwrap()),
+            Ok((123, 456, crate::zone::PASTA_IFACE.to_owned()))
+        );
+        assert!(decode_user_uplink(b"123\0456\0eth0\0").is_err());
+        assert!(decode_user_uplink(b"123\0123\0hostif\0").is_err());
     }
 
     #[test]

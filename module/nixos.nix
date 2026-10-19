@@ -46,6 +46,7 @@ let
     "startTimeout"
     "users"
     "zones"
+    "directRoutes"
     "services"
     "containers"
     "console.enable"
@@ -411,6 +412,20 @@ in
       description = "The system zones. A name is 1 to 12 of a-z, 0-9 and '-'.";
     };
 
+    directRoutes = lib.mkOption {
+      type = lib.types.nullOr (lib.types.listOf lib.types.str);
+      default = null;
+      example = [ "home" "nl" ];
+      description = ''
+        Strict allowlist of system zones permitted to dial directly from the
+        host. `null` keeps legacy behavior; `[ ]` permits none. A configured
+        node absent from this list is kept as a config but cannot be started,
+        even manually. An inner VPN such as `ch` must not be listed just
+        because its config exists. The user route `nl > ch` is published
+        separately with `cellward routes allow ch`.
+      '';
+    };
+
     services = lib.mkOption {
       type = lib.types.attrsOf (lib.types.submodule serviceOpts);
       default = { };
@@ -614,6 +629,19 @@ in
             assertion = z.kind != "plain" || z.configFile == null;
             message = "services.cellward.system.zones.${name}: a plain zone has no tunnel, so no configFile.";
           }) cfg.zones
+          ++ lib.optional (cfg.directRoutes != null) {
+            assertion = lib.all (n: cfg.zones ? ${n} && validName n) cfg.directRoutes;
+            message = "services.cellward.system.directRoutes contains an unknown or invalid system zone.";
+          }
+          ++ lib.mapAttrsToList (name: z: {
+            assertion = cfg.directRoutes == null || !z.autoStart || builtins.elem name cfg.directRoutes;
+            message = "services.cellward.system.zones.${name}.autoStart would dial an unpublished direct route; add it to directRoutes or set autoStart = false.";
+          }) cfg.zones
+          ++ lib.optional (cfg.directRoutes != null) {
+            assertion = lib.all (s: builtins.elem s.zone cfg.directRoutes) (lib.attrValues attachedServices)
+              && lib.all (c: builtins.elem c.zone cfg.directRoutes) (lib.attrValues cfg.containers);
+            message = "A system service or container uses a zone outside services.cellward.system.directRoutes; publish that route or remove the attachment.";
+          }
           # A plain zone through one interface asks names of its own resolvers:
           # the defaults are the host's primary network's view, and queries
           # meant for one network would go out through the other — linking the
@@ -734,6 +762,9 @@ in
           # пользователей зоны только право ею пользоваться (ревью).
           "vpn-zones/system-adders".text = lib.concatMapStrings (u: u + "\n") cfg.users;
         }
+        // lib.optionalAttrs (cfg.directRoutes != null) {
+          "vpn-zones/system-direct-routes".text = lib.concatMapStrings (name: name + "\n") cfg.directRoutes;
+        }
         # Зоны, через которые идут службы самого хоста: их конфиг запросом не
         # заменить — кто задаёт туннель, тот отвечает за имена, часы и службы
         # хоста (ревью).
@@ -770,6 +801,27 @@ in
         // lib.mapAttrs' (
           name: z: lib.nameValuePair "vpn-zones/system-zones.d/${name}/config" { text = z.configFile + "\n"; }
         ) (lib.filterAttrs (_: z: z.configFile != null) cfg.zones);
+
+        # A switch to a strict list must close tunnels that were already up:
+        # restartIfChanged=false intentionally preserves running zones, so a
+        # changed /etc policy alone would leave old direct handshakes alive.
+        # Stop only the exact holder units omitted from the new list. Their
+        # namespaces remain, with lo only, so attached programs fail closed.
+        system.activationScripts.cellwardDirectRoutes = lib.mkIf (cfg.directRoutes != null) {
+          deps = [ "etc" ];
+          text = ''
+            ${systemctl} list-units --type=service --state=active --all --no-legend --plain 'vpn-zone-system@*.service' \
+              | while read -r unit rest; do
+                  case "$unit" in vpn-zone-system@*.service) ;; *) continue ;; esac
+                  name="''${unit#vpn-zone-system@}"
+                  name="''${name%.service}"
+                  case "$name" in ""|*[!a-z0-9-]*) continue ;; esac
+                  if ! ${pkgs.gnugrep}/bin/grep -Fxq -- "$name" /etc/vpn-zones/system-direct-routes; then
+                    ${systemctl} stop "$unit"
+                  fi
+                done
+          '';
+        };
 
         boot.extraModulePackages = lib.mkIf cfg.amneziawg [ config.boot.kernelPackages.amneziawg ];
         boot.kernelModules = lib.mkIf cfg.amneziawg [ "amneziawg" ];
@@ -927,13 +979,17 @@ in
             # Войти в пространство и смонтировать своё (SYS_ADMIN), стать
             # пользователем (SETUID, SETGID), погасить его программу или pasta,
             # когда клиент ушёл (KILL). Больше ничего: пространства
-            # пользовательской зоны приходят дескрипторами, /proc чужих
-            # процессов (SYS_PTRACE) не нужен.
+            # внутренней зоны приходят дескрипторами, но пространство уже
+            # запущенного ВНЕШНЕГО пользовательского VPN брокер открывает по
+            # /proc/<pid>/ns/net: другой subordinate uid запрещает это даже
+            # владельцу с хоста, поэтому нужен SYS_PTRACE. Оба пространства
+            # затем проверяются на владельца исходного пользователя.
             CapabilityBoundingSet = [
               "CAP_SYS_ADMIN"
               "CAP_SETUID"
               "CAP_SETGID"
               "CAP_KILL"
+              "CAP_SYS_PTRACE"
             ];
           };
         };

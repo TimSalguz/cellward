@@ -417,6 +417,12 @@ impl WgConfig {
     pub fn to_setconf(&self) -> String {
         let mut out = String::new();
         for section in &self.sections {
+            // Cellward's route metadata is not WireGuard protocol syntax.
+            // `awg setconf` rejects an otherwise valid tunnel when handed
+            // `[Chain]`; routing has already read and validated it upstream.
+            if section.name.eq_ignore_ascii_case("Chain") {
+                continue;
+            }
             out.push('[');
             out.push_str(&section.name);
             out.push_str("]\n");
@@ -870,6 +876,16 @@ mod tests {
                  Endpoint = 198.51.100.7:51820\n"
             )
         );
+    }
+
+    #[test]
+    fn chain_metadata_never_reaches_wireguard_setconf() {
+        let cfg = WgConfig::parse_str("[Interface]\nPrivateKey = secret\n[Peer]\nEndpoint = 192.0.2.1:51820\n[Chain]\nViaUser = outer\n").unwrap();
+        let stripped = cfg.to_setconf();
+        assert!(!stripped.contains("[Chain]"));
+        assert!(!stripped.contains("ViaUser"));
+        assert!(stripped.contains("[Interface]"));
+        assert!(stripped.contains("[Peer]"));
     }
 
     #[test]
