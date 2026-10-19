@@ -184,6 +184,12 @@ Without NixOS, or with a standalone home-manager, as before:
 }
 ```
 
+The home-manager entry also installs the restricted PipeWire policy by
+default. Set `programs.cellward.pipewirePolicy = false` only if you deliberately
+want hermetic zones to use the filtered PulseAudio socket alone; ALSA clients
+using PipeWire (including browsers that fall back to ALSA) will then have no
+sound. Restart WirePlumber after activating a changed policy.
+
 The options were called `programs.vpn-zones.*` and `services.vpn-zones.*`
 before the rename; the old names still work, through
 `lib.mkRenamedOptionModule`, with a warning on every use.
@@ -219,7 +225,8 @@ a PipeWire socket of the zone's own, whose clients see what a WirePlumber
 policy of this project lets them: their own streams, the outputs to play to,
 the microphone only as `cellward microphone` says — never what the host plays,
 never another program's stream. `programs.cellward.enable` switches the policy
-on with WirePlumber; otherwise it is switched on once:
+on with WirePlumber, in NixOS and standalone home-manager. To enable it
+explicitly in an existing configuration:
 
 ```nix
 services.cellward.pipewirePolicy.enable = true;  # NixOS: nixosModules.default
@@ -229,7 +236,8 @@ programs.cellward.audioManager = [ "mixer" ];    # a zone for pavucontrol/qpwgra
 ```
 
 Without the policy a hermetic zone has no PipeWire at all — the PulseAudio path
-only, which most programs use (`docs/LEAK-MODEL.md` §20).
+only. Programs using PipeWire directly or ALSA through PipeWire may have no
+sound, even when another browser using PulseAudio works (`docs/LEAK-MODEL.md` §20).
 
 A screen cast goes through the portal only, and has a switch per zone too:
 `cellward screencast <zone> ask (default)|yes|no`. `ask` is the
