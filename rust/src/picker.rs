@@ -780,8 +780,7 @@ fn menu_zones(state: &Path) -> Vec<MenuZone> {
     zone_names(state)
         .into_iter()
         .map(|name| {
-            let dir = state.join(&name);
-            let ini = fs::read(dir.join("config.conf"))
+            let ini = crate::chain::read_zone_config(state, &name)
                 .ok()
                 .and_then(|raw| crate::config::WgConfig::parse(&crate::cli::strip_cr(&raw)).ok());
             let host_interface = ini.as_ref().is_some_and(crate::hostif::is_host_interface);

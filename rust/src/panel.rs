@@ -68,7 +68,7 @@ fn zones(state: &Path) -> Vec<String> {
 /// The outer system zone, for either a tunnel chain (`[Chain]`) or a user
 /// zone that directly borrows a system tunnel (`[SystemZone]`).
 fn upstream(state: &Path, zone: &str) -> (String, &'static str) {
-    let raw = match std::fs::read(state.join(zone).join("config.conf")) {
+    let raw = match crate::chain::read_zone_config(state, zone) {
         Ok(raw) => raw,
         Err(_) => return (String::new(), ""),
     };

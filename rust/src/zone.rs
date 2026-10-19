@@ -957,7 +957,7 @@ pub fn run(args: Args) -> u8 {
     // inside our namespace is a subordinate uid and cannot ask it.
     if !zone.is_offline() {
         let verify = || -> Result<(), String> {
-            let raw = fs::read(zone.path(CONFIG)).map_err(|e| e.to_string())?;
+            let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
             let ini = WgConfig::parse(&raw).map_err(|e| e.to_string())?;
             if zone.name() != crate::launch::HOST
                 && !crate::chain::published(
@@ -1252,7 +1252,7 @@ const CLIENT_ID: u32 = 1;
 /// OpenConnect one in between gets a client that cannot become its id, and
 /// the zone does not come up.)
 fn runs_a_client(zone: &Zone) -> bool {
-    fs::read(zone.path(CONFIG))
+    crate::chain::read_zone_config_dir(&zone.dir)
         .ok()
         .and_then(|raw| WgConfig::parse(&raw).ok())
         .is_some_and(|cfg| openconnect::is_openconnect(&cfg))
@@ -4624,7 +4624,7 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
 /// is fatal on purpose — the alternative is `wg setconf` retrying DNS for a
 /// minute and a half inside a namespace that has none, and then failing anyway.
 fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfig>), String> {
-    let raw = fs::read(zone.path(CONFIG)).map_err(|e| format!("cannot read {CONFIG}: {e}"))?;
+    let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
     // The config as this run reads it, for the zone's fingerprint
     // (`bridge::fingerprint`): the very bytes it comes up with.
     let seed = crate::bridge::config_seed(&raw);

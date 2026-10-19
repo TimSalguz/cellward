@@ -15,6 +15,108 @@ use crate::config::{Endpoint, EndpointHost, WgConfig};
 use crate::openconnect::{self, OcConfig};
 
 pub const SECTION: &str = "Chain";
+pub const NODE_SECTION: &str = "Node";
+pub const NODES_DIR: &str = ".nodes";
+
+/// A route config may name one pooled tunnel config. The route contains no
+/// secret; the node file is the single source of its key and endpoint.
+pub fn node_of(ini: &WgConfig) -> Result<Option<String>, String> {
+    let Some(section) = ini.section(NODE_SECTION) else {
+        return Ok(None);
+    };
+    let name = section
+        .get("Name")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or("[Node] needs Name = <node>")?;
+    if !crate::cli::safe_zone_name(std::ffi::OsStr::new(name)) {
+        return Err("[Node] has an invalid name".to_owned());
+    }
+    if section.entries.len() != 1 {
+        return Err("[Node] accepts only Name".to_owned());
+    }
+    Ok(Some(name.to_owned()))
+}
+
+pub fn validate_node(ini: &WgConfig) -> Result<(), String> {
+    if ini.section(NODE_SECTION).is_some()
+        || ini.section(SECTION).is_some()
+        || crate::sysuplink::is_system_zone(ini)
+        || crate::hostif::is_host_interface(ini)
+        || crate::hostif::is_host_network(ini)
+    {
+        return Err(
+            "a pooled node must be a tunnel config, not a route or host interface".to_owned(),
+        );
+    }
+    if openconnect::is_openconnect(ini) {
+        OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
+    } else if ini.interface().and_then(|i| i.get("PrivateKey")).is_none() {
+        return Err("a pooled WireGuard node needs PrivateKey".to_owned());
+    }
+    Ok(())
+}
+
+/// Resolve one route's node without following another route or a nested node.
+/// A missing node is an error, never a fallback to the host's network.
+pub fn read_zone_config(state: &Path, zone: &str) -> Result<Vec<u8>, String> {
+    let path = state.join(zone).join("config.conf");
+    let route = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    resolve_route_config(state, &route).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn resolve_route_config(state: &Path, route: &[u8]) -> Result<Vec<u8>, String> {
+    let route_ini = WgConfig::parse(route).map_err(|e| e.to_string())?;
+    let Some(node) = node_of(&route_ini)? else {
+        return Ok(route.to_vec());
+    };
+    // No config directives besides Node and Chain may be smuggled into a
+    // reference: the transport identity comes from one node file alone.
+    if route_ini.sections.iter().any(|s| {
+        !s.name.eq_ignore_ascii_case(NODE_SECTION) && !s.name.eq_ignore_ascii_case(SECTION)
+    }) {
+        return Err("a node route may contain only [Node] and [Chain]".to_owned());
+    }
+    if route_ini
+        .sections
+        .iter()
+        .filter(|s| s.name.eq_ignore_ascii_case(NODE_SECTION))
+        .count()
+        != 1
+        || route_ini
+            .sections
+            .iter()
+            .filter(|s| s.name.eq_ignore_ascii_case(SECTION))
+            .count()
+            > 1
+        || route_ini
+            .section(SECTION)
+            .is_some_and(|s| s.entries.len() != 1)
+    {
+        return Err("a node route needs one [Node] and at most one [Chain] Via".to_owned());
+    }
+    let node_path = state.join(NODES_DIR).join(&node).join("config.conf");
+    let mut raw =
+        fs::read(&node_path).map_err(|e| format!("cannot read pooled node {node}: {e}"))?;
+    let node_ini = WgConfig::parse(&raw).map_err(|e| format!("pooled node {node}: {e}"))?;
+    validate_node(&node_ini).map_err(|e| format!("pooled node {node}: {e}"))?;
+    if let Some(chain) = ChainConfig::from_ini(&route_ini)? {
+        if !raw.ends_with(b"\n") {
+            raw.push(b'\n');
+        }
+        raw.extend_from_slice(chain.text().as_bytes());
+    }
+    Ok(raw)
+}
+
+pub fn read_zone_config_dir(dir: &Path) -> Result<Vec<u8>, String> {
+    let state = dir.parent().ok_or("zone has no state directory")?;
+    let zone = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("zone has no name")?;
+    read_zone_config(state, zone)
+}
 /// Optional, strict publication policy. Configs are nodes; only entries in
 /// this file are launchable routes. An absent file preserves pre-policy
 /// installations. A present but unreadable/invalid file refuses all routes.
@@ -132,7 +234,8 @@ pub fn published_zone(state: &Path, zone: &str) -> Result<bool, String> {
         return Ok(true);
     }
     let path = state.join(zone).join("config.conf");
-    let raw = fs::read(&path).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+    let raw = read_zone_config(state, zone)
+        .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
     let ini =
         WgConfig::parse(&raw).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
     published(state, zone, &ini)
@@ -331,7 +434,8 @@ pub fn refuse_user_shortcut_with(
         if !path.exists() {
             continue;
         }
-        let raw = fs::read(&path).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+        let raw = read_zone_config(state, other_name)
+            .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
         let peer =
             WgConfig::parse(&raw).map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
         if let Some(allowed) = policy {
@@ -523,6 +627,65 @@ mod tests {
         fs::remove_file(state.join(ROUTES)).unwrap();
         fs::remove_file(state.join(ROUTES_ENABLED)).unwrap();
         assert!(refuse_user_shortcut(&state, "inner", &ini).is_err());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn pooled_node_is_resolved_without_copying_its_secret_into_routes() {
+        let state = state("node");
+        let pool = state.join(NODES_DIR).join("ch");
+        fs::create_dir_all(&pool).unwrap();
+        fs::write(
+            pool.join("config.conf"),
+            b"[Interface]\nPrivateKey = one-secret\n[Peer]\nEndpoint = 192.0.2.7:51820\n",
+        )
+        .unwrap();
+        installed(&state, "direct", "[Node]\nName = ch\n");
+        installed(&state, "inner", "[Node]\nName = ch\n[Chain]\nVia = nl\n");
+        let stub = fs::read_to_string(state.join("inner/config.conf")).unwrap();
+        assert!(!stub.contains("one-secret"));
+        let raw = read_zone_config(&state, "inner").unwrap();
+        let ini = WgConfig::parse(&raw).unwrap();
+        assert_eq!(
+            ini.interface().unwrap().get("PrivateKey"),
+            Some("one-secret")
+        );
+        assert_eq!(ChainConfig::from_ini(&ini).unwrap().unwrap().via, "nl");
+        let mut allow = BTreeSet::new();
+        allow.insert(Route::parse("nl > inner").unwrap());
+        write_routes(&state, &allow).unwrap();
+        assert!(published_zone(&state, "inner").unwrap());
+        assert!(!published_zone(&state, "direct").unwrap());
+        assert!(refuse_user_shortcut(&state, "inner", &ini).is_ok());
+        allow.insert(Route::parse("direct").unwrap());
+        assert!(refuse_user_shortcut_with(&state, "inner", &ini, Some(&allow)).is_err());
+        fs::remove_file(pool.join("config.conf")).unwrap();
+        assert!(read_zone_config(&state, "inner").is_err());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn a_pool_reference_cannot_override_or_nest_a_tunnel_config() {
+        let state = state("node-invalid");
+        let pool = state.join(NODES_DIR).join("ch");
+        fs::create_dir_all(&pool).unwrap();
+        fs::write(
+            pool.join("config.conf"),
+            "[Interface]\nPrivateKey = k\n[Node]\nName = other\n",
+        )
+        .unwrap();
+        assert!(resolve_route_config(&state, b"[Node]\nName = ch\n").is_err());
+        fs::write(pool.join("config.conf"), "[Interface]\nPrivateKey = k\n").unwrap();
+        assert!(resolve_route_config(
+            &state,
+            b"[Node]\nName = ch\n[Peer]\nEndpoint = 192.0.2.1:1\n"
+        )
+        .is_err());
+        assert!(resolve_route_config(
+            &state,
+            b"[Node]\nName = ch\n[Chain]\nVia = nl\nEndpoint = 192.0.2.1:1\n"
+        )
+        .is_err());
         fs::remove_dir_all(state).unwrap();
     }
 }

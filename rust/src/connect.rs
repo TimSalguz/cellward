@@ -172,7 +172,7 @@ pub fn set(state: &Path, config: &Path, zone: &str, mode: Option<Mode>) -> Resul
 /// The network's OpenConnect section, where its login is asked (no
 /// `PasswordFile`, and not `AskLogin = no`).
 pub fn asks_login(state: &Path, zone: &str) -> Option<OcConfig> {
-    let raw = fs::read(state.join(zone).join("config.conf")).ok()?;
+    let raw = crate::chain::read_zone_config(state, zone).ok()?;
     let cfg = OcConfig::parse(&raw).ok()?;
     cfg.login.then_some(cfg)
 }

@@ -225,7 +225,7 @@ pub fn defaults(tools: &Tools) -> String {
 
 /// The host interface a `host-interface` zone goes out through.
 fn host_interface(dir: &std::path::Path) -> Option<String> {
-    let raw = fs::read(dir.join("config.conf")).ok()?;
+    let raw = crate::chain::read_zone_config_dir(dir).ok()?;
     let ini = WgConfig::parse(&strip_cr(&raw)).ok()?;
     crate::hostif::HostIfConfig::from_ini(&ini)
         .ok()
@@ -234,7 +234,7 @@ fn host_interface(dir: &std::path::Path) -> Option<String> {
 
 /// The system zone a `system-zone` zone goes out through (`docs/SYSTEM.md` §7b).
 fn system_zone_of(dir: &std::path::Path) -> Option<String> {
-    let raw = fs::read(dir.join("config.conf")).ok()?;
+    let raw = crate::chain::read_zone_config_dir(dir).ok()?;
     let ini = WgConfig::parse(&strip_cr(&raw)).ok()?;
     crate::sysuplink::SysUplinkConfig::from_ini(&ini)
         .ok()
@@ -243,7 +243,7 @@ fn system_zone_of(dir: &std::path::Path) -> Option<String> {
 
 /// The outer system zone carrying this zone's own tunnel (`[Chain]`).
 fn upstream_of(dir: &std::path::Path) -> Option<String> {
-    let raw = fs::read(dir.join("config.conf")).ok()?;
+    let raw = crate::chain::read_zone_config_dir(dir).ok()?;
     let ini = WgConfig::parse(&strip_cr(&raw)).ok()?;
     crate::chain::ChainConfig::from_ini(&ini)
         .ok()
@@ -256,7 +256,7 @@ fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
     if dir.join("offline").exists() {
         return Some("offline");
     }
-    let raw = fs::read(dir.join("config.conf")).ok()?;
+    let raw = crate::chain::read_zone_config_dir(dir).ok()?;
     let ini = WgConfig::parse(&strip_cr(&raw)).ok();
     Some(match ini {
         Some(ini) if crate::openconnect::is_openconnect(&ini) => "openconnect",
