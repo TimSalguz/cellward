@@ -10,6 +10,8 @@
 # (the same check is a subtest of tests/vm.nix).
 {
   system ? builtins.currentSystem,
+  # Fast visual regression run: stop after the launch window and panel shots.
+  screenshotsOnly ? false,
 }:
 
 let
@@ -89,7 +91,6 @@ let
       };
 
     testScript = ''
-      import json
       import shlex
 
       def alice(cmd):
@@ -186,6 +187,10 @@ let
       # The cellward window (2026-09-28): the network monitor and the
       # containers, on the launch window's toolkit, in place of cellward-gui's
       # kdialog menus. Screenshots of both tabs, a container chosen by key.
+      if ${if screenshotsOnly then "True" else "False"}:
+          # The preview also checks that a persisted non-system palette is
+          # applied to a newly opened panel. The launch shot above is System.
+          alice("mkdir -p ~/.config/cellward && printf 'theme=nord\\n' > ~/.config/cellward/appearance.conf")
       with subtest("the cellward window: the network monitor and the containers"):
           alice(
               f"systemd-run --user --unit=vmpanel --setenv=WAYLAND_DISPLAY={display} "
@@ -196,7 +201,9 @@ let
           machine.sleep(3)
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/panel-network.png")
           machine.copy_from_vm("/tmp/panel-network.png", "")
-          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Right -k Down")
+          # Network → Scheme → Tasks → Containers (the two middle tabs were
+          # added after this screenshot sequence was first written).
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Right -k Right -k Right -k Down")
           machine.sleep(2)
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/panel-containers.png")
           machine.copy_from_vm("/tmp/panel-containers.png", "")
@@ -213,6 +220,8 @@ let
           # The data it reads.
           out = alice("cellward _panel")
           assert "network\toffline\toffline\t1\t" in out, out
+    '' + pkgs.lib.optionalString (!screenshotsOnly) ''
+      import json
 
       # The question of what a program with a home of its own may see
       # (2026-09-28): the window's checklist, guarded — a screenshot, and
