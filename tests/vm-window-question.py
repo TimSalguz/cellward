@@ -4,9 +4,10 @@ window (docs/FIREWALL.md §4.3.1, the owner's decision of 2026-09-29).
 A program in the host's own network opens a connection its rules ask
 about; the instance's keeper asks on the launch's socket of questions, its
 supervisor hands the question to the Wayland proxy, and the proxy shows a
-panel under the window's title: «Запретить» and «Разрешить, пока
-работает». A click too soon is none; after the countdown «Запретить» is the
-answer, a rule, and «Разрешить, пока работает» one for this run. (A
+panel under the window's title: «Запретить», «Разрешить, пока
+работает», and «Разрешить всегда». A click too soon is none; after the
+countdown «Запретить» is the answer, a rule, and «Разрешить, пока
+работает» one for this run. (A
 program with no window is asked in the launch window: tests/vm-niri-question.py.)
 
 Executed by the main test script with exec(), in its globals: machine,
@@ -23,6 +24,11 @@ DENIED = "grep -rEq '^net_deny *= *[^ ]' " + RULES
 def qpointer(*words):
     alice(f"echo {' '.join(str(w) for w in words)} > {fifo}")
     machine.sleep(0.4)
+
+
+def fast_click(x, y):
+    """One ordered pointer batch, before the panel's guard expires."""
+    alice(f"printf 'move {x} {y}\\npress\\nrelease\\n' > {fifo}")
 
 
 def panel_of(before, after, x, y, w):
@@ -44,23 +50,27 @@ def panel_of(before, after, x, y, w):
 
 
 def buttons_of(at, box):
-    """The panel's buttons, left to right, as (left, right) columns along
-    the middle of its bottom row: runs that are not the panel's own colour,
-    apart by it."""
+    """The panel's two upper buttons and one lower button as
+    (left, right, row), detected against the panel's own colour."""
     x0, y0, x1, y1 = box
     bg = at(x0 + 3, y0 + 3)
-    row = y1 - 12 - 14
-    runs, start = [], None
-    for c in range(x0 + 2, x1 - 1):
-        inside = at(c, row) != bg
-        if inside and start is None:
-            start = c
-        if not inside and start is not None:
-            runs.append((start, c - 1))
-            start = None
-    if start is not None:
-        runs.append((start, x1 - 2))
-    return [r for r in runs if r[1] - r[0] > 30], row
+    def at_row(row):
+        runs, start = [], None
+        for c in range(x0 + 2, x1 - 1):
+            inside = at(c, row) != bg
+            if inside and start is None:
+                start = c
+            if not inside and start is not None:
+                runs.append((start, c - 1, row))
+                start = None
+        if start is not None:
+            runs.append((start, x1 - 2, row))
+        return [r for r in runs if r[1] - r[0] > 30]
+
+    upper = at_row(y1 - 60)
+    lower = at_row(y1 - 26)
+    assert len(upper) == 2 and len(lower) == 1, (upper, lower, box)
+    return upper + lower
 
 
 def ask_window(app_id, target):
@@ -81,8 +91,17 @@ def ask_window(app_id, target):
         "resize set 640 400, move position 100 100, focus'"
     )
     qpointer("move", 5, 5)
-    x, y, w, h = view(app_id)
-    return x, y, w, h, shot(f"question-{app_id}-before")
+    for _ in range(20):
+        x, y, w, h = view(app_id)
+        # The sway command can return before the move/resize is visible.
+        # Without the geometry check x=y=0 and the pointer at (5, 5)
+        # makes an otherwise blank screenshot look non-empty.
+        if x >= 100 and y >= 100:
+            before = shot(f"question-{app_id}-before")
+            if before(x + w // 2, y + h // 2) != (0, 0, 0):
+                return x, y, w, h, before
+        machine.sleep(0.2)
+    raise AssertionError("the program's window was not drawn")
 
 
 def await_panel(name, before, x, y, w):
@@ -106,6 +125,15 @@ with subtest("the network question is a panel on the program's window; a hasty c
     x, y, w, h, before = ask_window("askq", "192.0.2.10")
     at, box = await_panel("question-panel", before, x, y, w)
     x0, y0, x1, y1 = box
+    panel_sample = (x0 + 5, y0 + 5)
+    panel_color = at(*panel_sample)
+    deny, more, always = buttons_of(at, box)
+    # Click promptly: namespace and process diagnostics below can take
+    # longer than the guard when QEMU runs without KVM.
+    fast_click((deny[0] + deny[1]) // 2, deny[2])
+    machine.sleep(2)
+    machine.fail("pgrep -x vpn-zone-window")
+    assert shot("question-hasty")(*panel_sample) == panel_color, "the panel went"
     # The proxy that shows it is in namespaces of its own, its root empty
     # (rust/src/wl_proxy.rs `isolate`).
     tree = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_tree -r"))
@@ -119,23 +147,13 @@ with subtest("the network question is a panel on the program's window; a hasty c
     # Under the title strip, in the window's middle.
     assert y0 >= y + width + title - 1, (box, y)
     assert abs((x0 + x1) / 2 - (x + w / 2)) <= 4, (box, x, w)
-    runs, row = buttons_of(at, box)
-    assert len(runs) == 2, (runs, box)
-    deny, more = runs
-    # A persistent denial at once: too soon — the panel stays.
-    qpointer("move", (deny[0] + deny[1]) // 2, row)
-    qpointer("press")
-    qpointer("release")
-    machine.sleep(2)
-    machine.fail("pgrep -x vpn-zone-window")
-    assert panel_of(before, shot("question-hasty"), x, y, w) is not None, "the panel went"
     # «Запретить» after the guard: the answer — a rule, and no network.
-    qpointer("move", (deny[0] + deny[1]) // 2, row)
+    qpointer("move", (deny[0] + deny[1]) // 2, deny[2])
     machine.sleep(2.5)
     qpointer("press")
     qpointer("release")
     machine.wait_until_succeeds(DENIED, timeout=30)
-    assert panel_of(before, shot("question-answered"), x, y, w) is None, "the panel stayed"
+    assert shot("question-answered")(*panel_sample) != panel_color, "the panel stayed"
     machine.fail("pgrep -x vpn-zone-window")
     alice("systemctl --user stop vmaskq")
 
@@ -146,22 +164,21 @@ with subtest("«Разрешить, пока работает» answers on the p
     machine.fail(DENIED)
     x, y, w, h, before = ask_window("askr", "192.0.2.11")
     at, box = await_panel("question-panel-2", before, x, y, w)
-    runs, row = buttons_of(at, box)
-    assert len(runs) == 2, (runs, box)
-    deny, more = runs
+    x0, y0, x1, y1 = box
+    panel_sample = (x0 + 5, y0 + 5)
+    panel_color = at(*panel_sample)
+    deny, more, always = buttons_of(at, box)
     # Too soon: nothing, and the panel stays — no launch window either,
     # however long it is up (no hand-over by time, 2026-10-15).
-    qpointer("move", (more[0] + more[1]) // 2, row)
-    qpointer("press")
-    qpointer("release")
+    fast_click((more[0] + more[1]) // 2, more[2])
     machine.sleep(2)
-    assert panel_of(before, shot("question-allow-hasty"), x, y, w) is not None, "the panel went"
+    assert shot("question-allow-hasty")(*panel_sample) == panel_color, "the panel went"
     # After its countdown: the answer — for this run, no rule kept.
     machine.sleep(2.5)
     qpointer("press")
     qpointer("release")
     machine.sleep(2)
-    assert panel_of(before, shot("question-allowed"), x, y, w) is None, "the panel stayed"
+    assert shot("question-allowed")(*panel_sample) != panel_color, "the panel stayed"
     machine.fail("pgrep -x vpn-zone-window")
     machine.fail(DENIED)
     machine.fail("grep -rEq '^net_allow *= *[^ ]' " + RULES)

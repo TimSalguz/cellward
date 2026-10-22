@@ -1750,7 +1750,7 @@ configure программе → её `ack_configure` с нашим серийн
 
 - **Рамка во весь экран** (`crate::frame::Fullscreen`):
   `cellward frame fullscreen width same|<0–32>` (same — как без полного
-  экрана), `… title always|hover|off` (off), `… notice on|off|<0–30>` (3 с;
+  экрана), `… title always|hover|off` (hover), `… notice on|off|<0–30>` (3 с;
   `on` — 3). Nix: `programs.cellward.frame.fullscreen.{width,title,notice}`.
   Толщина и режим строки берутся из этих настроек, когда и программа
   подтвердила полноэкранный configure, и последний configure композитора

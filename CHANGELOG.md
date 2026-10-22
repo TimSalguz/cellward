@@ -5,7 +5,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- Fullscreen windows now reveal the zone/container title when the pointer
+  reaches their top edge by default. The initial three-second label remains;
+  `cellward frame fullscreen title off` still disables hover explicitly.
+
 ### Fixed
+- **OpenConnect login after a rejected password works again**: Enter submits
+  the connect window even after Tab moves focus to its button. A rejected
+  password is not prefilled or replayed; when the gateway repeats the same
+  password step, the corrected answer is used in a fresh authentication
+  exchange, with a bounded number of retries.
+- **The window VM test matches the current three-choice network panel** and
+  sends its too-early click before the guard expires, even under slow VM
+  emulation.
 - **A launch right after a container's last program no longer fails**: the
   container, stopping as that program ended, had its space gone while its
   unit was still active, so the launch's start did nothing and it said «не

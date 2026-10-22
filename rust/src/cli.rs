@@ -4494,7 +4494,7 @@ fn tray(tools: &Tools, args: &[OsString]) -> u8 {
 /// `vpn-zone frame radius <0–16>|niri` (0),
 /// `vpn-zone frame outer-radius <0–32>|niri` (0),
 /// `vpn-zone frame fullscreen width same|<0–32>` (same),
-/// `vpn-zone frame fullscreen title always|hover|off` (off),
+/// `vpn-zone frame fullscreen title always|hover|off` (hover),
 /// `vpn-zone frame fullscreen notice on|off|<0–30>` (3 seconds),
 /// `vpn-zone frame fullscreen-button one|two|menu|none` (one),
 /// `vpn-zone frame double-click maximize|none` (maximize),

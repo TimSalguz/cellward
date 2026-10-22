@@ -14,6 +14,8 @@
   system ? builtins.currentSystem,
   # Fast visual regression run: stop after the launch window and panel shots.
   screenshotsOnly ? false,
+  # Isolate the VPN login form without the preceding window/frame scenarios.
+  loginOnly ? false,
 }:
 
 let
@@ -76,11 +78,9 @@ let
           pkgs.grim
           pkgs.wtype
           pkgs.foot
-          # A gateway that asks a password and a one-time code
-          # (tests/vm-window-login.py).
+          # A gateway that asks a password (tests/vm-window-login.py).
           pkgs.ocserv
           pkgs.openssl
-          pkgs.oath-toolkit
         ];
         fonts.packages = [ pkgs.dejavu_fonts ];
         virtualisation.memorySize = 1536;
@@ -133,7 +133,11 @@ let
       display = machine.succeed(
           "ls /run/user/1000 | grep -E '^wayland-[0-9]+$' | head -1"
       ).strip()
-
+    '' + pkgs.lib.optionalString loginOnly ''
+      json = __import__("json")
+      swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock | head -1").strip()
+      exec(open("${./vm-window-login.py}").read())
+    '' + pkgs.lib.optionalString (!loginOnly) (''
       with subtest("the launch window comes up, stays up, and closed starts nothing"):
           alice(
               f"systemd-run --user --unit=vmpick --setenv=WAYLAND_DISPLAY={display} "
@@ -453,7 +457,7 @@ let
           framed(at, x, y, w, h, top=width + title)
           titled(at, x, y, w)
 
-      # Fullscreen (the owner's defaults, 2026-09-29): the border stays, the
+      # Fullscreen with its title explicitly off: the border stays, the
       # title strip goes, and foot gets its room — after the zone's name over
       # the top of the content for a moment on the way in
       # (`frame fullscreen notice`: here long enough to be seen whatever the
@@ -464,6 +468,7 @@ let
               alice(f"SWAYSOCK={swaysock} swaymsg '[app_id=foot] fullscreen {state}'")
               machine.sleep(2)
 
+          alice("cellward frame fullscreen title off")
           alice("cellward frame fullscreen notice 30")
           machine.sleep(2)
           fullscreen(True)
@@ -716,7 +721,7 @@ let
           alice("cellward connection de default")
 
       # A network whose login is asked (docs/PERMISSIONS.md §11.16, step 2):
-      # a real ocserv asking a password and a one-time code, the connect
+      # a real ocserv asking a password, the connect
       # window's form typed into — a file of its own, exec()'d in these
       # globals.
       exec(open("${./vm-window-login.py}").read())
@@ -767,7 +772,7 @@ let
       # again, the tag, and each look of the buttons — a screenshot of each
       # in the output.
       exec(open("${./vm-window-looks.py}").read())
-    '';
+    '');
   };
 in
 {

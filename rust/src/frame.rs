@@ -505,10 +505,10 @@ pub struct Fullscreen {
 pub const DEFAULT_NOTICE: u8 = 3;
 /// Longer than this is not a moment any more.
 pub const MAX_NOTICE: u8 = 30;
-/// The owner's choice (2026-09-29, «Кайма, строки нет»).
+/// Keep the content unobstructed until the pointer reaches the top edge.
 pub const DEFAULT_FULLSCREEN: Fullscreen = Fullscreen {
     width: None,
-    title: TitleMode::Off,
+    title: TitleMode::Hover,
     notice: DEFAULT_NOTICE,
 };
 
@@ -1309,7 +1309,7 @@ mod tests {
         };
         assert_eq!(
             h.to_arg(),
-            "ff00ff:4:always:cellward:soft:0:0:same:off:3:menu:none"
+            "ff00ff:4:always:cellward:soft:0:0:same:hover:3:menu:none"
         );
         assert_eq!(Frame::parse_arg(&h.to_arg()), Some(h));
         for button in FullscreenButton::ALL {
@@ -1352,10 +1352,10 @@ mod tests {
             DEFAULT_FULLSCREEN,
             Fullscreen {
                 width: None,
-                title: TitleMode::Off,
+                title: TitleMode::Hover,
                 notice: 3
             },
-            "the owner's: the border kept, no strip, the label"
+            "the border remains; the title returns at the top edge"
         );
         assert_eq!(fullscreen(&config), DEFAULT_FULLSCREEN);
         assert_eq!(
@@ -1393,7 +1393,10 @@ mod tests {
         crate::declared::declare(&declared.join(FULLSCREEN_NOTICE_SETTING), "31");
         assert_eq!(fullscreen_notice(&config), (0, Source::Local));
         fs::write(config.join(FULLSCREEN_TITLE_SETTING), "never").unwrap();
-        assert_eq!(fullscreen_title(&config), (TitleMode::Off, Source::Default));
+        assert_eq!(
+            fullscreen_title(&config),
+            (TitleMode::Hover, Source::Default)
+        );
         fs::write(config.join(FULLSCREEN_WIDTH_SETTING), "33").unwrap();
         crate::declared::declare(&declared.join(FULLSCREEN_WIDTH_SETTING), "wide");
         assert_eq!(fullscreen_width(&config), (None, Source::Default));

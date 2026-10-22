@@ -767,7 +767,7 @@ programs.cellward = {
     "frame_outer_radius": { "value": 0, "source": "default" },
     "frame_niri_radius": 20,
     "frame_fullscreen_width": { "value": "same", "source": "default" },
-    "frame_fullscreen_title": { "value": "off", "source": "default" },
+    "frame_fullscreen_title": { "value": "hover", "source": "default" },
     "frame_fullscreen_notice": { "value": 3, "source": "default" },
     "frame_fullscreen_button": { "value": "one", "source": "default" },
     "frame_double_click": { "value": "maximize", "source": "default" },

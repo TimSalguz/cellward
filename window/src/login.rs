@@ -229,6 +229,10 @@ impl Form {
                 }
             }
             Msg::Cancel => std::process::exit(1),
+            // Enter is advertised on the button and must submit even after
+            // Tab moved focus away from a text input. A text input's own
+            // on_submit alone only handles Enter while that input is focused.
+            Msg::Key(Key::Named(key::Named::Enter)) => return self.update(Msg::Connect),
             // Tab and Shift+Tab: the next field, the one before.
             Msg::Key(Key::Named(key::Named::Tab)) => {
                 return if self.shift {
@@ -415,6 +419,8 @@ mod tests {
         assert_eq!(form.req.fields[2].value, "", "typed before the guard");
         form.armed = true;
         assert!(!complete(&form.req), "the password is empty");
+        let _ = form.update(Msg::Key(Key::Named(key::Named::Enter)));
+        assert!(!complete(&form.req), "Enter cannot send an incomplete form");
         assert_eq!(form.req.fields[1].kind, Kind::Optional);
         let _ = form.update(Msg::Input(1, "staff".into()));
         let _ = form.update(Msg::Input(2, "pa\tss\nword".into()));

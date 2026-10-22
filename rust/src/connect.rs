@@ -1032,6 +1032,9 @@ fn show_form(tools: &Tools, request: &str, form: &Form) -> Option<(Vec<String>, 
 enum Outcome {
     /// In: the session, and what was answered.
     Done(Session, Vec<Answered>),
+    /// The gateway repeated a password form. Start a fresh authentication
+    /// exchange with the answer the person just entered, in memory only.
+    Restart(Vec<Answered>),
     /// The person closed a form.
     Cancelled,
     /// Why not, in words for the person.
@@ -1047,7 +1050,7 @@ fn gateway_login(
     zone: &str,
     asked: (Mode, Wants<'_>),
     cfg: &OcConfig,
-    (saved, note): (&Saved, Option<&str>),
+    (saved, note, resume): (&Saved, Option<&str>, &[Answered]),
 ) -> Outcome {
     let helper = tools.core.with_file_name(OC_AUTH);
     // Its environment from scratch, as the client's: no proxy of the
@@ -1082,7 +1085,10 @@ fn gateway_login(
     let keyring = tools.secret_tool.is_file();
     let mut auto = note.is_none();
     let mut first = true;
-    let mut answered: BTreeMap<String, Answered> = BTreeMap::new();
+    let mut answered: BTreeMap<String, Answered> = resume
+        .iter()
+        .map(|a| (a.field.name.clone(), a.clone()))
+        .collect();
     let mut outcome = Outcome::Failed("помощник входа замолчал, не договорив".to_owned());
     for line in BufReader::new(from).lines() {
         let Ok(line) = line else { break };
@@ -1097,6 +1103,14 @@ fn gateway_login(
             Said::Log { text } => eprintln!("cellward: вход в сеть {zone}: {text}"),
             Said::Form(form) => {
                 let mut notes: Vec<String> = Vec::new();
+                let retry = !first;
+                // ocserv may offer the same password field again after a
+                // refusal. Answering it in the old exchange can be refused
+                // again even when correct; start a new authenticated session.
+                // A new token/second-factor field is not a password retry.
+                let repeated_password = retry
+                    && form.fields.iter().any(|f| f.kind == Kind::Password)
+                    && form.fields.iter().all(|f| answered.contains_key(&f.name));
                 if first {
                     notes.extend(note.map(str::to_owned));
                 }
@@ -1123,11 +1137,18 @@ fn gateway_login(
                             ));
                         }
                     }
-                    let value = before
-                        .filter(|_| field.kind != Kind::Token)
-                        .map(|b| b.value.clone())
-                        .or_else(|| kept.clone())
-                        .unwrap_or_else(|| field.value.clone());
+                    // A gateway rejection must not silently replay the same
+                    // rejected secret. It also needs an empty field so the
+                    // login window focuses it for the next attempt.
+                    let value = if retry && matches!(field.kind, Kind::Password | Kind::Token) {
+                        String::new()
+                    } else {
+                        before
+                            .filter(|_| field.kind != Kind::Token)
+                            .map(|b| b.value.clone())
+                            .or_else(|| kept.clone())
+                            .unwrap_or_else(|| field.value.clone())
+                    };
                     // Ticked where it was kept before: in the file, or the keyring.
                     let keep = before.map_or(
                         (kept.is_some() && saved.fields.contains_key(&field.name))
@@ -1173,6 +1194,10 @@ fn gateway_login(
                             keep,
                         },
                     );
+                }
+                if repeated_password {
+                    outcome = Outcome::Restart(answered.values().cloned().collect());
+                    break;
                 }
                 if !send(oc_form::Answer::Values(given).encode()) {
                     break;
@@ -1245,24 +1270,44 @@ fn log_in(tools: &Tools, zone: &str, (mode, wants): (Mode, Wants<'_>), cfg: &OcC
         return false;
     };
     let mut note: Option<String> = None;
+    let mut resume = Vec::new();
+    let mut restarts = 0;
     loop {
         let saved = load_saved(&tools.state, zone, cfg);
-        let (session, answered) =
-            match gateway_login(tools, zone, (mode, wants), cfg, (&saved, note.as_deref())) {
-                Outcome::Done(session, answered) => (session, answered),
-                Outcome::Cancelled => return false,
-                Outcome::Failed(why) => {
-                    eprintln!("cellward: вход в сеть {zone}: {why}");
-                    crate::dialog::notify(
-                        &tools.notify_send,
-                        None,
-                        "15000",
-                        &format!("Вход в сеть {zone} не удался"),
-                        &why,
-                    );
-                    return true;
-                }
-            };
+        let (session, answered) = match gateway_login(
+            tools,
+            zone,
+            (mode, wants),
+            cfg,
+            (&saved, note.as_deref(), &resume),
+        ) {
+            Outcome::Done(session, answered) => (session, answered),
+            Outcome::Restart(answered) if restarts < 3 => {
+                restarts += 1;
+                resume = answered;
+                continue;
+            }
+            Outcome::Restart(_) => {
+                eprintln!("cellward: вход в сеть {zone}: слишком много повторных запросов пароля");
+                return true;
+            }
+            Outcome::Cancelled => return false,
+            Outcome::Failed(why) => {
+                eprintln!("cellward: вход в сеть {zone}: {why}");
+                crate::dialog::notify(
+                    &tools.notify_send,
+                    None,
+                    "15000",
+                    &format!("Вход в сеть {zone} не удался"),
+                    &why,
+                );
+                return true;
+            }
+        };
+        // A later attempt after a tunnel-start failure must not reuse the
+        // previous session's in-memory password without another confirmation.
+        resume.clear();
+        restarts = 0;
         let offer = match Offer::open(Path::new(&runtime), zone, session) {
             Ok(offer) => offer,
             Err(e) => {
