@@ -13,6 +13,8 @@
 //! path⇥<container>⇥<path>⇥<until: unix seconds, 0 for ever>
 //! block⇥<container>⇥<name|address|network>⇥<nix|local>
 //! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>⇥<upstream>⇥<route: chain|chain-user|system|->⇥<published: 0|1>
+//! route-policy⇥<legacy|strict|invalid>
+//! node⇥<name> (pooled VPN config; never its secret)
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
@@ -104,6 +106,23 @@ pub fn data(tools: &Tools) -> String {
             .0
             .hex()
     };
+    let policy = match crate::chain::routes(&tools.state) {
+        Ok(Some(_)) => "strict",
+        Ok(None) => "legacy",
+        Err(_) => "invalid",
+    };
+    line(&["route-policy", policy]);
+    if let Ok(entries) = std::fs::read_dir(tools.state.join(crate::chain::NODES_DIR)) {
+        let mut nodes: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().join("config.conf").is_file())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        nodes.sort();
+        for node in nodes {
+            line(&["node", &node]);
+        }
+    }
     let mut containers = crate::container::load_all(tools);
     containers.sort_by(|a, b| a.name.cmp(&b.name));
     for c in &containers {

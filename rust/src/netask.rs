@@ -25,18 +25,20 @@
 //! — a rule. A program not found is asked about with no "always": there is
 //! no key to write it for.
 //!
-//! **Closed, not shown** (no session, no window): "no" for the instance's
-//! life — fail-closed, and a program that keeps connecting opens no
-//! question after question. **Not answered**: it waits, with no time limit
+//! **Closed, not shown** (no session, no window): "no" for a known program's
+//! instance life; an unidentified flow has no stable identity to remember.
+//! **Not answered**: it waits, with no time limit
 //! (the owner, 2026-10-15: a question is not closed by time) — its flows
 //! held, until the person answers, or the program or the instance ends.
 //!
-//! **One per program.** A program has one question open; every new flow
+//! **One per program.** A known program has one question open; every new flow
 //! of it asked about waits with the first, held by the relay, and the
 //! answer is theirs all. Another program's question is its own, at once —
 //! on its own window: a question nobody answered yet does not hold back
-//! every other program of the container. Questions on one window are shown
-//! there one after another (`crate::wl_proxy`'s supervisor).
+//! every other program of the container. An unidentified flow is its own
+//! question: allowing it must not allow unrelated unidentified traffic.
+//! Questions on one window are shown there one after another
+//! (`crate::wl_proxy`'s supervisor).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -51,6 +53,7 @@ use crate::verdicts::Verdict;
 /// The panel's answers on the program's window: the safe one first — the
 /// only one that is an answer there (`crate::onwindow`).
 const PANEL: [&str; 2] = ["Запретить", "Разрешить, пока работает"];
+const PANEL_UNKNOWN: [&str; 2] = ["Запретить", "Разрешить это соединение"];
 
 /// What the person said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,23 @@ pub enum Answer {
 /// A program as the keeper found it: its launch's key, or none.
 pub type Program = Option<String>;
 
+/// An unknown owner has no stable program identity. In particular, `None`
+/// must not be one shared authorization bucket for all unknown traffic.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum QuestionId {
+    Known(String),
+    Unknown(Key),
+}
+
+impl QuestionId {
+    fn program(&self) -> Option<&str> {
+        match self {
+            Self::Known(program) => Some(program),
+            Self::Unknown(_) => None,
+        }
+    }
+}
+
 /// The instance's asking.
 pub struct Asker {
     window: PathBuf,
@@ -81,20 +101,20 @@ pub struct Asker {
     record: Option<String>,
     /// Its container as a person reads it.
     shown: String,
-    tx: mpsc::Sender<(Program, Answer)>,
-    rx: mpsc::Receiver<(Program, Answer)>,
+    tx: mpsc::Sender<(QuestionId, Answer)>,
+    rx: mpsc::Receiver<(QuestionId, Answer)>,
     /// The threads' word on an answer (read end, write end).
     wake: (OwnedFd, Arc<OwnedFd>),
     /// The flows waiting for their program's answer.
-    waiting: HashMap<Program, Vec<Key>>,
+    waiting: HashMap<QuestionId, Vec<Key>>,
     /// Where each program's first waiting flow goes, for its question, and
     /// the launch it came from.
-    first: HashMap<Program, (String, Option<i32>, Option<String>)>,
+    first: HashMap<QuestionId, (String, Option<i32>, Option<String>)>,
     /// The answers for the instance's life.
-    session: HashMap<Program, Verdict>,
+    session: HashMap<QuestionId, Verdict>,
     /// The programs asked about now, and those to be asked next.
-    open: HashSet<Program>,
-    queue: VecDeque<Program>,
+    open: HashSet<QuestionId>,
+    queue: VecDeque<QuestionId>,
 }
 
 impl Asker {
@@ -151,14 +171,18 @@ impl Asker {
         key: Key,
         to: String,
     ) -> Option<Verdict> {
-        if let Some(verdict) = self.session.get(&program) {
+        let question = match program {
+            Some(program) => QuestionId::Known(program),
+            None => QuestionId::Unknown(key),
+        };
+        if let Some(verdict) = self.session.get(&question) {
             return Some(*verdict);
         }
-        let waiting = self.waiting.entry(program.clone()).or_default();
+        let waiting = self.waiting.entry(question.clone()).or_default();
         waiting.push(key);
         if waiting.len() == 1 {
-            self.first.insert(program.clone(), (to, launch, process));
-            self.queue.push_back(program);
+            self.first.insert(question.clone(), (to, launch, process));
+            self.queue.push_back(question);
             self.next();
         }
         None
@@ -174,10 +198,10 @@ impl Asker {
     }
 
     /// The question of `program`, in a thread of its own.
-    fn start(&mut self, program: Program) {
-        self.open.insert(program.clone());
-        let (to, launch, process) = self.first.get(&program).cloned().unwrap_or_default();
-        let label = match program.as_deref() {
+    fn start(&mut self, question: QuestionId) {
+        self.open.insert(question.clone());
+        let (to, launch, process) = self.first.get(&question).cloned().unwrap_or_default();
+        let label = match question.program() {
             Some(key) => format!("«{}»", label_of(&self.state, key)),
             None => match process {
                 Some(process) => format!("Процесс «{process}»"),
@@ -185,7 +209,7 @@ impl Asker {
             },
         };
         // "Always" is a rule: a record and a program to write it for.
-        let always = self.record.is_some() && program.is_some();
+        let always = self.record.is_some() && question.program().is_some();
         let (window, shown) = (self.window.clone(), self.shown.clone());
         let at = launch.map(|pid| (self.runtime.clone(), pid));
         // No time to answer in (the owner, 2026-10-15): the flows are held
@@ -193,8 +217,8 @@ impl Asker {
         // waits there. It ends with its program or the instance.
         let timeout = None;
         let (tx, wake) = (self.tx.clone(), self.wake.1.clone());
-        let program_of_failed = program.clone();
-        let known = program.is_some();
+        let question_of_failed = question.clone();
+        let known = question.program().is_some();
         let spawned = std::thread::Builder::new()
             .name("net-question".to_owned())
             .spawn(move || {
@@ -205,15 +229,15 @@ impl Asker {
                     always,
                     known,
                 };
-                let answer = question(&window, at, timeout, &asked);
-                let _ = tx.send((program, answer));
+                let answer = self::question(&window, at, timeout, &asked);
+                let _ = tx.send((question, answer));
                 // SAFETY: one byte from a live buffer; the pipe is
                 // non-blocking, and a full one already wakes the keeper.
                 unsafe { libc::write(wake.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
             });
         if spawned.is_err() {
             // Nothing to ask in: closed.
-            let _ = self.tx.send((program_of_failed, Answer::Closed));
+            let _ = self.tx.send((question_of_failed, Answer::Closed));
             // SAFETY: as in the thread.
             unsafe { libc::write(self.wake.1.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
         }
@@ -229,7 +253,7 @@ impl Asker {
         {
         }
         let mut decided = Vec::new();
-        while let Ok((program, answer)) = self.rx.try_recv() {
+        while let Ok((question, answer)) = self.rx.try_recv() {
             // The question may have been open while the person or Nix
             // tightened the policy. A stale allowing answer must neither
             // release held traffic nor overwrite that newer refusal.
@@ -237,7 +261,7 @@ impl Asker {
                 Some(record) => crate::netrules::Rules::load(&self.config, record),
                 None => crate::netrules::Rules::template_only(&self.config),
             };
-            let refused = rules.decide(program.as_deref()) == crate::netrules::Rule::Deny;
+            let refused = rules.decide(question.program()) == crate::netrules::Rule::Deny;
             let verdict = match answer {
                 Answer::Always | Answer::Now if refused => Verdict::Deny,
                 Answer::Always | Answer::Now => Verdict::Allow,
@@ -248,7 +272,7 @@ impl Asker {
                 Answer::Deny => Some(Verdict::Deny),
                 _ => None,
             };
-            let written = match (rule, self.record.as_deref(), program.as_deref()) {
+            let written = match (rule, self.record.as_deref(), question.program()) {
                 (Some(rule), Some(record), Some(program)) => {
                     let file = crate::container::policy_dir_in(&self.config, record)
                         .join(crate::container::FILE);
@@ -259,14 +283,14 @@ impl Asker {
                 _ => false,
             };
             // Not written as a rule: kept for the instance's life.
-            if !written && !refused {
-                self.session.insert(program.clone(), verdict);
+            if !written && !refused && question.program().is_some() {
+                self.session.insert(question.clone(), verdict);
             }
-            for key in self.waiting.remove(&program).unwrap_or_default() {
+            for key in self.waiting.remove(&question).unwrap_or_default() {
                 decided.push((key, verdict));
             }
-            self.first.remove(&program);
-            self.open.remove(&program);
+            self.first.remove(&question);
+            self.open.remove(&question);
         }
         self.next();
         decided
@@ -341,7 +365,12 @@ fn question(
     } else {
         format!("{shown}, программа не определена")
     };
-    let text = format!("{label} ({whose}) хочет в сеть: {to}.\nПока вы не ответили, сети нет.");
+    let scope = if known {
+        "Пока вы не ответили, сети нет."
+    } else {
+        "Приложение определить не удалось: разрешение будет только для этого соединения. Пока вы не ответили, сети нет."
+    };
+    let text = format!("{label} ({whose}) хочет в сеть: {to}.\n{scope}");
     let started = std::time::Instant::now();
     let mut display = None;
     if let Some((runtime, pid)) = at {
@@ -352,7 +381,13 @@ fn question(
         let appear_until = started + std::time::Duration::from_secs(5);
         loop {
             let left = timeout.map(|t| t.saturating_sub(started.elapsed()));
-            match crate::onwindow::ask(&runtime, pid, &text, &PANEL, left) {
+            match crate::onwindow::ask(
+                &runtime,
+                pid,
+                &text,
+                if known { &PANEL } else { &PANEL_UNKNOWN },
+                left,
+            ) {
                 OnWindow::No => return Answer::Deny,
                 OnWindow::Yes => return Answer::Now,
                 OnWindow::Unanswered => return Answer::Closed,
@@ -372,7 +407,15 @@ fn question(
     let timeout = timeout.map(|t| t.saturating_sub(started.elapsed()));
     let mut answers: Vec<(&str, &str, bool)> = vec![
         ("deny", "Запретить", false),
-        ("now", "Разрешить, пока работает", false),
+        (
+            "now",
+            if known {
+                "Разрешить, пока работает"
+            } else {
+                "Разрешить это соединение"
+            },
+            false,
+        ),
     ];
     if always {
         answers.push(("always", "Разрешить всегда", false));
@@ -412,7 +455,7 @@ mod tests {
                 let config = root.join(format!("{i}-{answer:?}"));
                 let mut asker =
                     Asker::new(Path::new(""), &config, &root, &root, Some("work".into())).unwrap();
-                let program = Some("browser".to_owned());
+                let program = QuestionId::Known("browser".to_owned());
                 // A question is already open with two held connections.
                 asker.open.insert(program.clone());
                 asker.waiting.insert(program.clone(), vec![key(1), key(2)]);
@@ -440,6 +483,21 @@ mod tests {
             remote: "93.184.216.34".parse().unwrap(),
             rport: 443,
         }
+    }
+
+    #[test]
+    fn unidentified_connections_do_not_share_an_allowance() {
+        let root = std::env::temp_dir().join(format!("vz-netask-unknown-{}", std::process::id()));
+        let mut asker = Asker::new(Path::new(""), &root, &root, &root, None).unwrap();
+        let first = QuestionId::Unknown(key(1));
+        let other = QuestionId::Unknown(key(2));
+        asker.open.extend([first.clone(), other.clone()]);
+        asker.waiting.insert(first.clone(), vec![key(1)]);
+        asker.waiting.insert(other.clone(), vec![key(2)]);
+        asker.tx.send((first, Answer::Now)).unwrap();
+        assert_eq!(asker.answered(), vec![(key(1), Verdict::Allow)]);
+        assert!(asker.waiting.contains_key(&other));
+        assert!(asker.session.is_empty());
     }
 
     /// No window to ask in: the question is closed — "no" for the

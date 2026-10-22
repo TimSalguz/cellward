@@ -38,7 +38,9 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use iced::keyboard::{self, key, Key};
-use iced::widget::{button, column, container, row, scrollable, text, text_input, tooltip};
+use iced::widget::{
+    button, column, container, pick_list, row, scrollable, text, text_input, tooltip,
+};
 use iced::{Alignment, Color, Element, Length, Size, Subscription, Task};
 
 /// A container, as `cellward _panel` says it.
@@ -199,6 +201,8 @@ struct Data {
     procs: Vec<ProcRow>,
     containers: Vec<Cont>,
     networks: Vec<Net>,
+    route_policy: String,
+    nodes: Vec<String>,
     instances: Vec<Inst>,
     flows: Vec<Conn>,
     /// What each program of each container used today: `(container,
@@ -230,6 +234,8 @@ fn parse(text: &str) -> Data {
     for line in text.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         match f.as_slice() {
+            ["route-policy", value] => d.route_policy = (*value).to_owned(),
+            ["node", name] if !name.is_empty() => d.nodes.push((*name).to_owned()),
             ["container", name, home, network, color] => d.containers.push(Cont {
                 name: (*name).to_owned(),
                 home: (*home).to_owned(),
@@ -749,6 +755,17 @@ enum Pending {
         conf: String,
         name: String,
     },
+    EnableRoutes,
+    AddNode {
+        conf: String,
+        name: String,
+    },
+    AddRoute {
+        name: String,
+        node: String,
+        via: String,
+        kind: &'static str,
+    },
     /// A container to make.
     NewContainer {
         name: String,
@@ -806,6 +823,20 @@ enum Msg {
     ConfChosen(Option<String>),
     ZoneName(String),
     AddZoneGo,
+    EnableRoutesAsk,
+    EnableRoutesGo,
+    AddNodeAsk,
+    NodeConfChosen(Option<String>),
+    NodeName(String),
+    AddNodeGo,
+    AddRouteAsk,
+    RouteName(String),
+    RouteNode(String),
+    RouteKind(&'static str),
+    RouteVia(String),
+    AddRouteGo,
+    RouteAllow(String),
+    RouteDeny(String),
     NewContainerAsk,
     NewName(String),
     NewHome(&'static str),
@@ -942,7 +973,7 @@ async fn cellward_all(path: PathBuf, all: Vec<Vec<String>>) -> Result<String, St
 }
 
 /// A zone's config to make a zone of, chosen in the file dialog of `dirs`.
-fn choose_conf(dirs: PathBuf) -> Task<Msg> {
+fn choose_conf(dirs: PathBuf, answer: fn(Option<String>) -> Msg) -> Task<Msg> {
     Task::perform(
         async move {
             let (done, over) = iced::futures::channel::oneshot::channel();
@@ -967,7 +998,7 @@ fn choose_conf(dirs: PathBuf) -> Task<Msg> {
             });
             over.await.ok().flatten()
         },
-        Msg::ConfChosen,
+        answer,
     )
 }
 
@@ -1530,7 +1561,7 @@ impl Panel {
                 _ => Task::none(),
             },
             Msg::AddZoneAsk => match self.dirs.clone() {
-                Some(dirs) => choose_conf(dirs),
+                Some(dirs) => choose_conf(dirs, Msg::ConfChosen),
                 None => {
                     self.said = Some(Err(
                         "выбрать файл нечем — в терминале: cellward add <имя> <файл.conf>"
@@ -1565,6 +1596,101 @@ impl Panel {
                 ];
                 Task::perform(cellward_all(self.cellward.clone(), all), Msg::Done)
             }
+            Msg::EnableRoutesAsk => {
+                self.pending = Some(Pending::EnableRoutes);
+                Task::none()
+            }
+            Msg::EnableRoutesGo => self.act(vec!["routes".into(), "enable".into()]),
+            Msg::AddNodeAsk => match self.dirs.clone() {
+                Some(dirs) => choose_conf(dirs, Msg::NodeConfChosen),
+                None => {
+                    self.said = Some(Err(
+                        "выбрать файл нечем — в терминале: cellward node add <узел> <файл.conf>"
+                            .to_owned(),
+                    ));
+                    Task::none()
+                }
+            },
+            Msg::NodeConfChosen(Some(conf)) => {
+                let name = zone_name_of(&conf);
+                self.pending = Some(Pending::AddNode { conf, name });
+                Task::none()
+            }
+            Msg::NodeConfChosen(None) => Task::none(),
+            Msg::NodeName(typed) => {
+                if let Some(Pending::AddNode { name, .. }) = &mut self.pending {
+                    *name = typed;
+                }
+                Task::none()
+            }
+            Msg::AddNodeGo => match self.pending.clone() {
+                Some(Pending::AddNode { conf, name }) if !name.trim().is_empty() => {
+                    self.act(vec!["node".into(), "add".into(), name.trim().into(), conf])
+                }
+                _ => Task::none(),
+            },
+            Msg::AddRouteAsk => {
+                self.pending = Some(Pending::AddRoute {
+                    name: String::new(),
+                    node: self.data.nodes.first().cloned().unwrap_or_default(),
+                    via: String::new(),
+                    kind: "direct",
+                });
+                Task::none()
+            }
+            Msg::RouteName(typed) => {
+                if let Some(Pending::AddRoute { name, .. }) = &mut self.pending {
+                    *name = typed;
+                }
+                Task::none()
+            }
+            Msg::RouteNode(chosen) => {
+                if let Some(Pending::AddRoute { node, .. }) = &mut self.pending {
+                    *node = chosen;
+                }
+                Task::none()
+            }
+            Msg::RouteKind(chosen) => {
+                if let Some(Pending::AddRoute { kind, via, .. }) = &mut self.pending {
+                    *kind = chosen;
+                    via.clear();
+                }
+                Task::none()
+            }
+            Msg::RouteVia(typed) => {
+                if let Some(Pending::AddRoute { via, .. }) = &mut self.pending {
+                    *via = typed;
+                }
+                Task::none()
+            }
+            Msg::AddRouteGo => match self.pending.clone() {
+                Some(Pending::AddRoute {
+                    name,
+                    node,
+                    via,
+                    kind,
+                }) if !name.trim().is_empty()
+                    && self.data.nodes.contains(&node)
+                    && (kind == "direct" || !via.trim().is_empty()) =>
+                {
+                    let mut args = vec!["route".into(), "add".into(), name.trim().into(), node];
+                    if kind != "direct" {
+                        args.push(
+                            if kind == "user" {
+                                "--via-user"
+                            } else {
+                                "--via"
+                            }
+                            .into(),
+                        );
+                        args.push(via.trim().into());
+                    }
+                    self.act(args)
+                }
+                _ => Task::none(),
+            },
+            Msg::RouteAllow(name) => self.act(vec!["routes".into(), "allow".into(), name]),
+            Msg::RouteDeny(name) => self.act(vec!["routes".into(), "deny".into(), name]),
             Msg::NewContainerAsk => {
                 self.pending = Some(Pending::NewContainer {
                     name: String::new(),
@@ -2659,6 +2785,75 @@ impl Panel {
             ]
             .spacing(8)
             .into(),
+            Pending::EnableRoutes => column![
+                question(
+                    "Включить строгий список маршрутов? Сначала опусти все пользовательские VPN-зоны. После включения ни одна зона не поднимется, пока ты отдельно не разрешишь её маршрут. Само включение ничего не подключает.".into()
+                ),
+                row![go("Включить", Some(Msg::EnableRoutesGo), false), cancel].spacing(6)
+            ]
+            .spacing(8)
+            .into(),
+            Pending::AddNode { conf, name } => column![
+                question(format!(
+                    "Сохранить VPN-конфиг «{conf}» в закрытом пуле. Как назвать узел? Узел не подключится и не появится в выборе сети, пока ты не создашь и не разрешишь маршрут."
+                )),
+                text_input("имя узла", name)
+                    .on_input(Msg::NodeName)
+                    .on_submit(Msg::AddNodeGo)
+                    .size(14)
+                    .padding(6),
+                row![
+                    go("Сохранить без подключения", (!name.trim().is_empty()).then_some(Msg::AddNodeGo), false),
+                    cancel
+                ]
+                .spacing(6)
+            ]
+            .spacing(8)
+            .into(),
+            Pending::AddRoute { name, node, via, kind } => {
+                let route_kind = |label: &'static str, value: &'static str| {
+                    button(text(label).size(13))
+                        .padding([4, 10])
+                        .style(if *kind == value { button::primary } else { button::secondary })
+                        .on_press(Msg::RouteKind(value))
+                };
+                let mut form = column![
+                    question("Маршрут ссылается на узел без копии ключа. Создание не подключает и не разрешает маршрут; это отдельный следующий шаг.".into()),
+                    text_input("имя маршрута (для выбора программой)", name)
+                        .on_input(Msg::RouteName)
+                        .size(14)
+                        .padding(6),
+                    text("VPN-узел из пула").size(13),
+                    pick_list(self.data.nodes.clone(), Some(node.clone()), Msg::RouteNode).text_size(14),
+                    row![
+                        route_kind("Первое звено (напрямую)", "direct"),
+                        route_kind("После маршрута пользователя", "user"),
+                        route_kind("После системного VPN", "system")
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(8);
+                if *kind != "direct" {
+                    form = form.push(
+                        text_input(if *kind == "user" { "имя предыдущего маршрута" } else { "имя системной VPN-зоны" }, via)
+                            .on_input(Msg::RouteVia)
+                            .size(14)
+                            .padding(6)
+                    );
+                }
+                form.push(
+                    row![
+                        go(
+                            "Создать без подключения",
+                            (!name.trim().is_empty() && self.data.nodes.contains(node) && (*kind == "direct" || !via.trim().is_empty())).then_some(Msg::AddRouteGo),
+                            false
+                        ),
+                        cancel
+                    ]
+                    .spacing(6)
+                )
+                .into()
+            }
             Pending::NewContainer { name, home } => {
                 let kind = |label: &'static str, which: &'static str| {
                     button(text(label).size(13))
@@ -3078,17 +3273,54 @@ impl Panel {
     }
 
     fn view_zones(&self) -> Element<'_, Msg> {
-        let mut page = column![].spacing(10);
+        let mut page = column![text("Подключения и цепочки").size(18)].spacing(10);
         if let Some(block) = self.pending.as_ref().and_then(|p| self.view_general(p)) {
             page = page.push(block);
         }
         let idle = !self.busy && self.pending.is_none();
-        page = page.push(
-            button(text("Добавить VPN из конфига…").size(13))
-                .padding([4, 10])
-                .style(button::secondary)
-                .on_press_maybe(idle.then_some(Msg::AddZoneAsk)),
-        );
+        match self.data.route_policy.as_str() {
+            "strict" => {
+                page = page.push(text("Строгий список маршрутов включён: конфиг в пуле сам по себе не подключается.").size(13));
+                page = page.push(
+                    row![
+                        button(text("1 · Добавить VPN-узел…").size(13))
+                            .padding([4, 10])
+                            .style(button::secondary)
+                            .on_press_maybe(idle.then_some(Msg::AddNodeAsk)),
+                        button(text("2 · Создать маршрут…").size(13))
+                            .padding([4, 10])
+                            .style(button::secondary)
+                            .on_press_maybe((idle && !self.data.nodes.is_empty()).then_some(Msg::AddRouteAsk)),
+                    ]
+                    .spacing(6),
+                );
+                page = page.push(text(format!(
+                    "Узлы в пуле: {}. После создания разреши маршрут ниже: сначала внешнее звено, затем внутренние по порядку. Только разрешённый маршрут появится в окне запуска.",
+                    if self.data.nodes.is_empty() { "пока нет".into() } else { self.data.nodes.join(", ") }
+                )).size(12));
+            }
+            "legacy" => {
+                page = page.push(text("Сейчас любой сохранённый VPN-конфиг может быть запущен напрямую. Для безопасного пула и цепочек включи строгую публикацию; сначала опусти работающие зоны.").size(13));
+                page = page.push(
+                    row![
+                        button(text("Включить список маршрутов…").size(13))
+                            .padding([4, 10])
+                            .style(button::secondary)
+                            .on_press_maybe(idle.then_some(Msg::EnableRoutesAsk)),
+                        button(text("Добавить прямую VPN-зону (старый режим)…").size(13))
+                            .padding([4, 10])
+                            .style(button::secondary)
+                            .on_press_maybe(idle.then_some(Msg::AddZoneAsk)),
+                    ]
+                    .spacing(6),
+                );
+            }
+            "invalid" => {
+                page = page.push(text("⚠ Список маршрутов не читается или повреждён. Запуск новых VPN-маршрутов закрыт; исправь политику до изменений.").size(13).color(Color::from_rgb8(0xd0, 0x3a, 0x3a)));
+            }
+            _ => page = page.push(text("Эта версия backend ещё не сообщает состояние маршрутов. Обнови cellward, чтобы управлять цепочками здесь.").size(13)),
+        }
+        page = page.push(text("SOCKS5/HTTP-прокси пока нельзя добавить как звено: транспорт, UDP и DNS ещё не реализованы. Здесь создаются только VPN-цепочки.").size(12));
         let act = |label: &'static str, msg: Msg, danger: bool| {
             button(text(label).size(13))
                 .padding([4, 10])
@@ -3153,6 +3385,17 @@ impl Panel {
                 buttons = buttons.push(act("Оборвать…", Msg::KillAsk(n.name.clone()), true));
             }
             if n.kind == "zone" {
+                if self.data.route_policy == "strict" && !n.up {
+                    buttons = buttons.push(if n.published {
+                        act("Запретить маршрут", Msg::RouteDeny(n.name.clone()), false)
+                    } else {
+                        act(
+                            "3 · Разрешить маршрут",
+                            Msg::RouteAllow(n.name.clone()),
+                            false,
+                        )
+                    });
+                }
                 buttons = buttons.push(act("Удалить…", Msg::RemoveZoneAsk(n.name.clone()), true));
             }
             // Where its programs' names go past the tunnel: a public
@@ -3532,6 +3775,14 @@ mod tests {
         assert_eq!(d.month[0].out, 9000);
         assert_eq!(color_of("#12345"), None);
         assert_eq!(color_of("123456"), None);
+    }
+
+    #[test]
+    fn route_policy_and_pooled_nodes_are_read_without_secrets() {
+        let d = parse("route-policy\tstrict\nnode\thome\nnode\tnl\n");
+        assert_eq!(d.route_policy, "strict");
+        assert_eq!(d.nodes, ["home", "nl"]);
+        assert_eq!(parse("route-policy\tinvalid\n").route_policy, "invalid");
     }
 
     /// Two programs of a container, one of another, one of none found, one

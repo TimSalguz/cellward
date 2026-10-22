@@ -799,6 +799,8 @@ pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Ve
         // menu must not call it one: nothing about it is encrypted.
         let mut text = if zone.host_interface {
             format!("Через интерфейс: {name} (без шифрования)")
+        } else if let Some(path) = &zone.chain_path {
+            format!("VPN-цепочка: {path}")
         } else if let Some(system) = &zone.system_zone {
             format!("VPN: {name} (через системное подключение {system})")
         } else {
@@ -839,12 +841,41 @@ pub fn net_menu(zones: &[MenuZone], pinned: &str, current_container: &str) -> Ve
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MenuZone {
     pub name: String,
+    /// Outer-to-inner route as shown to a person, without secrets.
+    pub chain_path: Option<String>,
     /// `[HostInterface]`: no tunnel, no encryption.
     pub host_interface: bool,
     /// `[SystemZone]`: the tunnel is this system zone's (`docs/SYSTEM.md` §7b).
     pub system_zone: Option<String>,
     /// `vpn-zone watch` found the tunnel dead at its last look.
     pub dead: bool,
+}
+
+/// Resolve only the route's names for display. Read and validation of the
+/// route before connection remain the backend's responsibility.
+fn chain_path(state: &Path, name: &str) -> Option<String> {
+    let mut names = vec![name.to_owned()];
+    let mut current = name.to_owned();
+    let mut seen = std::collections::BTreeSet::new();
+    loop {
+        if !seen.insert(current.clone()) {
+            return Some("недоступна (цикл)".to_owned());
+        }
+        let raw = crate::chain::read_zone_config(state, &current).ok()?;
+        let ini = crate::config::WgConfig::parse(&raw).ok()?;
+        let Some(via) = crate::chain::ChainConfig::from_ini(&ini).ok()? else {
+            break;
+        };
+        names.push(via.via.clone());
+        if !via.user {
+            break;
+        }
+        current = via.via;
+    }
+    (names.len() > 1).then(|| {
+        names.reverse();
+        names.join(" → ")
+    })
 }
 
 /// The zones of the state directory with what the menu says about them.
@@ -865,8 +896,10 @@ fn menu_zones(state: &Path) -> Vec<MenuZone> {
                     .ok()
                     .and_then(|t| crate::watch::parse_memory(&t))
                     .is_some_and(|(_, v)| v == crate::watch::Verdict::Dead);
+            let chain_path = chain_path(state, &name);
             MenuZone {
                 name,
+                chain_path,
                 host_interface,
                 system_zone,
                 dead,
@@ -4148,6 +4181,13 @@ mod tests {
         );
         assert_eq!(text_of(&menu, "nl"), "VPN: nl");
         assert_eq!(text_of(&menu, "pin:nl"), "Всегда: VPN: nl");
+        let chain = MenuZone {
+            name: "ch".to_owned(),
+            chain_path: Some("home → nl → ch".to_owned()),
+            ..MenuZone::default()
+        };
+        let menu = net_menu(&[chain], "", "настоящий дом");
+        assert_eq!(text_of(&menu, "ch"), "VPN-цепочка: home → nl → ch");
         assert_eq!(
             text_of(&menu, "__chooseprofile__"),
             "⚙ Сменить контейнер (сейчас: настоящий дом)…"
@@ -4710,6 +4750,7 @@ mod tests {
             host_interface: false,
             system_zone: None,
             dead: false,
+            chain_path: None,
         }];
         let nets = window_nets(&zones, "nl-removed");
         let chosen: Vec<&str> = nets
