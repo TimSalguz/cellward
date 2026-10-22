@@ -138,6 +138,8 @@ pub mod gui;
 pub mod hermetic;
 pub mod home_layer;
 pub mod hostif;
+#[path = "../../shared/i18n.rs"]
+pub mod i18n;
 pub mod init;
 pub mod instance;
 pub mod journal;

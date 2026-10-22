@@ -20,15 +20,17 @@ rustPlatform.buildRustPackage {
   # руками), каждая пересборка тащила бы в store гигабайты и меняла хеш
   # деривации.
   src = lib.fileset.toSource {
-    root = ./rust;
+    root = ./.;
     fileset = lib.fileset.unions [
       ./rust/Cargo.toml
       ./rust/Cargo.lock
       ./rust/build.rs
       ./rust/src
       ./rust/tests
+      ./shared/i18n.rs
     ];
   };
+  sourceRoot = "source/rust";
   cargoLock.lockFile = ./rust/Cargo.lock;
   # libseccomp-sys линкуется с системной libseccomp, а её версию ищет
   # pkg-config (build.rs крейта libseccomp).

@@ -49,7 +49,7 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
 
   src = lib.fileset.toSource {
-    root = ./.;
+    root = ../.;
     fileset = lib.fileset.unions [
       ./Cargo.toml
       ./Cargo.lock
@@ -58,8 +58,10 @@ rustPlatform.buildRustPackage {
       ./tests
       # iced's renderer with its text damage fixed (vendor/README.md).
       ./vendor
+      ../shared/i18n.rs
     ];
   };
+  sourceRoot = "source/window";
 
   cargoLock.lockFile = ./Cargo.lock;
 

@@ -13,6 +13,7 @@
 //!
 //! ```text
 //! title⇥<text>
+//! lang⇥en|ru                           (optional; omitted means legacy ru)
 //! note⇥<text>                         (any number)
 //! net⇥<tag>⇥<label>⇥<flags>
 //! container⇥<tag>⇥<label>⇥<flags>
@@ -82,6 +83,8 @@ pub struct Item {
 /// Everything the window shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Request {
+    /// Language of the already-rendered labels and the window chrome.
+    pub language: crate::i18n::Language,
     pub title: String,
     pub notes: Vec<String>,
     pub nets: Vec<Item>,
@@ -134,6 +137,7 @@ pub struct PermOf {
 /// The hotkey menu: entries to choose one of.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Menu {
+    pub language: crate::i18n::Language,
     pub title: String,
     pub notes: Vec<String>,
     /// `(tag, label, danger)`.
@@ -155,6 +159,9 @@ pub const HEADING: &str = "#";
 /// The menu as the window reads it.
 pub fn render_menu(menu: &Menu) -> String {
     let mut out = format!("mode\tmenu\ntitle\t{}\n", clean(&menu.title));
+    if menu.language != crate::i18n::Language::default() {
+        out.push_str(&format!("lang\t{}\n", menu.language.tag()));
+    }
     for note in &menu.notes {
         out.push_str(&format!("note\t{}\n", clean(note)));
     }
@@ -282,6 +289,7 @@ pub fn question_on(
         (program.to_owned(), words.to_vec())
     });
     let menu = Menu {
+        language: crate::i18n::Language::default(),
         title: title.to_owned(),
         notes: text.lines().map(str::to_owned).collect(),
         actions: answers
@@ -454,6 +462,9 @@ fn flags(item: &Item) -> String {
 /// The request as the window reads it.
 pub fn render(req: &Request) -> String {
     let mut out = format!("title\t{}\n", clean(&req.title));
+    if req.language != crate::i18n::Language::default() {
+        out.push_str(&format!("lang\t{}\n", req.language.tag()));
+    }
     for note in &req.notes {
         out.push_str(&format!("note\t{}\n", clean(note)));
     }
@@ -616,6 +627,21 @@ mod tests {
         assert!(render(&req).ends_with("guard\t1500\npins\t0\n"));
         let plain = render(&Request::default());
         assert!(!plain.contains("guard") && !plain.contains("pins\t"));
+    }
+
+    #[test]
+    fn explicit_english_language_is_sent_without_changing_protocol_tags() {
+        let req = Request {
+            language: crate::i18n::Language::English,
+            title: "Launch: Firefox".to_owned(),
+            ..Request::default()
+        };
+        assert!(render(&req).starts_with("title\tLaunch: Firefox\nlang\ten\n"));
+        let menu = Menu {
+            language: crate::i18n::Language::English,
+            ..Menu::default()
+        };
+        assert!(render_menu(&menu).starts_with("mode\tmenu\ntitle\t\nlang\ten\n"));
     }
 
     #[test]

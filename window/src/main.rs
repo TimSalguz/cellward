@@ -43,12 +43,15 @@ mod checklist;
 mod clip;
 mod clipd;
 mod days;
+#[path = "../../shared/i18n.rs"]
+mod i18n;
 mod login;
 mod metro;
 mod panel;
 mod pattern;
 mod thumb;
 
+use i18n::{text as tr, Key as UiKey, Language};
 use iced::keyboard::{self, key, Key};
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Size, Subscription, Task};
@@ -68,6 +71,7 @@ struct Item {
 /// Everything the window shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Request {
+    language: Language,
     /// `menu`: the hotkey menu of a running program — entries, one of which
     /// is chosen; with a `guard` it is a question (the broker's, the
     /// microphone's): nothing is taken until the person has been still with
@@ -190,6 +194,7 @@ fn parse_request(text: &str) -> Request {
     for line in text.lines() {
         let fields: Vec<&str> = line.split('\t').collect();
         match fields[0] {
+            "lang" => req.language = Language::from_wire_tag(fields.get(1).copied().unwrap_or("")),
             "mode" => req.mode = fields.get(1).unwrap_or(&"").to_string(),
             "action" if fields.len() >= 3 => req.actions.push((
                 fields[1].to_owned(),
@@ -296,12 +301,12 @@ struct Window {
 }
 
 /// Why a container cannot go with this network, if it cannot.
-fn blocked(item: &Item, net: &str) -> Option<String> {
+fn blocked(item: &Item, net: &str, language: Language) -> Option<String> {
     if let Some(zone) = item.busy.as_deref().filter(|z| *z != net) {
-        return Some(format!("открыт в сети {zone}"));
+        return Some(format!("{} {zone}", tr(language, UiKey::BusyInNetwork)));
     }
     if let Some(zone) = item.bound.as_deref().filter(|z| *z != net) {
-        return Some(format!("привязан к сети {zone}"));
+        return Some(format!("{} {zone}", tr(language, UiKey::BoundToNetwork)));
     }
     None
 }
@@ -403,7 +408,7 @@ impl Window {
         self.req
             .containers
             .get(i)
-            .is_some_and(|c| blocked(c, self.net_tag()).is_none())
+            .is_some_and(|c| blocked(c, self.net_tag(), self.req.language).is_none())
     }
 
     /// Everything needed to start: a container that goes with the network, a
@@ -810,7 +815,7 @@ impl Window {
                 continue;
             }
             let why = (pane == Pane::Container)
-                .then(|| blocked(item, self.net_tag()))
+                .then(|| blocked(item, self.net_tag(), self.req.language))
                 .flatten();
             let mark = if i == chosen { "●" } else { "○" };
             let display_number = if pane == Pane::Net {
@@ -825,7 +830,7 @@ impl Window {
             };
             let mut label = format!("{number}{mark} {}", item.label);
             if item.dead {
-                label.push_str(" — туннель молчит");
+                label.push_str(tr(self.req.language, UiKey::TunnelSilent));
             }
             if let Some(why) = &why {
                 label.push_str(&format!(" — {why}"));
@@ -904,11 +909,15 @@ impl Window {
         page = page.push(list);
         // "Секунду…" beside the close button, not a line of its own: the
         // window keeps the height it opened at.
-        let wait = if self.armed { "" } else { "Секунду…" };
+        let wait = if self.armed {
+            ""
+        } else {
+            tr(self.req.language, UiKey::Wait)
+        };
         page = page.push(
             row![
                 container(text(wait).size(13)).width(Length::Fill),
-                button(text("Закрыть меню  Esc").size(14))
+                button(text(tr(self.req.language, UiKey::CloseMenu)).size(14))
                     .padding([6, 14])
                     .style(button::secondary)
                     .on_press(Msg::Cancel)
@@ -925,13 +934,19 @@ impl Window {
         if self.perms_only() {
             return self.view_perms();
         }
-        let nets = self.column_view("Сеть", Pane::Net, &self.req.nets, self.net, Msg::Net);
+        let nets = self.column_view(
+            tr(self.req.language, UiKey::Network),
+            Pane::Net,
+            &self.req.nets,
+            self.net,
+            Msg::Net,
+        );
         let unconfined = self.net_tag() == "unconfined";
         let mut left = column![nets].spacing(8).width(Length::FillPortion(2));
         if !self.req.no_pins && !unconfined {
             left = left.push(
                 checkbox(self.pin_net)
-                    .label("Всегда эту сеть")
+                    .label(tr(self.req.language, UiKey::AlwaysNetwork))
                     .on_toggle(Msg::PinNet),
             );
         }
@@ -951,7 +966,7 @@ impl Window {
             };
             if let Some(index) = self.req.nets.iter().position(|n| n.tag == "unconfined") {
                 page = page.push(
-                    button(text("⚠ Без изоляции и без VPN — полный доступ к файлам, устройствам и сеансу хоста").size(15))
+                    button(text(tr(self.req.language, UiKey::UnconfinedWarning)).size(15))
                         .width(Length::Fill)
                         .style(style)
                         .on_press(Msg::Net(index)),
@@ -967,11 +982,11 @@ impl Window {
             Length::Fill
         };
         if unconfined {
-            page = page.push(text("Контейнер не используется. Чтобы выбрать сеть и контейнер, нажмите сеть слева.").size(14));
+            page = page.push(text(tr(self.req.language, UiKey::NoContainer)).size(14));
             page = page.push(left.height(lists));
         } else {
             let containers = self.column_view(
-                "Контейнер",
+                tr(self.req.language, UiKey::Container),
                 Pane::Container,
                 &self.req.containers,
                 self.container,
@@ -981,7 +996,7 @@ impl Window {
             if !self.req.no_pins {
                 right = right.push(
                     checkbox(self.pin_container)
-                        .label("Всегда этот контейнер")
+                        .label(tr(self.req.language, UiKey::AlwaysContainer))
                         .on_toggle(Msg::PinContainer),
                 );
             }
@@ -995,11 +1010,8 @@ impl Window {
                 page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
             }
             if !self.req.offers.is_empty() {
-                let mut offers = column![text(
-                    "Заготовка программы предлагает её контейнеру — только отмеченное:"
-                )
-                .size(14)]
-                .spacing(4);
+                let mut offers =
+                    column![text(tr(self.req.language, UiKey::PresetOffer)).size(14)].spacing(4);
                 for (i, (_, label)) in self.req.offers.iter().enumerate() {
                     offers = offers.push(
                         checkbox(self.offered.get(i).copied().unwrap_or(false))
@@ -1011,25 +1023,25 @@ impl Window {
             }
         }
         let label = if !self.armed {
-            "Секунду…".to_owned()
+            tr(self.req.language, UiKey::Wait).to_owned()
         } else if self.enter_starts() {
-            "Запустить  Enter".to_owned()
+            tr(self.req.language, UiKey::Start).to_owned()
         } else {
             let net = self.req.nets.get(self.net).map_or("", |n| n.label.as_str());
-            format!("Запустить: {net}")
+            format!("{} {net}", tr(self.req.language, UiKey::StartIn))
         };
         let launch = button(text(label).size(14))
             .padding([6, 14])
             .style(button::primary)
             .on_press_maybe(self.ready().then_some(Msg::Launch));
-        let cancel = button(text("Отмена  Esc").size(14))
+        let cancel = button(text(tr(self.req.language, UiKey::Cancel)).size(14))
             .padding([6, 14])
             .style(button::secondary)
             .on_press(Msg::Cancel);
         // The name of a new container beside the buttons that start it, at
         // their height: the lists above keep their place.
         let lead: Element<'_, Msg> = if self.naming() {
-            text_input("Название контейнера (буквы, цифры, дефис)", &self.name)
+            text_input(tr(self.req.language, UiKey::ContainerName), &self.name)
                 .id(NAME_FIELD)
                 .on_input(Msg::Name)
                 .on_submit(Msg::Launch)
@@ -1058,15 +1070,19 @@ impl Window {
             page = page.push(text(format!("ⓘ {note}")).size(14));
         }
         page = page.push(self.perms_view());
-        let wait = if self.armed { "" } else { "Секунду…" };
+        let wait = if self.armed {
+            ""
+        } else {
+            tr(self.req.language, UiKey::Wait)
+        };
         page = page.push(
             row![
                 container(text(wait).size(13)).width(Length::Fill),
-                button(text("Сохранить  Enter").size(14))
+                button(text(tr(self.req.language, UiKey::Save)).size(14))
                     .padding([6, 14])
                     .style(button::primary)
                     .on_press_maybe(self.armed.then_some(Msg::Launch)),
-                button(text("Отмена  Esc").size(14))
+                button(text(tr(self.req.language, UiKey::Cancel)).size(14))
                     .padding([6, 14])
                     .style(button::secondary)
                     .on_press(Msg::Cancel)
@@ -1083,12 +1099,19 @@ impl Window {
     /// cannot be changed here not pressable. Above them, whom a change is
     /// for: every program of the container, or this launch alone.
     fn perms_view(&self) -> Element<'_, Msg> {
-        let scope = self.perm_of().map_or(
-            "У этого контейнера здесь нечего выбирать",
-            |p| p.scope.as_str(),
-        );
+        let scope = self
+            .perm_of()
+            .map_or(tr(self.req.language, UiKey::NothingToChoose), |p| {
+                p.scope.as_str()
+            });
         let mut block = column![
-            text(self.req.block.as_deref().unwrap_or("Разрешения")).size(15),
+            text(
+                self.req
+                    .block
+                    .as_deref()
+                    .unwrap_or(tr(self.req.language, UiKey::Permissions))
+            )
+            .size(15),
             text(scope)
                 .size(13)
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
@@ -1146,12 +1169,16 @@ impl Window {
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             );
         }
-        let mut block = column![text("Команда").size(15)].spacing(4);
+        let mut block = column![text(tr(self.req.language, UiKey::Command)).size(15)].spacing(4);
         if !self.req.program.is_empty() {
             block = block.push(
-                text(format!("Программа: {}", self.req.program))
-                    .size(13)
-                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                text(format!(
+                    "{} {}",
+                    tr(self.req.language, UiKey::Program),
+                    self.req.program
+                ))
+                .size(13)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             );
         }
         block = block.push(scrollable(words).height(Length::Fixed(110.0)));
@@ -1286,7 +1313,7 @@ fn main() -> iced::Result {
     }
     let size = fitted_size(&req);
     let title = if req.title.is_empty() {
-        "Запуск".to_owned()
+        tr(req.language, UiKey::Launch).to_owned()
     } else {
         req.title.clone()
     };
@@ -1348,6 +1375,7 @@ mod tests {
     #[test]
     fn the_request_is_read_as_the_picker_writes_it() {
         let req = parse_request(REQUEST);
+        assert_eq!(req.language, Language::Russian);
         assert_eq!(req.title, "Запуск: Firefox");
         assert_eq!(req.notes, ["уже работает"]);
         assert_eq!(req.nets.len(), 4);
@@ -1356,6 +1384,27 @@ mod tests {
         assert_eq!(req.containers[2].busy.as_deref(), Some("de"));
         assert!(req.containers[3].new);
         assert!(req.pin_net && !req.pin_container);
+    }
+
+    #[test]
+    fn the_window_chrome_uses_the_language_of_its_request() {
+        let req = parse_request(
+            "lang\ten\ntitle\tLaunch: Firefox\nnet\toffline\tOffline\t\ncontainer\tmain\tHome\t\n",
+        );
+        assert_eq!(req.language, Language::English);
+        assert_eq!(
+            tr(req.language, UiKey::UnconfinedWarning),
+            "⚠ No isolation or VPN — full access to host files, devices and session"
+        );
+        let mut item = Item {
+            tag: "main".to_owned(),
+            ..Item::default()
+        };
+        item.busy = Some("nl".to_owned());
+        assert_eq!(
+            blocked(&item, "offline", req.language).as_deref(),
+            Some("open in network nl")
+        );
     }
 
     #[test]

@@ -25,7 +25,10 @@ contrast and missing/malformed files before enabling it.
 ## Languages
 
 English should be the source language and fallback, with Russian as the first
-complete translation. Do not expose an English/Russian selector until **all**
+complete translation. A shared English/Russian catalogue now covers the launch
+window's own controls, and its wire protocol can carry an explicit `lang` tag.
+The core still emits Russian by default; this is a migration boundary, **not**
+the finished language feature. Do not expose an English/Russian selector until **all**
 user-facing strings in the launch window, panel, permission prompts and the
 core-generated window protocol have translations. Otherwise an English
 selection would silently show Russian security decisions. Technical IDs,
