@@ -3,7 +3,8 @@
 //! program's launch (`crate::wl_proxy::ask_path`), whose supervisor has the
 //! Wayland proxy show it as a panel under the window's title. Its first two
 //! guarded buttons are the refusal and the session-scoped allowance. With no
-//! usable program window, the question is handed to the launch window.
+//! usable program window, the question is handed to the launch window. A
+//! third button can explicitly ask for the launch window's other choices.
 //!
 //! Who asks: the instance's keeper about a program's network
 //! (`crate::netask`), the sound filter about its microphone
@@ -52,6 +53,9 @@ pub enum OnWindow {
     Yes,
     /// Not answered in time.
     Unanswered,
+    /// The person explicitly asked for the trusted launch window's other
+    /// choices. Unlike a missing program window, do not wait for it to appear.
+    More(Option<OsString>),
     /// To be asked in the launch window — on the launch's compositor, when
     /// its supervisor named it: «Разрешить…», no window of the program's to
     /// ask on, or no supervisor to ask at all.
@@ -115,6 +119,7 @@ fn reply_of(reply: &[u8]) -> OnWindow {
     match reply.first() {
         Some(&crate::wl_proxy::ASK_NO) => OnWindow::No,
         Some(&crate::wl_proxy::ASK_YES) => OnWindow::Yes,
+        Some(&crate::wl_proxy::ASK_WINDOW) => OnWindow::More(display),
         _ => OnWindow::Elsewhere(display),
     }
 }
@@ -132,12 +137,12 @@ mod tests {
         assert_eq!(reply_of(&[ASK_NO]), OnWindow::No);
         assert_eq!(reply_of(&[ASK_YES]), OnWindow::Yes);
         assert_eq!(reply_of(b"nwayland-1"), OnWindow::No);
-        let on = |d: &str| OnWindow::Elsewhere(Some(OsString::from(d)));
+        let on = |d: &str| OnWindow::More(Some(OsString::from(d)));
         assert_eq!(reply_of(b"mwayland-1"), on("wayland-1"));
-        assert_eq!(reply_of(&[ASK_WINDOW]), OnWindow::Elsewhere(None));
+        assert_eq!(reply_of(&[ASK_WINDOW]), OnWindow::More(None));
         assert_eq!(reply_of(&[ASK_NOWHERE]), OnWindow::Elsewhere(None));
         assert_eq!(reply_of(b""), OnWindow::Elsewhere(None), "closed");
-        assert_eq!(reply_of(b"mway\0land"), OnWindow::Elsewhere(None));
+        assert_eq!(reply_of(b"mway\0land"), OnWindow::More(None));
         assert_eq!(ASK_NO, b'n');
         assert_eq!(ASK_YES, b'y');
     }
@@ -222,7 +227,7 @@ mod tests {
         assert_eq!(ask(&root, me, "мик?", &labels, long), OnWindow::No);
         assert_eq!(
             ask(&root, me, "мик?", &labels, long),
-            OnWindow::Elsewhere(Some(OsString::from("wayland-9")))
+            OnWindow::More(Some(OsString::from("wayland-9")))
         );
         let short = Some(std::time::Duration::from_millis(300));
         assert_eq!(ask(&root, me, "мик?", &labels, short), OnWindow::Unanswered);

@@ -898,7 +898,7 @@ impl Policy {
                 OnWindow::No => on_window = Some(Some(if remember { 2 } else { 1 })),
                 OnWindow::Yes => on_window = Some(Some(1)),
                 OnWindow::Unanswered => on_window = Some(None),
-                OnWindow::Elsewhere(on) => display = on,
+                OnWindow::More(on) | OnWindow::Elsewhere(on) => display = on,
             }
         }
         *self.shown_on.lock().unwrap_or_else(|e| e.into_inner()) = display.clone();

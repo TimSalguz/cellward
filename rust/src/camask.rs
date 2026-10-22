@@ -151,7 +151,7 @@ impl Asking {
                 OnWindow::No => Some(Answer::No),
                 OnWindow::Yes => Some(Answer::Once),
                 OnWindow::Unanswered => Some(Answer::Deny("нет ответа".to_owned())),
-                OnWindow::Elsewhere(on) => {
+                OnWindow::More(on) | OnWindow::Elsewhere(on) => {
                     display = on;
                     None
                 }

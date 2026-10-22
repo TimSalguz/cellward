@@ -12,8 +12,10 @@
 //! nobody wonders which window asks). First on the window of the program's
 //! launch: its supervisor's socket of questions (`crate::wl_proxy::ask_path`)
 //! has the Wayland proxy show a panel under the window's title, with
-//! «Запретить» and «Разрешить, пока работает». Both are answers there after
-//! the panel's input guard. No window to show it on or no such socket (a
+//! «Запретить всю сеть» and «Разрешить, пока работает». Both are answers there
+//! after the panel's input guard. A third choice opens the trusted launch
+//! window for a persistent rule, rather than making that high-impact choice
+//! on the program's own window. No window to show it on or no such socket (a
 //! launch without the proxy, a flow of no launch) asks in the separate
 //! launch window (`crate::window::question`) as a fallback.
 //!
@@ -21,9 +23,10 @@
 //! (the name a DNS answer gave the address, else the address) and the port.
 //! The answers, the safe one first (Enter): «Запретить» — a rule, and it is
 //! not asked again until the person changes it (the owner, 2026-09-29);
-//! «Разрешить, пока работает» — for the instance's life; «Разрешить всегда»
-//! — a rule. A program not found is asked about with no "always": there is
-//! no key to write it for.
+//! «Разрешить, пока работает» — for the instance's life; «Разрешить всю сеть
+//! программе всегда» — a rule, not a destination-specific exception. A
+//! program not found is asked about with no "always": there is no key to
+//! write it for.
 //!
 //! **Closed, not shown** (no session, no window): "no" for a known program's
 //! instance life; an unidentified flow has no stable identity to remember.
@@ -52,8 +55,13 @@ use crate::verdicts::Verdict;
 
 /// The panel's answers on the program's window: the safe one first — the
 /// only one that is an answer there (`crate::onwindow`).
-const PANEL: [&str; 2] = ["Запретить", "Разрешить, пока работает"];
-const PANEL_UNKNOWN: [&str; 2] = ["Запретить", "Разрешить это соединение"];
+const PANEL: [&str; 3] = [
+    "Запретить всю сеть",
+    "Разрешить, пока работает",
+    "Разрешить всегда…",
+];
+const PANEL_TEMP: [&str; 2] = ["Запретить всю сеть", "Разрешить, пока работает"];
+const PANEL_UNKNOWN: [&str; 2] = ["Запретить это соединение", "Разрешить это соединение"];
 
 /// What the person said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,7 +270,7 @@ impl Asker {
                 None => crate::netrules::Rules::template_only(&self.config),
             };
             let refused = rules.decide(question.program()) == crate::netrules::Rule::Deny;
-            let verdict = match answer {
+            let mut verdict = match answer {
                 Answer::Always | Answer::Now if refused => Verdict::Deny,
                 Answer::Always | Answer::Now => Verdict::Allow,
                 Answer::Deny | Answer::Closed => Verdict::Deny,
@@ -282,8 +290,18 @@ impl Asker {
                 }
                 _ => false,
             };
+            // An "always" answer without its rule on disk is not an
+            // allowance. Otherwise the UI promises persistence, but the
+            // next launch asks again (and this one gets unrequested access).
+            if answer == Answer::Always && !written {
+                verdict = Verdict::Deny;
+            }
             // Not written as a rule: kept for the instance's life.
-            if !written && !refused && question.program().is_some() {
+            if !written
+                && !refused
+                && question.program().is_some()
+                && answer != Answer::Always
+            {
                 self.session.insert(question.clone(), verdict);
             }
             for key in self.waiting.remove(&question).unwrap_or_default() {
@@ -366,7 +384,7 @@ fn question(
         format!("{shown}, программа не определена")
     };
     let scope = if known {
-        "Пока вы не ответили, сети нет."
+        "Решение касается всей сети программы, не только этого сайта. Пока вы не ответили, сети нет."
     } else {
         "Приложение определить не удалось: разрешение будет только для этого соединения. Пока вы не ответили, сети нет."
     };
@@ -385,12 +403,22 @@ fn question(
                 &runtime,
                 pid,
                 &text,
-                if known { &PANEL } else { &PANEL_UNKNOWN },
+                if !known {
+                    &PANEL_UNKNOWN
+                } else if always {
+                    &PANEL
+                } else {
+                    &PANEL_TEMP
+                },
                 left,
             ) {
                 OnWindow::No => return Answer::Deny,
                 OnWindow::Yes => return Answer::Now,
                 OnWindow::Unanswered => return Answer::Closed,
+                OnWindow::More(on) => {
+                    display = on;
+                    break;
+                }
                 OnWindow::Elsewhere(on) => {
                     display = on.or(display);
                     if std::time::Instant::now() >= appear_until
@@ -406,7 +434,15 @@ fn question(
     // What is left of the time to answer in.
     let timeout = timeout.map(|t| t.saturating_sub(started.elapsed()));
     let mut answers: Vec<(&str, &str, bool)> = vec![
-        ("deny", "Запретить", false),
+        (
+            "deny",
+            if known {
+                "Запретить всю сеть программе"
+            } else {
+                "Запретить это соединение"
+            },
+            false,
+        ),
         (
             "now",
             if known {
@@ -418,7 +454,7 @@ fn question(
         ),
     ];
     if always {
-        answers.push(("always", "Разрешить всегда", false));
+        answers.push(("always", "Разрешить всю сеть программе всегда", false));
     }
     let asked = crate::window::question_on(
         window,
@@ -498,6 +534,21 @@ mod tests {
         assert_eq!(asker.answered(), vec![(key(1), Verdict::Allow)]);
         assert!(asker.waiting.contains_key(&other));
         assert!(asker.session.is_empty());
+    }
+
+    #[test]
+    fn a_permanent_allowance_that_cannot_be_saved_does_not_open_the_flow() {
+        let root = std::env::temp_dir().join(format!("vz-netask-unsaved-{}", std::process::id()));
+        std::fs::write(&root, "not a directory").unwrap();
+        let mut asker =
+            Asker::new(Path::new(""), &root, &root, &root, Some("work".into())).unwrap();
+        let id = QuestionId::Known("helium".into());
+        asker.open.insert(id.clone());
+        asker.waiting.insert(id.clone(), vec![key(1)]);
+        asker.tx.send((id, Answer::Always)).unwrap();
+        assert_eq!(asker.answered(), vec![(key(1), Verdict::Deny)]);
+        assert!(asker.session.is_empty());
+        std::fs::remove_file(root).unwrap();
     }
 
     /// No window to ask in: the question is closed — "no" for the
