@@ -3,8 +3,10 @@
 # the window as it comes up. The screenshot is the point — this is how its
 # look is checked without a screen — so the test keeps it in its output:
 #
-#   nix-build tests/vm-window.nix -A driver -o vm-window-driver
-#   mkdir -p /tmp/vm-window && ./vm-window-driver/bin/nixos-test-driver -o /tmp/vm-window
+#   bash tests/run-vm-window.sh /tmp/vm-window
+# The wrapper builds the driver and cleans up its private VM state afterward.
+# Do not put VM state on a tiny /run/user/$UID tmpfs: the guest's qcow2 image
+# expands there and can fail with I/O errors (then panic) when it fills.
 #
 # In CI it is a smoke: the window comes up, stays up, and closed starts nothing
 # (the same check is a subtest of tests/vm.nix).
@@ -91,7 +93,17 @@ let
       };
 
     testScript = ''
+      import os
       import shlex
+      import shutil
+
+      vm_state_parent = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+      vm_free = shutil.disk_usage(vm_state_parent).free
+      assert vm_free >= 512 * 1024 * 1024, (
+          f"VM state directory {vm_state_parent} has only {vm_free} bytes free; "
+          "use bash tests/run-vm-window.sh or set XDG_RUNTIME_DIR to a "
+          "large private directory outside /run/user"
+      )
 
       def alice(cmd):
           return machine.succeed(
