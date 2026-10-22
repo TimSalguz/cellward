@@ -37,6 +37,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use crate::appearance::{self, ThemeChoice};
 use iced::keyboard::{self, key, Key};
 use iced::widget::{
     button, column, container, pick_list, row, scrollable, text, text_input, tooltip,
@@ -843,6 +844,7 @@ enum Msg {
     NewContainerGo,
     /// `cellward <setting> <value>`.
     SetSetting(&'static str, String),
+    SetTheme(ThemeChoice),
     Forget(String),
     ForgetAllAsk,
     ForgetAllGo,
@@ -880,6 +882,7 @@ enum Msg {
 }
 
 struct Panel {
+    theme_choice: ThemeChoice,
     cellward: PathBuf,
     dirs: Option<PathBuf>,
     tab: Tab,
@@ -1058,6 +1061,7 @@ fn choose_dir(dirs: PathBuf) -> Task<Msg> {
 impl Panel {
     fn new(cellward: PathBuf, dirs: Option<PathBuf>, tab: Tab) -> Self {
         Self {
+            theme_choice: appearance::load(),
             cellward,
             dirs,
             tab,
@@ -1190,6 +1194,18 @@ impl Panel {
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
+            Msg::SetTheme(choice) => {
+                match appearance::save(choice) {
+                    Ok(()) => {
+                        self.theme_choice = choice;
+                        self.said = None;
+                    }
+                    Err(error) => {
+                        self.said = Some(Err(format!("Could not save appearance: {error}")))
+                    }
+                }
+                Task::none()
+            }
             Msg::Tab(tab) => {
                 self.tab = tab;
                 // A block asked on the network's tab is not left waiting
@@ -3485,6 +3501,11 @@ impl Panel {
 
     fn view_settings(&self) -> Element<'_, Msg> {
         let mut page = column![].spacing(16);
+        page = page.push(column![
+            text("Appearance / Оформление").size(16),
+            text("Window colours only; network colours keep their meaning. Changes apply immediately.").size(12),
+            pick_list(ThemeChoice::ALL.as_slice(), Some(self.theme_choice), Msg::SetTheme),
+        ].spacing(6));
         if let Some(block) = self.pending.as_ref().and_then(|p| self.view_general(p)) {
             page = page.push(block);
         }
@@ -3632,7 +3653,7 @@ pub fn run(args: &[String]) -> iced::Result {
         Panel::view,
     )
     .title(|_: &Panel| "cellward".to_owned())
-    .theme(|_: &Panel| None::<iced::Theme>)
+    .theme(|panel: &Panel| panel.theme_choice.theme())
     .subscription(Panel::subscription)
     .window(iced::window::Settings {
         size: Size::new(980.0, 640.0),

@@ -38,6 +38,7 @@
 
 use std::io::Read;
 
+mod appearance;
 mod checklist;
 mod clip;
 mod clipd;
@@ -1306,7 +1307,7 @@ fn main() -> iced::Result {
     )
     .title(move |_: &Window| title.clone())
     // None: the system's colour scheme decides, light or dark.
-    .theme(|_: &Window| None::<iced::Theme>)
+    .theme(|_: &Window| appearance::load().theme())
     .subscription(Window::subscription)
     .window(iced::window::Settings {
         size,
