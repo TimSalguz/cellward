@@ -51,6 +51,15 @@ def udp(dst, port, tag, bind=None):
             pass
         time.sleep(0.3)
 
+def udp_once(dst, port, tag):
+    fam = socket.AF_INET6 if ":" in dst else socket.AF_INET
+    s = socket.socket(fam, socket.SOCK_DGRAM)
+    try:
+        s.sendto((tag + "\n").encode(), (dst, int(port)))
+    except OSError:
+        pass  # No route is the expected fail-closed result.
+    s.close()
+
 def reuse(dst, port, tag):
     socks = []
     for _ in range(2):
@@ -191,6 +200,20 @@ def logged(tag, source):
     """The server's log lines with `tag` that came from `source`."""
     out = server.succeed(f"cat {LOGS} 2>/dev/null || true")
     return [l for l in out.splitlines() if tag in l and source in l]
+
+
+def quiet_count(tag, source, seconds=5):
+    """Let packets queued before a namespace cut finish reaching the logger."""
+    previous = len(logged(tag, source))
+    quiet = 0
+    for _ in range(45):
+        machine.sleep(1)
+        current = len(logged(tag, source))
+        quiet = quiet + 1 if current == previous else 0
+        if quiet >= seconds:
+            return current
+        previous = current
+    raise AssertionError(f"{tag}: server did not become quiet after cut")
 
 
 def sw():
@@ -550,10 +573,17 @@ with subtest("switch: the gap — nothing but loopback while the next zone has n
     assert len(links.strip().splitlines()) == 1 and ": lo:" in links, links
     routes = machine.succeed(f"nsenter -t {i['pid']} -n ip -4 route show")
     assert routes.startswith("unreachable default"), routes
-    counts = {tag: len(logged(tag, "10.99.0.")) for tag in ["uudp-", "reuse-"]}
+    # An already queued datagram can arrive after the cut under QEMU TCG.
+    # Send a NEW uniquely tagged datagram from the cut namespace: it cannot
+    # be mistaken for traffic buffered by the server before the cut.
+    machine.succeed(
+        f"nsenter -t {i['pid']} -n {PY} /tmp/swhelper.py udp_once "
+        "10.99.0.1 7300 gap-only-after-cut"
+    )
     machine.sleep(3)
-    for tag, n in counts.items():
-        assert len(logged(tag, "10.99.0.")) == n, (tag, logged(tag, "10.99.0."))
+    assert not logged("gap-only-after-cut", "10.99.0."), logged(
+        "gap-only-after-cut", "10.99.0."
+    )
     # The zone refuses: the switch fails at its attach — cut, in the new
     # network, never back in the old one (G7).
     machine.succeed("touch /tmp/vmfake-release")
@@ -576,10 +606,16 @@ with subtest("switch: back to B from a cut instance; B stopped while bound — n
     reset_b_peer()
     i = wait_sw(lambda i: i["why"] == "zone-down", "cut by B's end")
     assert (i["network"], i["exit"]) == ("vmswb", "none"), i
-    nofb = len(logged("nofb-", "10.99.0.3"))
-    machine.sleep(4)
+    nofb = quiet_count("nofb-", "10.99.0.3")
     assert not logged("nofb-", "10.99.0.2"), logged("nofb-", "10.99.0.2")
-    assert len(logged("nofb-", "10.99.0.3")) == nofb
+    machine.succeed(
+        f"nsenter -t {i['pid']} -n {PY} /tmp/swhelper.py udp_once "
+        "10.99.0.1 7300 nofb-only-after-cut"
+    )
+    machine.sleep(2)
+    assert not logged("nofb-only-after-cut", "10.99.0."), logged(
+        "nofb-only-after-cut", "10.99.0."
+    )
 
 with subtest("switch: B back — a new epoch; a socket of the one before stays mute"):
     alice("cellward up vmswb")

@@ -1218,14 +1218,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // warning below: where it finds the program, the question is whether to
     // open it there — its profile cannot be open in two networks at once, so
     // "start it anyway" would only end in this refusal.
-    let main_home = matches!(
-        (&selection.sandbox, &selection.container),
-        (Sandbox::None, Container::Main | Container::MainNamed(_))
-    );
     // Kept until the `exec` — the note lives on with the pid — or taken back
     // by the launch that gives up on the way.
     let _main_home_note = match program_word(&selection.cmd)
-        .filter(|_| main_home && appid_env.is_some() && !dryrun)
+        .filter(|_| main_home && !independent_terminal && appid_env.is_some() && !dryrun)
     {
         None => None,
         Some(word) => match main_home_guard(tools, instance_id.as_deref(), &zone_name, word) {
