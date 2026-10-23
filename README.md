@@ -423,7 +423,7 @@ host's addresses are.
 
 ### A VPN chain
 
-A user zone's own tunnel can use a system zone as its outer transport:
+A user zone's own tunnel can use a system VPN or an earlier user VPN route as its outer transport:
 
 ```sh
 cellward add inner ./inner.conf --via outer
@@ -435,10 +435,16 @@ tunnel's encrypted transport, rather than its applications, is attached to
 network. The cellward window shows this path on the Network tab, and
 `status --json` exposes the outer hop as `upstream`.
 
-For now the outer hop must be a system zone and the inner VPN server must be
-a literal IPv4/IPv6 address: resolving its name through the host before the
-chain exists would leak around `outer`. A SOCKS/HTTP hop still depends on the
-planned proxy-zone backend.
+The Cellward window's Connections and chains tab can build these routes:
+enable the strict route list, add VPN configs to the closed node pool, then
+create routes from the outer hop inward. Select an already published user VPN
+route or a system VPN from the list for each inner hop. The builder previews
+the packet path; creating a route does not connect it. Publish the outer
+routes first, then the inner ones. A published route offers an “Add the next
+hop” action with its outer hop preselected. A pooled node is never a selectable
+network on its own. Chains may have multiple user VPN hops. An inner VPN server must
+have a literal IPv4/IPv6 address: host DNS before the chain exists would leak
+around the outer hop. SOCKS/HTTP hops still need the planned proxy-zone backend.
 The outer system zone must itself be a VPN. A plain zone would expose the
 inner gateway to the access provider, so Cellward refuses that chain.
 Interactive OpenConnect login is refused in a chain because its helper would

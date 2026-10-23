@@ -5,12 +5,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- The Connections and chains window now offers configured system VPNs and
+  published user VPN routes as selectable outer hops, previews each new
+  route's packet path, and checks names and prerequisites before creation.
+  Proxy hops remain unavailable until their backend exists.
+
 ### Changed
+- Launching a program that is already running now asks whether to focus its
+  existing window, open another in the same container, or choose a different
+  container/network for an independent copy. This uses live launch records,
+  not a browser/terminal allowlist. The launch window calls preset suggestions
+  optional container access instead of showing an unexplained preset notice.
 - Fullscreen windows now reveal the zone/container title when the pointer
   reaches their top edge by default. The initial three-second label remains;
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- A live container network switch now updates both the frame colour and its
+  network label; the switch menu checks the resulting live network before
+  reporting success. The fullscreen title accepts double-click to leave
+  fullscreen and a drag to move after leaving it, while keeping the top
+  pointer edge available to an application's own fullscreen toolbar.
 - **OpenConnect login after a rejected password works again**: Enter submits
   the connect window even after Tab moves focus to its button. A rejected
   password is not prefilled or replayed; when the gateway repeats the same

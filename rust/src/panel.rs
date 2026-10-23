@@ -15,6 +15,8 @@
 //! network⇥<name>⇥<kind: zone|offline|unconfined>⇥<up: 0|1>⇥<#rrggbb>⇥<locked: 0|1>⇥<tunnel>⇥<upstream>⇥<route: chain|chain-user|system|->⇥<published: 0|1>
 //! route-policy⇥<legacy|strict|invalid>
 //! node⇥<name> (pooled VPN config; never its secret)
+//! system-vpn⇥<name> (a configured system WireGuard zone, for route builder)
+//! user-vpn⇥<name> (a published user route with its own VPN tunnel)
 //! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
@@ -123,6 +125,11 @@ pub fn data(tools: &Tools) -> String {
             line(&["node", &node]);
         }
     }
+    for name in crate::system::all_zones() {
+        if crate::system::declared_kind(&name) == "wireguard" {
+            line(&["system-vpn", &name]);
+        }
+    }
     let mut containers = crate::container::load_all(tools);
     containers.sort_by(|a, b| a.name.cmp(&b.name));
     for c in &containers {
@@ -196,6 +203,18 @@ pub fn data(tools: &Tools) -> String {
             route,
             if published { "1" } else { "0" },
         ]);
+        if published
+            && crate::chain::read_zone_config(&tools.state, &zone)
+                .ok()
+                .and_then(|raw| crate::config::WgConfig::parse(&raw).ok())
+                .is_some_and(|ini| {
+                    !crate::hostif::is_host_interface(&ini)
+                        && !crate::hostif::is_host_network(&ini)
+                        && !crate::sysuplink::is_system_zone(&ini)
+                })
+        {
+            line(&["user-vpn", &zone]);
+        }
         // Where its names go past the tunnel (`crate::dnspath`).
         let dns = crate::dnspath::of_zone(&tools.state.join(&zone));
         let side = if dns.is_empty() {

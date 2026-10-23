@@ -939,18 +939,57 @@ pub struct Origin {
     pub container: Option<String>,
 }
 
+impl Origin {
+    /// A named container's live instance can have moved since this launch.
+    /// Only its exact instance id is used: a per-network instance is not
+    /// switchable and must keep the launch's original zone.
+    pub fn current_zone(&self) -> String {
+        let Some(container) = &self.container else {
+            return self.zone.clone();
+        };
+        let dir = self
+            .state
+            .join(crate::instance::INSTANCES_DIR)
+            .join(crate::instance::key(container));
+        let word = |name| {
+            std::fs::read_to_string(dir.join(name))
+                .ok()
+                .map(|s| s.trim().to_owned())
+        };
+        if word(crate::instance::ID).as_deref() != Some(container.as_str())
+            || !dir.join(crate::instance::READY).is_file()
+        {
+            return self.zone.clone();
+        }
+        word(crate::instance::NETWORK)
+            .filter(|name| crate::instance::valid_network(name))
+            .unwrap_or_else(|| self.zone.clone())
+    }
+}
+
 impl Setup {
+    pub fn current_title(&self) -> String {
+        let Some(origin) = &self.origin else {
+            return self.title.clone();
+        };
+        let Some((_, container)) = self.title.split_once(" · ") else {
+            return self.title.clone();
+        };
+        title_text(&origin.current_zone(), container)
+    }
+
     /// The frame as the settings have it now: `config` the settings'
     /// directory (the switch's); the width alone where the origin is not
     /// known.
     pub fn read_again(&self) -> Frame {
         match &self.origin {
             Some(o) => {
+                let zone = o.current_zone();
                 let color = o
                     .container
                     .as_deref()
                     .and_then(|c| crate::container::frame_color_in(&self.switch, c));
-                Frame::of_launch(&o.state, &self.switch, &o.zone, color.as_deref())
+                Frame::of_launch(&o.state, &self.switch, &zone, color.as_deref())
             }
             None => Frame {
                 width: width(&self.switch).0,
@@ -1528,5 +1567,38 @@ mod tests {
             Frame::of_launch(&dir, &dir, "nl", Some("nope")).color,
             zone.color
         );
+    }
+
+    #[test]
+    fn a_named_containers_title_and_colour_follow_its_live_network() {
+        let (state, config) = dirs("live-network");
+        let instance = state
+            .join(crate::instance::INSTANCES_DIR)
+            .join(crate::instance::key("app-firefox"));
+        fs::create_dir_all(&instance).unwrap();
+        fs::create_dir_all(state.join("de")).unwrap();
+        fs::write(state.join("nl").join(COLOR_FILE), "#102030").unwrap();
+        fs::write(state.join("de").join(COLOR_FILE), "#a0b0c0").unwrap();
+        fs::write(instance.join(crate::instance::ID), "app-firefox\n").unwrap();
+        fs::write(instance.join(crate::instance::READY), "").unwrap();
+        fs::write(instance.join(crate::instance::NETWORK), "nl\n").unwrap();
+        let setup = Setup {
+            frame: Frame::of_launch(&state, &config, "nl", None),
+            title: title_text("nl", "Свой контейнер"),
+            switch: config,
+            always_focused: false,
+            origin: Some(Origin {
+                state: state.clone(),
+                zone: "nl".to_owned(),
+                container: Some("app-firefox".to_owned()),
+            }),
+        };
+        assert_eq!(setup.current_title(), "nl · Свой контейнер");
+        fs::write(instance.join(crate::instance::NETWORK), "de\n").unwrap();
+        assert_eq!(setup.current_title(), "de · Свой контейнер");
+        assert_eq!(setup.read_again().color, Rgb(0xa0, 0xb0, 0xc0));
+        fs::write(instance.join(crate::instance::ID), "someone-else\n").unwrap();
+        assert_eq!(setup.current_title(), "nl · Свой контейнер");
+        let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 }

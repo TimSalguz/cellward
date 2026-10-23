@@ -90,11 +90,9 @@ pub fn text(language: Language, key: Key) -> &'static str {
         (Language::Russian, NoContainer) => {
             "Контейнер не используется. Чтобы выбрать сеть и контейнер, нажмите сеть слева."
         }
-        (Language::English, PresetOffer) => {
-            "The application preset offers its container — only selected items:"
-        }
+        (Language::English, PresetOffer) => "Optional access for the selected container:",
         (Language::Russian, PresetOffer) => {
-            "Заготовка программы предлагает её контейнеру — только отмеченное:"
+            "Дополнительный доступ для выбранного контейнера (необязательно):"
         }
         (Language::English, Wait) => "One moment…",
         (Language::Russian, Wait) => "Секунду…",

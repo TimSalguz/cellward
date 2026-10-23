@@ -204,6 +204,8 @@ struct Data {
     networks: Vec<Net>,
     route_policy: String,
     nodes: Vec<String>,
+    system_vpns: Vec<String>,
+    user_vpns: Vec<String>,
     instances: Vec<Inst>,
     flows: Vec<Conn>,
     /// What each program of each container used today: `(container,
@@ -237,6 +239,8 @@ fn parse(text: &str) -> Data {
         match f.as_slice() {
             ["route-policy", value] => d.route_policy = (*value).to_owned(),
             ["node", name] if !name.is_empty() => d.nodes.push((*name).to_owned()),
+            ["system-vpn", name] if !name.is_empty() => d.system_vpns.push((*name).to_owned()),
+            ["user-vpn", name] if !name.is_empty() => d.user_vpns.push((*name).to_owned()),
             ["container", name, home, network, color] => d.containers.push(Cont {
                 name: (*name).to_owned(),
                 home: (*home).to_owned(),
@@ -711,6 +715,92 @@ fn zone_name_of(conf: &str) -> String {
         .collect()
 }
 
+/// The route builder offers existing, published VPN routes instead of asking
+/// for an unverified name. An unpublished outer hop cannot start the inner
+/// one, so publish it first; system VPNs are a separate namespace.
+fn route_sources(data: &Data, kind: &str) -> Vec<String> {
+    match kind {
+        "user" => data
+            .user_vpns
+            .iter()
+            .filter(|name| {
+                data.networks
+                    .iter()
+                    .any(|n| n.kind == "zone" && n.published && &n.name == *name)
+            })
+            .cloned()
+            .collect(),
+        "system" => data.system_vpns.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn route_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// Only construct a command for a route the builder can actually identify.
+/// The backend still validates the node, full chain and publication policy.
+fn route_args(data: &Data, name: &str, node: &str, kind: &str, via: &str) -> Option<Vec<String>> {
+    if !route_name_ok(name)
+        || !data.nodes.iter().any(|n| n == node)
+        || data.networks.iter().any(|n| n.name == name)
+    {
+        return None;
+    }
+    let mut args = vec!["route".into(), "add".into(), name.into(), node.into()];
+    match kind {
+        "direct" => {}
+        "user" | "system" if route_sources(data, kind).iter().any(|n| n == via) => {
+            args.push(
+                if kind == "user" {
+                    "--via-user"
+                } else {
+                    "--via"
+                }
+                .into(),
+            );
+            args.push(via.into());
+        }
+        _ => return None,
+    }
+    Some(args)
+}
+
+fn route_preview(data: &Data, name: &str, node: &str, kind: &str, via: &str) -> String {
+    let shown = if name.is_empty() {
+        "новый маршрут"
+    } else {
+        name
+    };
+    match kind {
+        "direct" => format!("Программа → {shown} (VPN-узел {node}) → Интернет"),
+        "user" | "system" if !via.is_empty() => {
+            let net = Net {
+                name: shown.into(),
+                kind: "zone".into(),
+                upstream: via.into(),
+                route: if kind == "user" {
+                    "chain-user"
+                } else {
+                    "chain"
+                }
+                .into(),
+                ..Net::default()
+            };
+            format!(
+                "VPN-узел: {node}\n{}",
+                route_path(&net, &data.networks, "Программа")
+            )
+        }
+        _ => "Выбери внешнее звено — тогда появится путь пакетов".into(),
+    }
+}
+
 /// A tunnel, for a person.
 fn tunnel_text(net: &Net) -> String {
     let state = if net.up {
@@ -831,6 +921,7 @@ enum Msg {
     NodeName(String),
     AddNodeGo,
     AddRouteAsk,
+    ExtendRoute(String),
     RouteName(String),
     RouteNode(String),
     RouteKind(&'static str),
@@ -1654,6 +1745,18 @@ impl Panel {
                 });
                 Task::none()
             }
+            Msg::ExtendRoute(via) => {
+                if !route_sources(&self.data, "user").contains(&via) {
+                    return Task::none();
+                }
+                self.pending = Some(Pending::AddRoute {
+                    name: String::new(),
+                    node: self.data.nodes.first().cloned().unwrap_or_default(),
+                    via,
+                    kind: "user",
+                });
+                Task::none()
+            }
             Msg::RouteName(typed) => {
                 if let Some(Pending::AddRoute { name, .. }) = &mut self.pending {
                     *name = typed;
@@ -1674,8 +1777,10 @@ impl Panel {
                 Task::none()
             }
             Msg::RouteVia(typed) => {
-                if let Some(Pending::AddRoute { via, .. }) = &mut self.pending {
-                    *via = typed;
+                if let Some(Pending::AddRoute { via, kind, .. }) = &mut self.pending {
+                    if route_sources(&self.data, kind).contains(&typed) {
+                        *via = typed;
+                    }
                 }
                 Task::none()
             }
@@ -1685,24 +1790,8 @@ impl Panel {
                     node,
                     via,
                     kind,
-                }) if !name.trim().is_empty()
-                    && self.data.nodes.contains(&node)
-                    && (kind == "direct" || !via.trim().is_empty()) =>
-                {
-                    let mut args = vec!["route".into(), "add".into(), name.trim().into(), node];
-                    if kind != "direct" {
-                        args.push(
-                            if kind == "user" {
-                                "--via-user"
-                            } else {
-                                "--via"
-                            }
-                            .into(),
-                        );
-                        args.push(via.trim().into());
-                    }
-                    self.act(args)
-                }
+                }) => route_args(&self.data, name.trim(), &node, kind, &via)
+                    .map_or_else(Task::none, |args| self.act(args)),
                 _ => Task::none(),
             },
             Msg::RouteAllow(name) => self.act(vec!["routes".into(), "allow".into(), name]),
@@ -2833,35 +2922,55 @@ impl Panel {
                         .style(if *kind == value { button::primary } else { button::secondary })
                         .on_press(Msg::RouteKind(value))
                 };
+                let sources = route_sources(&self.data, kind);
                 let mut form = column![
-                    question("Маршрут ссылается на узел без копии ключа. Создание не подключает и не разрешает маршрут; это отдельный следующий шаг.".into()),
+                    question("Собери путь снаружи внутрь. Конфиг узла хранится один раз; этот маршрут лишь выбирает, через какое звено подключаться. Создание ничего не подключает.".into()),
+                    text("1 · Как будет называться сеть в выборе программ?").size(13),
                     text_input("имя маршрута (для выбора программой)", name)
                         .on_input(Msg::RouteName)
                         .size(14)
                         .padding(6),
-                    text("VPN-узел из пула").size(13),
+                    text("2 · Какой VPN добавить в конец цепочки?").size(13),
                     pick_list(self.data.nodes.clone(), Some(node.clone()), Msg::RouteNode).text_size(14),
+                    text("3 · Через какую сеть подключаться к его серверу?").size(13),
                     row![
-                        route_kind("Первое звено (напрямую)", "direct"),
-                        route_kind("После маршрута пользователя", "user"),
-                        route_kind("После системного VPN", "system")
+                        route_kind("Напрямую — провайдер видит сервер", "direct"),
+                        route_kind("Через мой VPN-маршрут", "user"),
+                        route_kind("Через системный VPN", "system")
                     ]
                     .spacing(6),
                 ]
                 .spacing(8);
                 if *kind != "direct" {
-                    form = form.push(
-                        text_input(if *kind == "user" { "имя предыдущего маршрута" } else { "имя системной VPN-зоны" }, via)
-                            .on_input(Msg::RouteVia)
-                            .size(14)
-                            .padding(6)
-                    );
+                    if sources.is_empty() {
+                        form = form.push(text(if *kind == "user" {
+                            "Нет разрешённого внешнего VPN-маршрута. Создай и разреши его сначала."
+                        } else {
+                            "Системных VPN-зон не найдено. Добавь их в конфигурацию NixOS сначала."
+                        }).size(12));
+                    } else {
+                        form = form.push(
+                            pick_list(sources, (!via.is_empty()).then(|| via.clone()), Msg::RouteVia)
+                                .text_size(14)
+                        );
+                    }
                 }
+                form = form.push(
+                    text(route_preview(&self.data, name, node, kind, via))
+                        .size(12)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                );
+                if !name.is_empty() && !route_name_ok(name.trim()) {
+                    form = form.push(text("Имя: только латинские буквы, цифры, _ и -; не начинай с -.").size(12));
+                } else if self.data.networks.iter().any(|n| n.name == name.trim()) {
+                    form = form.push(text("Маршрут с таким именем уже существует.").size(12));
+                }
+                form = form.push(text("После создания нажми «Разрешить маршрут» у новой зоны. Внешние звенья разрешай первыми; без разрешения запуск закрыт.").size(12));
                 form.push(
                     row![
                         go(
-                            "Создать без подключения",
-                            (!name.trim().is_empty() && self.data.nodes.contains(node) && (*kind == "direct" || !via.trim().is_empty())).then_some(Msg::AddRouteGo),
+                            "Создать маршрут (не подключать)",
+                            route_args(&self.data, name.trim(), node, kind, via).map(|_| Msg::AddRouteGo),
                             false
                         ),
                         cancel
@@ -3414,6 +3523,21 @@ impl Panel {
                 }
                 buttons = buttons.push(act("Удалить…", Msg::RemoveZoneAsk(n.name.clone()), true));
             }
+            let next_hop: Element<'_, Msg> = if self.data.route_policy == "strict"
+                && n.kind == "zone"
+                && n.published
+                && !self.data.nodes.is_empty()
+                && self.data.user_vpns.contains(&n.name)
+            {
+                act(
+                    "Добавить следующее звено к этой цепочке…",
+                    Msg::ExtendRoute(n.name.clone()),
+                    false,
+                )
+                .into()
+            } else {
+                column![].into()
+            };
             // Where its programs' names go past the tunnel: a public
             // resolver is asked in clear by the VPN's server — said in red.
             let dns: Element<'_, Msg> = match self.data.dns.get(&n.name) {
@@ -3440,6 +3564,7 @@ impl Panel {
                     .align_y(Alignment::Center),
                     dns,
                     buttons,
+                    next_hop,
                 ]
                 .spacing(4),
             );
@@ -3800,10 +3925,50 @@ mod tests {
 
     #[test]
     fn route_policy_and_pooled_nodes_are_read_without_secrets() {
-        let d = parse("route-policy\tstrict\nnode\thome\nnode\tnl\n");
+        let d =
+            parse("route-policy\tstrict\nnode\thome\nnode\tnl\nsystem-vpn\touter\nuser-vpn\tnl\n");
         assert_eq!(d.route_policy, "strict");
         assert_eq!(d.nodes, ["home", "nl"]);
+        assert_eq!(d.system_vpns, ["outer"]);
+        assert_eq!(d.user_vpns, ["nl"]);
         assert_eq!(parse("route-policy\tinvalid\n").route_policy, "invalid");
+    }
+
+    #[test]
+    fn the_route_builder_uses_existing_hops_and_never_guesses_a_direct_exit() {
+        let d = parse(
+            "route-policy\tstrict\nnode\tinner\nsystem-vpn\touter\nuser-vpn\tnl\n\
+             network\tnl\tzone\t0\t#112233\t0\t-\t-\t-\t1\n\
+             network\tunpublished\tzone\t0\t#112233\t0\t-\t-\t-\t0\n\
+             network\tborrowed\tzone\t0\t#112233\t0\t-\touter\tsystem\t1\n",
+        );
+        assert_eq!(route_sources(&d, "user"), ["nl"]);
+        assert_eq!(route_sources(&d, "system"), ["outer"]);
+        assert_eq!(route_sources(&d, "direct"), Vec::<String>::new());
+        assert_eq!(
+            route_args(&d, "ch-via-nl", "inner", "user", "nl"),
+            Some(
+                vec!["route", "add", "ch-via-nl", "inner", "--via-user", "nl"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect()
+            )
+        );
+        assert!(route_args(&d, "ch", "inner", "user", "unpublished").is_none());
+        assert!(route_args(&d, "ch", "inner", "system", "typo").is_none());
+        assert!(route_args(&d, "nl", "inner", "direct", "").is_none());
+        assert!(route_args(&d, "-bad", "inner", "direct", "").is_none());
+        assert!(route_preview(&d, "ch", "inner", "user", "nl")
+            .contains("ch (awg0: слой 1) → uplink (hostif) → nl (awg0: слой 2)"));
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Zones);
+        panel.data = d;
+        let _ = panel.update(Msg::ExtendRoute("unpublished".into()));
+        assert!(panel.pending.is_none());
+        let _ = panel.update(Msg::ExtendRoute("nl".into()));
+        assert!(matches!(
+            panel.pending,
+            Some(Pending::AddRoute { ref via, kind: "user", .. }) if via == "nl"
+        ));
     }
 
     /// Two programs of a container, one of another, one of none found, one

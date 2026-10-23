@@ -1257,7 +1257,15 @@ impl Frames {
         self.width.set(border.width);
         self.full.set(border.fullscreen);
         self.double_click.set(border.double_click);
-        let new = !Rc::ptr_eq(&self.parts.borrow().pixel, &border.pixel);
+        let new = {
+            let parts = self.parts.borrow();
+            !Rc::ptr_eq(&parts.pixel, &border.pixel)
+                || match (&parts.text, &border.text) {
+                    (Some(a), Some(b)) => !Rc::ptr_eq(a, b),
+                    (None, None) => false,
+                    _ => true,
+                }
+        };
         if new {
             *self.parts.borrow_mut() = Parts {
                 mode: border.title,
@@ -1370,19 +1378,24 @@ impl Frames {
         quiet(&*view);
         let one = Fixed::from_i32_saturating(1);
         view.send_set_source(one, one, one, one);
-        if let Some(tag) = tag {
-            // The row's input region: the tag, and nothing of the clear
-            // rest (the compositor clips it to the row). Applied with the
-            // strip's first commit.
+        // Keep the app's first two pixels pointer-reachable even when the
+        // hover strip is visible over a fullscreen client. Browsers use
+        // that edge to reveal their own fullscreen toolbar. Each child has
+        // its own input region: clipping only the parent does not suffice.
+        let input_below_edge = |surface: &Rc<WlSurface>, width: i32| {
             let region = compositor.new_send_create_region();
             quiet(&*region);
-            region.send_add(0, 0, tag.width, TITLE_HEIGHT);
+            region.send_add(0, HOVER_EDGE, width, TITLE_HEIGHT - HOVER_EDGE);
             surface.send_set_input_region(Some(&region));
             region.send_destroy();
+        };
+        if !look.tag() || tag.is_some() {
+            input_below_edge(&surface, tag.map_or(32768, |tag| tag.width));
         }
         let (text, buttons) = match (&text, &own.text_pool) {
             (Some(text), Some(pool)) => {
                 let text_surface = own_surface(Part::Text);
+                input_below_edge(&text_surface, 32768);
                 let text_sub = subcompositor.new_send_get_subsurface(&text_surface, &surface);
                 quiet(&*text_sub);
                 text_sub.send_set_position(TITLE_PAD, 0);
@@ -1403,6 +1416,7 @@ impl Frames {
                 let row = look.buttons.width_all();
                 let buttons = (row > 0).then(|| {
                     let buttons_surface = own_surface(Part::Buttons);
+                    input_below_edge(&buttons_surface, row);
                     let buttons_sub =
                         subcompositor.new_send_get_subsurface(&buttons_surface, &surface);
                     quiet(&*buttons_sub);
@@ -2765,9 +2779,9 @@ impl Window {
     /// What a point (`x`, `y`, surface-local) on the frame's `part` is for
     /// ([`Hit`]): the title (or the tag) moves the window, the border — any
     /// ring of it — resizes it, a button is a button of the look's row; a
-    /// round corner nothing (it takes no input anyway) — and nothing while
-    /// the compositor has the window fullscreen (there is nothing to move
-    /// it to), nor before the frame is laid out.
+    /// round corner nothing (it takes no input anyway). In fullscreen the
+    /// revealed title still accepts a drag or double click; only the resize
+    /// edges cease to apply. Nothing acts before the frame is laid out.
     fn hit(&self, part: Part, x: f64, y: f64) -> Hit {
         let Some((area, i, _)) = self.laid else {
             return Hit::Nothing;
@@ -2776,8 +2790,8 @@ impl Window {
         match part {
             Part::Buttons => self.look.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
             Part::Corner | Part::Menu | Part::Prompt => Hit::Nothing,
-            _ if self.next_fullscreen => Hit::Nothing,
             Part::Title | Part::Text => Hit::Title,
+            _ if self.next_fullscreen => Hit::Nothing,
             Part::Border(side, ring) => {
                 let widths: Vec<i32> = self
                     .look
@@ -2862,16 +2876,21 @@ impl Window {
                 self.title_pressed = None;
             }
             match (hit, &toplevel, seat) {
-                // The second press of a double click maximizes (or back);
-                // any other press moves.
+                // A double click exits compositor fullscreen, otherwise it
+                // maximizes (or restores). A drag first exits fullscreen so
+                // the compositor has a movable toplevel to grab.
                 (Hit::Title, Some(toplevel), _) if self.double_clicked(f, time) => {
-                    if self.maximized {
+                    if self.next_fullscreen {
+                        toplevel.send_unset_fullscreen();
+                    } else if self.maximized {
                         toplevel.send_unset_maximized();
                     } else {
                         toplevel.send_set_maximized();
                     }
                 }
-                (Hit::Title, Some(toplevel), Some(seat)) => toplevel.send_move(seat, serial),
+                (Hit::Title, Some(toplevel), Some(seat)) if !self.next_fullscreen => {
+                    toplevel.send_move(seat, serial)
+                }
                 (Hit::Edge(edges), Some(toplevel), Some(seat)) if edges != 0 => {
                     toplevel.send_resize(seat, serial, XdgToplevelResizeEdge(edges))
                 }
@@ -5332,6 +5351,10 @@ struct Pointer {
     /// The buttons down on the program's surfaces: let go of before a leave
     /// is held back, or they would stay down.
     down: Vec<u32>,
+    /// A fullscreen title press: only a real drag ends fullscreen and asks
+    /// the compositor to move it; an ordinary first click stays fullscreen
+    /// so a double click can end it without accidentally maximizing.
+    fullscreen_drag: Option<(Weak<RefCell<Window>>, u32, f64, f64)>,
 }
 
 /// Where on a frame the pointer is: the window, its part, and the point on
@@ -5398,6 +5421,7 @@ impl Pointer {
             cursor: None,
             held: None,
             down: Vec::new(),
+            fullscreen_drag: None,
         }
     }
 
@@ -5606,6 +5630,13 @@ impl Pointer {
         }
         let seat = self.seat.upgrade();
         let down = state == WlPointerButtonState::PRESSED;
+        if down && part == Part::Title {
+            if window.try_borrow().is_ok_and(|w| w.next_fullscreen) {
+                self.fullscreen_drag = Some((Rc::downgrade(&window), serial, x, y));
+            }
+        } else if !down {
+            self.fullscreen_drag = None;
+        }
         click(
             &window,
             &self.f,
@@ -5707,6 +5738,25 @@ impl WlPointerHandler for Pointer {
         surface_y: Fixed,
     ) {
         self.hover_motion(surface_y);
+        if let (Some((weak, serial, start_x, start_y)), Some(over)) =
+            (&self.fullscreen_drag, &self.over)
+        {
+            let moved = (surface_x.to_f64() - start_x).abs() > 4.0
+                || (surface_y.to_f64() - start_y).abs() > 4.0;
+            if moved {
+                if let (Some(window), Some(seat)) = (weak.upgrade(), self.seat.upgrade()) {
+                    if let Ok(window) = window.try_borrow() {
+                        if let Some(toplevel) = window.toplevel.as_ref().and_then(Weak::upgrade) {
+                            toplevel.send_unset_fullscreen();
+                            toplevel.send_move(&seat, *serial);
+                        }
+                    }
+                }
+                self.fullscreen_drag = None;
+            } else if over.part != Part::Title {
+                self.fullscreen_drag = None;
+            }
+        }
         if let Some(over) = &mut self.over {
             over.x = surface_x.to_f64();
             over.y = surface_y.to_f64();

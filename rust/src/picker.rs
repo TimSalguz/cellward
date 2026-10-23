@@ -397,14 +397,9 @@ impl Memory {
 /// What the first (network) question resolves to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetStep {
-    /// The program is already running AND is known to hand a launch over to
-    /// the copy that is up ([`Memory::hands_over`]): a click on its shortcut
-    /// means "raise the window", not "start another one". Asking about the
-    /// network would be pointless — the command goes to the instance that is
-    /// already up and it stays in ITS network — so it is started into the
-    /// same place and no dialog is shown. A program not known to do that (a
-    /// terminal: every window its own process) is asked, with the network it
-    /// runs in chosen. (`docs/GOTCHAS.md` §11)
+    /// A live launch exists. The person may focus it, open another window
+    /// in its home, or pick a different home for an independent copy. This
+    /// does not guess from an application-specific browser/terminal list.
     Running { zone: String, selector: String },
     /// The container this launch uses without a question is bound to a
     /// network: that is where it goes (`docs/PERMISSIONS.md` §11.8).
@@ -416,7 +411,7 @@ pub enum NetStep {
 /// The first decision, without touching anything.
 pub fn net_step(memory: &Memory) -> NetStep {
     if !memory.ask {
-        if let Some(running) = memory.running.as_ref().filter(|_| memory.hands_over) {
+        if let Some(running) = memory.running.as_ref() {
             return NetStep::Running {
                 zone: running.zone.clone(),
                 selector: running.selector.clone(),
@@ -1291,6 +1286,7 @@ fn ask_window(
     label: &str,
     default_net: &str,
     memory: &Memory,
+    avoid: Option<&Container>,
 ) -> Option<Option<(String, Container)>> {
     if tools.window.as_os_str().is_empty() {
         return None;
@@ -1300,6 +1296,20 @@ fn ask_window(
         Some(reply) => reply,
         None => return Some(None),
     };
+
+    // A single-profile application would pass this launch to the already
+    // running copy. Reject that choice before writing pins, permissions or
+    // presets: merely trying another container must not change settings.
+    if let Some(old) = avoid {
+        let same = if reply.net == launch::UNCONFINED {
+            old.profile == crate::container::OPEN_RECORD
+        } else {
+            same_home_choice(tools, key, &reply, old)
+        };
+        if same {
+            return Some(Some((reply.net, old.clone())));
+        }
+    }
 
     remember(&tools.state, ".last", key, &reply.net);
 
@@ -2047,14 +2057,57 @@ pub fn main() -> ExitCode {
         NetStep::Running { zone, selector } => {
             let mut container =
                 Container::from_selector(&selector, |n| container_exists(&tools, n));
-            // Open in a throwaway sandbox: the window there, or a new empty
-            // home — which, the person says.
-            if !container.join.is_empty() {
-                match again_in_throwaway(&tools, &label) {
-                    Again::There => {}
-                    Again::New => container.join.clear(),
-                    Again::Nothing => return ExitCode::SUCCESS,
+            let choice = if !container.join.is_empty() {
+                again_in_throwaway(&tools, &label)
+            } else {
+                again_running(&tools, &label, &zone, &selector)
+            };
+            match choice {
+                Again::There => {
+                    raise_running(&tools.state, &key);
+                    return ExitCode::SUCCESS;
                 }
+                Again::Same => {}
+                Again::New if !container.join.is_empty() => container.join.clear(),
+                Again::New => {
+                    // A second browser with the same home would hand its
+                    // command to the old process. Only a different home is
+                    // offered as a separate instance, regardless of network.
+                    if launch::has_display() {
+                        loop {
+                            match ask_window(&tools, &key, &label, &zone, &memory, Some(&container))
+                            {
+                                Some(Some((chosen_zone, chosen_container)))
+                                    if separate_home(&container, &chosen_container) =>
+                                {
+                                    return launch_asked(
+                                        &tools,
+                                        &key,
+                                        &label,
+                                        &chosen_zone,
+                                        &chosen_container,
+                                        &args.cmd,
+                                        &memory,
+                                    );
+                                }
+                                Some(Some(_)) => {
+                                    let answers = [
+                                        ("again", "Выбрать другой контейнер", false),
+                                        ("cancel", "Отмена", false),
+                                    ];
+                                    let text = "Это тот же контейнер и дом, что у открытого браузера. Новый запуск может передать команду старому процессу в прежней сети. Для отдельной копии выбери другой контейнер.";
+                                    if !matches!(crate::window::question(&tools.window, "Не отдельная копия", text, None, &answers, None), crate::window::Asked::Chose(tag) if tag == "again")
+                                    {
+                                        return ExitCode::SUCCESS;
+                                    }
+                                }
+                                _ => return ExitCode::SUCCESS,
+                            }
+                        }
+                    }
+                    return ExitCode::SUCCESS;
+                }
+                Again::Nothing => return ExitCode::SUCCESS,
             }
             return launch_asked(&tools, &key, &label, &zone, &container, &args.cmd, &memory);
         }
@@ -2074,7 +2127,7 @@ pub fn main() -> ExitCode {
             };
             // One window for both questions, where there is one.
             if launch::has_display() {
-                match ask_window(&tools, &key, &label, &default, &memory) {
+                match ask_window(&tools, &key, &label, &default, &memory, None) {
                     Some(Some((zone, container))) => {
                         return launch_asked(
                             &tools, &key, &label, &zone, &container, &args.cmd, &memory,
@@ -2241,8 +2294,71 @@ pub fn main() -> ExitCode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Again {
     There,
+    Same,
     New,
     Nothing,
+}
+
+/// A different network alone is not a second instance of a single-profile
+/// browser. It needs a different home/container identity.
+fn separate_home(old: &Container, new: &Container) -> bool {
+    old.profile != new.profile
+        || old.fs_sandbox != new.fs_sandbox
+        || old.sandbox != new.sandbox
+        || old.join != new.join
+}
+
+fn same_home_choice(tools: &Tools, key: &str, reply: &window::Reply, old: &Container) -> bool {
+    if reply.container == crate::container::OPEN_RECORD {
+        return old.profile == crate::container::OPEN_RECORD;
+    }
+    match window_container_choice(&reply.container, reply.pin_container) {
+        ProfileChoice::Main { .. } => !separate_home(old, &Container::default()),
+        ProfileChoice::OwnSandbox { .. } => !separate_home(old, &Container::own_sandbox(key)),
+        ProfileChoice::Sandbox { name, .. } => {
+            let name = canon(tools, &format!("{SANDBOX_PREFIX}{name}"));
+            !separate_home(
+                old,
+                &Container::from_selector(&name, |n| container_exists(tools, n)),
+            )
+        }
+        ProfileChoice::Profile { name, .. } => !separate_home(
+            old,
+            &Container::from_selector(&name, |n| container_exists(tools, n)),
+        ),
+        ProfileChoice::ThrowawayJoin(name) => old.fs_sandbox && old.join == name,
+        ProfileChoice::TmpJoin(name) => old.profile == name,
+        _ => false,
+    }
+}
+
+fn again_running(tools: &Tools, label: &str, zone: &str, selector: &str) -> Again {
+    let text = format!(
+        "«{label}» уже открыта в сети «{zone}» (контейнер: {}).\n\
+         Можно перейти к открытому окну, открыть ещё одно в том же контейнере или выбрать другой контейнер для отдельной копии. \
+         Один и тот же дом браузера может передать новый запуск старому процессу.",
+        if selector.is_empty() { "настоящий дом" } else { selector }
+    );
+    let answers = [
+        ("cancel", "Отмена", false),
+        ("new", "Открыть отдельно — другая сеть/контейнер…", false),
+        ("same", "Ещё одно окно здесь", false),
+        ("there", "Переключиться к открытой", false),
+    ];
+    match crate::window::question(
+        &tools.window,
+        "Программа уже открыта",
+        &text,
+        None,
+        &answers,
+        None,
+    ) {
+        crate::window::Asked::Chose(tag) if tag == "there" => Again::There,
+        crate::window::Asked::Chose(tag) if tag == "same" => Again::Same,
+        crate::window::Asked::Chose(tag) if tag == "new" => Again::New,
+        crate::window::Asked::NotShown => Again::Same,
+        _ => Again::Nothing,
+    }
 }
 
 /// A program that hands a launch over is open in a throwaway sandbox: to
@@ -3247,7 +3363,7 @@ fn raise_running(state: &Path, key: &str) {
                 .collect::<Vec<_>>()
         })
         .collect();
-    let [pid] = pids[..] else {
+    let Some(pid) = pids.into_iter().next() else {
         return;
     };
     let until = std::time::Instant::now() + RAISE_WITHIN;
@@ -3763,12 +3879,10 @@ mod tests {
         );
     }
 
-    /// A terminal opened in a zone left every next one in that zone with no
-    /// question (owner, 2026-09-25): a program not known to hand over is
-    /// asked, with the network it runs in chosen — and a bound container's
-    /// network still holds.
+    /// A running terminal also gets the choice to focus it, open another
+    /// window there, or choose a different home/network. No browser list.
     #[test]
-    fn a_running_program_not_known_to_hand_over_is_asked() {
+    fn a_running_program_not_known_to_hand_over_gets_running_menu() {
         let mut m = memory();
         m.last = "de".to_owned();
         m.running = Some(Running {
@@ -3777,8 +3891,9 @@ mod tests {
         });
         assert_eq!(
             net_step(&m),
-            NetStep::Ask {
-                default: "nl".to_owned()
+            NetStep::Running {
+                zone: "nl".to_owned(),
+                selector: String::new()
             }
         );
         // The host's network under its old name is chosen as the new one.
@@ -3788,17 +3903,13 @@ mod tests {
         });
         assert_eq!(
             net_step(&m),
-            NetStep::Ask {
-                default: "unconfined".to_owned()
+            NetStep::Running {
+                zone: "direct".to_owned(),
+                selector: String::new()
             }
         );
         m.bound = "de".to_owned();
-        assert_eq!(
-            net_step(&m),
-            NetStep::Bound {
-                zone: "de".to_owned()
-            }
-        );
+        assert!(matches!(net_step(&m), NetStep::Running { .. }));
     }
 
     /// Only a launch into the network the program runs in is watched, only
@@ -3846,9 +3957,9 @@ mod tests {
         });
         m.hands_over = true;
         assert!(matches!(net_step(&m), NetStep::Running { .. }));
-        // One that does not: the container's network, no question.
+        // One that does not: the running menu still appears.
         m.hands_over = false;
-        assert!(matches!(net_step(&m), NetStep::Bound { .. }));
+        assert!(matches!(net_step(&m), NetStep::Running { .. }));
         // And VPN_ZONE_ASK still opens the dialog.
         m.running = None;
         m.ask = true;

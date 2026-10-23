@@ -1772,6 +1772,7 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
         Some("other") => return None,
         _ => return Some(0),
     }
+    let restart = args.contains(&"--restart");
     let done = Command::new(&tools.runner)
         .args(&args)
         .stdin(Stdio::null())
@@ -1791,8 +1792,28 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
     // The warning the command says first was read already, above.
     let said = text.strip_prefix(warning.as_str()).unwrap_or(&text).trim();
     if out.status.success() {
-        notify(said);
-        Some(0)
+        let actual = crate::instance::running(&tools.state)
+            .into_iter()
+            .find(|instance| instance.id == container)
+            .map(|instance| instance.network);
+        if !restart && actual.as_deref() != Some(to.as_str()) {
+            notify(&format!(
+                "Команда завершилась, но контейнер не подтверждает новую сеть «{to}» (сейчас: {}). {said}",
+                actual.as_deref().unwrap_or("не запущен")
+            ));
+            Some(1)
+        } else {
+            let detail = (!said.is_empty())
+                .then(|| format!(" {said}"))
+                .unwrap_or_default();
+            let state = if restart {
+                format!("Смена сети контейнера «{container}» на «{to}» и перезапуск запрошены.")
+            } else {
+                format!("Сеть контейнера «{container}» теперь «{to}».")
+            };
+            notify(&format!("{state}{detail}"));
+            Some(0)
+        }
     } else {
         notify(&format!("Сеть не сменена. {said}"));
         Some(1)
