@@ -255,6 +255,7 @@ enum Msg {
     Rule(bool),
     /// An offer of the preset, by its index, ticked or not.
     Offer(usize, bool),
+    ShowOffers(bool),
     /// A permission's choice for the container chosen: the row, the choice.
     Perm(usize, usize),
     Name(String),
@@ -284,6 +285,7 @@ struct Window {
     rule: bool,
     /// The request's offers ticked, one each.
     offered: Vec<bool>,
+    show_offers: bool,
     /// The permissions changed: `(container tag, key) → value`.
     changed: std::collections::HashMap<(String, String), String>,
     name: String,
@@ -333,6 +335,7 @@ impl Window {
             pin_container: req.pin_container && !unconfined,
             rule: false,
             offered: vec![false; req.offers.len()],
+            show_offers: false,
             changed: std::collections::HashMap::new(),
             pane: Pane::Net,
             net,
@@ -579,6 +582,7 @@ impl Window {
                 | Msg::PinContainer(_)
                 | Msg::Rule(_)
                 | Msg::Offer(_, _)
+                | Msg::ShowOffers(_)
                 | Msg::Perm(_, _)
                 | Msg::Name(_)
                 | Msg::Launch
@@ -634,6 +638,7 @@ impl Window {
                     *ticked = v;
                 }
             }
+            Msg::ShowOffers(show) => self.show_offers = show && !self.req.offers.is_empty(),
             Msg::Perm(row, choice) => {
                 let Some(perm) = self.req.perms.get(row) else {
                     return Task::none();
@@ -741,6 +746,15 @@ impl Window {
     }
 
     fn key_choose(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Msg> {
+        if self.show_offers {
+            if matches!(
+                key.as_ref(),
+                Key::Named(key::Named::Escape | key::Named::ArrowLeft)
+            ) {
+                return self.update(Msg::ShowOffers(false));
+            }
+            return Task::none();
+        }
         match key.as_ref() {
             Key::Named(key::Named::Escape) => return self.update(Msg::Cancel),
             Key::Named(key::Named::Enter) if self.enter_starts() => {
@@ -934,6 +948,9 @@ impl Window {
         if self.perms_only() {
             return self.view_perms();
         }
+        if self.show_offers {
+            return self.view_offers();
+        }
         let nets = self.column_view(
             tr(self.req.language, UiKey::Network),
             Pane::Net,
@@ -1010,16 +1027,12 @@ impl Window {
                 page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
             }
             if !self.req.offers.is_empty() {
-                let mut offers =
-                    column![text(tr(self.req.language, UiKey::PresetOffer)).size(14)].spacing(4);
-                for (i, (_, label)) in self.req.offers.iter().enumerate() {
-                    offers = offers.push(
-                        checkbox(self.offered.get(i).copied().unwrap_or(false))
-                            .label(label.as_str())
-                            .on_toggle(move |v| Msg::Offer(i, v)),
-                    );
-                }
-                page = page.push(offers);
+                page = page.push(
+                    button(text(tr(self.req.language, UiKey::OptionalAccess)).size(13))
+                        .padding([3, 8])
+                        .style(button::text)
+                        .on_press(Msg::ShowOffers(true)),
+                );
             }
         }
         let label = if !self.armed {
@@ -1058,6 +1071,28 @@ impl Window {
                 .align_y(Alignment::Center),
         );
         page.into()
+    }
+
+    fn view_offers(&self) -> Element<'_, Msg> {
+        let mut offers = column![].spacing(8);
+        for (i, (_, label)) in self.req.offers.iter().enumerate() {
+            offers = offers.push(
+                checkbox(self.offered.get(i).copied().unwrap_or(false))
+                    .label(label.as_str())
+                    .on_toggle(move |v| Msg::Offer(i, v)),
+            );
+        }
+        column![
+            text(tr(self.req.language, UiKey::PresetOffer)).size(18),
+            scrollable(offers).height(Length::Fill),
+            button(text(tr(self.req.language, UiKey::Back)).size(14))
+                .padding([6, 14])
+                .style(button::secondary)
+                .on_press(Msg::ShowOffers(false)),
+        ]
+        .spacing(12)
+        .padding(16)
+        .into()
     }
 
     /// The permissions of one container (`mode⇥perms`): the title, the
@@ -1589,6 +1624,27 @@ mod tests {
         ));
         let _ = plain.update(Msg::Rule(true));
         assert!(!plain.answer().contains("rule"));
+    }
+
+    #[test]
+    fn optional_preset_access_has_a_separate_page_and_keeps_its_choice() {
+        let req = parse_request(
+            "title\tFirefox\nnet\toffline\tOffline\tselected\ncontainer\tmain\tHome\tselected\n\
+             offer\tcamera=on\tCamera\n",
+        );
+        let mut window = Window::new(req);
+        assert!(!window.show_offers);
+        let _ = window.update(Msg::ShowOffers(true));
+        assert!(window.show_offers);
+        let _ = window.update(Msg::Offer(0, true));
+        let _ = window.update(Msg::ShowOffers(false));
+        assert!(!window.show_offers);
+        assert!(window.answer().contains("offer\tcamera=on\n"));
+        let mut no_offers = Window::new(parse_request(
+            "net\toffline\tOffline\tselected\ncontainer\tmain\tHome\tselected\n",
+        ));
+        let _ = no_offers.update(Msg::ShowOffers(true));
+        assert!(!no_offers.show_offers);
     }
 
     /// A preset's offers: unticked, each answered only when ticked; a line

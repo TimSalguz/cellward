@@ -15,8 +15,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - Launching a program that is already running now asks whether to focus its
   existing window, open another in the same container, or choose a different
   container/network for an independent copy. This uses live launch records,
-  not a browser/terminal allowlist. The launch window calls preset suggestions
-  optional container access instead of showing an unexplained preset notice.
+  not a browser/terminal allowlist. The launch window keeps optional preset
+  permissions on a separate page instead of showing them below every launch.
 - Fullscreen windows now reveal the zone/container title when the pointer
   reaches their top edge by default. The initial three-second label remains;
   `cellward frame fullscreen title off` still disables hover explicitly.

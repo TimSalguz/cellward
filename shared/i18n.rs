@@ -46,6 +46,8 @@ pub enum Key {
     UnconfinedWarning,
     NoContainer,
     PresetOffer,
+    OptionalAccess,
+    Back,
     Wait,
     Start,
     StartIn,
@@ -94,6 +96,10 @@ pub fn text(language: Language, key: Key) -> &'static str {
         (Language::Russian, PresetOffer) => {
             "Дополнительный доступ для выбранного контейнера (необязательно):"
         }
+        (Language::English, OptionalAccess) => "Optional access…",
+        (Language::Russian, OptionalAccess) => "Дополнительный доступ…",
+        (Language::English, Back) => "← Back",
+        (Language::Russian, Back) => "← Назад",
         (Language::English, Wait) => "One moment…",
         (Language::Russian, Wait) => "Секунду…",
         (Language::English, Start) => "Start  Enter",
@@ -149,6 +155,8 @@ mod tests {
             UnconfinedWarning,
             NoContainer,
             PresetOffer,
+            OptionalAccess,
+            Back,
             Wait,
             Start,
             StartIn,
