@@ -93,7 +93,15 @@ pub fn defaults(tools: &Tools) -> String {
     let (hermetic, hermetic_source) = crate::hermetic::default_setting(&tools.config);
     // The zones' borders: whether the switch shows them (local only — it is
     // flipped for a call and back, `crate::frame`), and their width.
-    let (_, frames_source) = setting(tools, crate::frame::SWITCH_SETTING, "shown");
+    let (_, mut frames_source) = setting(tools, crate::frame::SWITCH_SETTING, "shown");
+    if crate::cli::read_setting(&crate::frame::override_path(
+        &tools.config,
+        crate::frame::SWITCH_SETTING,
+    ))
+    .is_some()
+    {
+        frames_source = Source::Local;
+    }
     let frames = !crate::frame::hidden(&tools.config);
     let (frame_width, frame_width_source) = crate::frame::width(&tools.config);
     // And their title strip: always, hover or off (`crate::frame::title_mode`).

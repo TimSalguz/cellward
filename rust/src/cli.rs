@@ -463,6 +463,34 @@ pub(crate) fn reset_setting(tools: &Tools, name: &str) -> Result<(), String> {
     }
 }
 
+/// A frame preview may temporarily win over Nix without editing its
+/// declaration. Only the explicitly supported visual settings use this;
+/// ordinary security/policy settings keep Nix precedence.
+fn write_frame_preview(tools: &Tools, name: &str, value: &OsStr) -> Result<(), String> {
+    let path = crate::frame::override_path(&tools.config, name);
+    if crate::declared::declares(&tools.config, name) || path.exists() {
+        fs::create_dir_all(&tools.config).map_err(|e| e.to_string())?;
+        fs::write(&path, value.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
+    } else {
+        write_setting(tools, name, value)
+    }
+}
+
+pub(crate) fn reset_frame_preview(tools: &Tools, name: &str) -> Result<(), String> {
+    for path in [
+        crate::frame::override_path(&tools.config, name),
+        tools.config.join(name),
+    ] {
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("{}: {e}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// A zone name, which is stricter still: it ends up in unit names and in
 /// generated `.desktop` files.
 pub(crate) fn safe_zone_name(name: &OsStr) -> bool {
@@ -4578,19 +4606,6 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
         Source::Nix => format!(" (задано в Nix: {nix})"),
         Source::Default => " (умолчание)".to_owned(),
     };
-    // `default`: the local setting dropped — refused when Nix declares it,
-    // as a new value would be.
-    let reset = |name: &str| -> Result<(), String> {
-        if crate::declared::declares(&tools.config, name) {
-            return Err(format!(
-                "«{name}» задано в Nix (programs.cellward) и меняется там"
-            ));
-        }
-        match fs::remove_file(tools.config.join(name)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-            _ => Ok(()),
-        }
-    };
     match args.first().and_then(|a| a.to_str()) {
         None => {
             let (width, source) = crate::frame::width(&tools.config);
@@ -4673,10 +4688,10 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 }
             };
             let written = if value == "default" {
-                reset(name)
+                reset_frame_preview(tools, name)
             } else {
                 match word {
-                    Some(word) => write_setting(tools, name, OsStr::new(&word)),
+                    Some(word) => write_frame_preview(tools, name, OsStr::new(&word)),
                     None => {
                         let hint = match what {
                             "width" => format!("толщина — same, целое от 0 до {MAX_WIDTH} или default"),
@@ -4734,12 +4749,14 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                reset(FULLSCREEN_BUTTON_SETTING)
+                reset_frame_preview(tools, FULLSCREEN_BUTTON_SETTING)
             } else {
                 match FullscreenButton::parse(value) {
-                    Some(b) => {
-                        write_setting(tools, FULLSCREEN_BUTTON_SETTING, OsStr::new(b.as_str()))
-                    }
+                    Some(b) => write_frame_preview(
+                        tools,
+                        FULLSCREEN_BUTTON_SETTING,
+                        OsStr::new(b.as_str()),
+                    ),
                     None => {
                         eprintln!("кнопка полного экрана — one, two, menu, none или default");
                         return 1;
@@ -4764,10 +4781,12 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                reset(DOUBLE_CLICK_SETTING)
+                reset_frame_preview(tools, DOUBLE_CLICK_SETTING)
             } else {
                 match DoubleClick::parse(value) {
-                    Some(d) => write_setting(tools, DOUBLE_CLICK_SETTING, OsStr::new(d.as_str())),
+                    Some(d) => {
+                        write_frame_preview(tools, DOUBLE_CLICK_SETTING, OsStr::new(d.as_str()))
+                    }
                     None => {
                         eprintln!("двойной клик — maximize, none или default");
                         return 1;
@@ -4792,10 +4811,12 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                reset(STYLE_SETTING)
+                reset_frame_preview(tools, STYLE_SETTING)
             } else {
                 match Style::parse(value) {
-                    Some(style) => write_setting(tools, STYLE_SETTING, OsStr::new(style.as_str())),
+                    Some(style) => {
+                        write_frame_preview(tools, STYLE_SETTING, OsStr::new(style.as_str()))
+                    }
                     None => {
                         eprintln!("вид рамки — soft, full, tag или default");
                         return 1;
@@ -4820,10 +4841,12 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                reset(BUTTONS_SETTING)
+                reset_frame_preview(tools, BUTTONS_SETTING)
             } else {
                 match ButtonStyle::parse(value) {
-                    Some(look) => write_setting(tools, BUTTONS_SETTING, OsStr::new(look.as_str())),
+                    Some(look) => {
+                        write_frame_preview(tools, BUTTONS_SETTING, OsStr::new(look.as_str()))
+                    }
                     None => {
                         eprintln!(
                             "кнопки — cellward, gnome, kde, macos, windows, none или default"
@@ -4856,7 +4879,7 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 (RADIUS_SETTING, MAX_RADIUS)
             };
             let written = if value == "default" {
-                reset(name)
+                reset_frame_preview(tools, name)
             } else {
                 let parsed = if outer {
                     crate::frame::parse_outer_radius(value)
@@ -4864,7 +4887,7 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                     crate::frame::parse_radius(value)
                 };
                 match parsed {
-                    Some(r) => write_setting(tools, name, OsStr::new(&r.word())),
+                    Some(r) => write_frame_preview(tools, name, OsStr::new(&r.word())),
                     None => {
                         eprintln!("скругление — целое от 0 до {max}, niri или default");
                         return 1;
@@ -4907,19 +4930,12 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                if crate::declared::declares(&tools.config, TITLE_SETTING) {
-                    Err(format!(
-                        "«{TITLE_SETTING}» задано в Nix (programs.cellward) и меняется там"
-                    ))
-                } else {
-                    match fs::remove_file(tools.config.join(TITLE_SETTING)) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-                        _ => Ok(()),
-                    }
-                }
+                reset_frame_preview(tools, TITLE_SETTING)
             } else {
                 match TitleMode::parse(value) {
-                    Some(mode) => write_setting(tools, TITLE_SETTING, OsStr::new(mode.as_str())),
+                    Some(mode) => {
+                        write_frame_preview(tools, TITLE_SETTING, OsStr::new(mode.as_str()))
+                    }
                     None => {
                         eprintln!("заголовок — always, hover, off или default");
                         return 1;
@@ -4940,7 +4956,7 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
         }
         Some(verb @ ("show" | "hide")) => {
             let value = if verb == "hide" { "hidden" } else { "shown" };
-            if let Err(e) = write_setting(tools, SWITCH_SETTING, OsStr::new(value)) {
+            if let Err(e) = write_frame_preview(tools, SWITCH_SETTING, OsStr::new(value)) {
                 eprintln!("не записать {e}");
                 return 1;
             }
@@ -4960,20 +4976,11 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             };
             let written = if value == "default" {
-                if crate::declared::declares(&tools.config, WIDTH_SETTING) {
-                    Err(format!(
-                        "«{WIDTH_SETTING}» задано в Nix (programs.cellward) и меняется там"
-                    ))
-                } else {
-                    match fs::remove_file(tools.config.join(WIDTH_SETTING)) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
-                        _ => Ok(()),
-                    }
-                }
+                reset_frame_preview(tools, WIDTH_SETTING)
             } else {
                 match value.parse::<i32>() {
                     Ok(w) if (0..=MAX_WIDTH).contains(&w) => {
-                        write_setting(tools, WIDTH_SETTING, OsStr::new(&w.to_string()))
+                        write_frame_preview(tools, WIDTH_SETTING, OsStr::new(&w.to_string()))
                     }
                     _ => {
                         eprintln!("толщина — целое от 0 до {MAX_WIDTH} или default");
@@ -5004,24 +5011,32 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             }
             let name = name.to_string_lossy();
-            if crate::frame::zone_color(&tools.state, &tools.config, &name).1 == Source::Nix {
-                eprintln!(
-                    "цвет зоны {name} задан в Nix (programs.cellward.frame.colors) и меняется там"
-                );
-                return 1;
-            }
             let file = dir.join(COLOR_FILE);
             let written = if value == "default" {
-                match fs::remove_file(&file) {
-                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                    _ => Ok(()),
+                let mut result = Ok(());
+                for path in [crate::frame::override_path(&dir, COLOR_FILE), file.clone()] {
+                    if let Err(e) = fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            result = Err(e);
+                            break;
+                        }
+                    }
                 }
+                result
             } else {
                 let Some(color) = Rgb::parse(value) else {
                     eprintln!("цвет — #rrggbb (например, #3366ff) или default");
                     return 1;
                 };
-                fs::write(&file, color.hex())
+                let override_path = crate::frame::override_path(&dir, COLOR_FILE);
+                let path = if crate::frame::declared_zone_color(&tools.config, &name).is_some()
+                    || override_path.exists()
+                {
+                    override_path
+                } else {
+                    file.clone()
+                };
+                fs::write(&path, color.hex())
             };
             if let Err(e) = written {
                 eprintln!("не записать {}: {e}", file.display());

@@ -35,6 +35,34 @@ fn row(key: &str, label: &str, choices: &[(&str, &str)]) -> Perm {
     }
 }
 
+fn setting_row(
+    config: &std::path::Path,
+    name: &str,
+    label: &str,
+    choices: &[(&str, &str)],
+) -> Perm {
+    let mut perm = row(name, label, choices);
+    let file = match name {
+        "show" => crate::frame::SWITCH_SETTING,
+        "width" => crate::frame::WIDTH_SETTING,
+        "style" => crate::frame::STYLE_SETTING,
+        "title" => crate::frame::TITLE_SETTING,
+        "buttons" => crate::frame::BUTTONS_SETTING,
+        "radius" => crate::frame::RADIUS_SETTING,
+        "outer-radius" => crate::frame::OUTER_RADIUS_SETTING,
+        "fullscreen-button" => crate::frame::FULLSCREEN_BUTTON_SETTING,
+        "double-click" => crate::frame::DOUBLE_CLICK_SETTING,
+        _ => name,
+    };
+    let reset = if crate::declared::declares(config, file) {
+        "вернуть как в Nix"
+    } else {
+        "сбросить настройку"
+    };
+    perm.choices.push(("default".into(), reset.into()));
+    perm
+}
+
 /// `choices` with `now` among them: a value set by hand that none of them
 /// is shown as itself.
 fn with(mut perm: Perm, now: &str) -> Perm {
@@ -53,7 +81,6 @@ pub fn rows(
     record: Option<&str>,
 ) -> (Vec<Perm>, Vec<(String, String, bool)>) {
     let c = &tools.config;
-    let nix = |s: Source| s == Source::Nix;
     let mut perms = Vec::new();
     let mut values = Vec::new();
     let mut push = |perm: Perm, now: String, fixed: bool| {
@@ -62,7 +89,8 @@ pub fn rows(
     };
     let shown = if crate::frame::hidden(c) { "off" } else { "on" };
     push(
-        row(
+        setting_row(
+            c,
             "show",
             "Рамки окон",
             &[("on", "рисовать"), ("off", "спрятать")],
@@ -70,9 +98,10 @@ pub fn rows(
         shown.to_owned(),
         false,
     );
-    let (width, s) = crate::frame::width(c);
+    let (width, _) = crate::frame::width(c);
     push(
-        row(
+        setting_row(
+            c,
             "width",
             "Толщина",
             &[
@@ -86,11 +115,12 @@ pub fn rows(
             ],
         ),
         width.to_string(),
-        nix(s),
+        false,
     );
-    let (style, s) = crate::frame::style(c);
+    let (style, _) = crate::frame::style(c);
     push(
-        row(
+        setting_row(
+            c,
             "style",
             "Вид",
             &[
@@ -100,11 +130,12 @@ pub fn rows(
             ],
         ),
         style.as_str().to_owned(),
-        nix(s),
+        false,
     );
-    let (title, s) = crate::frame::title_mode(c);
+    let (title, _) = crate::frame::title_mode(c);
     push(
-        row(
+        setting_row(
+            c,
             "title",
             "Заголовок",
             &[
@@ -114,11 +145,12 @@ pub fn rows(
             ],
         ),
         title.as_str().to_owned(),
-        nix(s),
+        false,
     );
-    let (buttons, s) = crate::frame::buttons(c);
+    let (buttons, _) = crate::frame::buttons(c);
     push(
-        row(
+        setting_row(
+            c,
             "buttons",
             "Кнопки",
             &[
@@ -131,15 +163,16 @@ pub fn rows(
             ],
         ),
         buttons.as_str().to_owned(),
-        nix(s),
+        false,
     );
-    let (radius, s) = crate::frame::radius(c);
+    let (radius, _) = crate::frame::radius(c);
     let radius = match radius {
         crate::frame::Radius::Px(px) => px.to_string(),
         crate::frame::Radius::Niri(_) => "niri".to_owned(),
     };
     push(
-        row(
+        setting_row(
+            c,
             "radius",
             "Скругление окна",
             &[
@@ -151,15 +184,16 @@ pub fn rows(
             ],
         ),
         radius,
-        nix(s),
+        false,
     );
-    let (outer, s) = crate::frame::outer_radius(c);
+    let (outer, _) = crate::frame::outer_radius(c);
     let outer = match outer {
         crate::frame::Radius::Px(px) => px.to_string(),
         crate::frame::Radius::Niri(_) => "niri".to_owned(),
     };
     push(
-        row(
+        setting_row(
+            c,
             "outer-radius",
             "Скругление рамки снаружи",
             &[
@@ -174,11 +208,12 @@ pub fn rows(
             ],
         ),
         outer,
-        nix(s),
+        false,
     );
-    let (button, s) = crate::frame::fullscreen_button(c);
+    let (button, _) = crate::frame::fullscreen_button(c);
     push(
-        row(
+        setting_row(
+            c,
             "fullscreen-button",
             "Кнопка полного экрана",
             &[
@@ -189,17 +224,18 @@ pub fn rows(
             ],
         ),
         button.as_str().to_owned(),
-        nix(s),
+        false,
     );
-    let (click, s) = crate::frame::double_click(c);
+    let (click, _) = crate::frame::double_click(c);
     push(
-        row(
+        setting_row(
+            c,
             "double-click",
             "Двойной клик по заголовку",
             &[("maximize", "развернуть"), ("none", "ничего")],
         ),
         click.as_str().to_owned(),
-        nix(s),
+        false,
     );
     if let Some(zone) = zone.filter(|z| {
         crate::cli::safe_zone_name(std::ffi::OsStr::new(z)) && tools.state.join(z).is_dir()
@@ -210,12 +246,12 @@ pub fn rows(
         } else {
             color.hex().to_uppercase()
         };
-        let mut choices = vec![(ZONE_COLOR, "цвет по имени сети")];
+        let mut choices = vec![(ZONE_COLOR, "как в Nix или по имени сети")];
         choices.extend(COLORS);
         push(
             row("zone-color", &format!("Цвет сети «{zone}»"), &choices),
             now,
-            nix(source),
+            false,
         );
     }
     if let Some(record) = record.filter(|r| *r != crate::container::MAIN_RECORD) {
@@ -240,7 +276,7 @@ pub fn request(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Strin
     let (perms, values) = rows(tools, zone, record);
     let of = PermOf {
         tag: "this".to_owned(),
-        scope: "Вид и скругления — для всех окон; цвет сети — для всех её окон, цвет контейнера — только для него. После сохранения сразу у открытых окон тоже"
+        scope: "Вид и скругления — для всех окон; цвет сети — для всех её окон, цвет контейнера — только для него. Изменение поверх Nix действует сразу; «вернуть как в Nix» снимает его. Закрепление в Nix — отдельно в stillconf."
             .to_owned(),
         values,
     };
@@ -278,7 +314,16 @@ pub fn apply(
                 );
                 continue;
             }
-            "show" => vec![if value == "off" { "hide" } else { "show" }.into()],
+            "show" => {
+                if value == "default" {
+                    if crate::cli::reset_frame_preview(tools, crate::frame::SWITCH_SETTING).is_err()
+                    {
+                        said.push("Рамки: не удалось вернуть настройку из Nix".into());
+                    }
+                    continue;
+                }
+                vec![if value == "off" { "hide" } else { "show" }.into()]
+            }
             "width" | "style" | "title" | "buttons" | "radius" | "outer-radius"
             | "fullscreen-button" | "double-click" => vec![key.into(), value.into()],
             _ => continue,
@@ -390,18 +435,92 @@ mod tests {
                 .join(crate::frame::DECLARED_COLORS),
             "nl #123456\n",
         );
+        for (name, nix) in [
+            (crate::frame::WIDTH_SETTING, "3"),
+            (crate::frame::RADIUS_SETTING, "4"),
+            (crate::frame::OUTER_RADIUS_SETTING, "8"),
+            (crate::frame::TITLE_SETTING, "always"),
+            (crate::frame::STYLE_SETTING, "full"),
+            (crate::frame::BUTTONS_SETTING, "kde"),
+            (crate::frame::FULLSCREEN_BUTTON_SETTING, "two"),
+            (crate::frame::DOUBLE_CLICK_SETTING, "none"),
+            (crate::frame::SWITCH_SETTING, "hidden"),
+        ] {
+            crate::declared::declare(&tools.config.join(crate::cli::DECLARED_DIR).join(name), nix);
+        }
         let (_, values) = rows(&tools, Some("nl"), None);
         assert!(values
             .iter()
-            .any(|(key, color, fixed)| key == "zone-color" && color == "#123456" && *fixed));
+            .any(|(key, color, fixed)| key == "zone-color" && color == "#123456" && !*fixed));
+        assert_eq!(value(&values, "width"), "3");
+        assert_eq!(value(&values, "title"), "always");
+        assert_eq!(value(&values, "show"), "off");
         assert!(apply(
             &tools,
             Some("nl"),
             None,
-            &[("zone-color".into(), "#D94C4C".into())]
+            &[
+                ("zone-color".into(), "#D94C4C".into()),
+                ("width".into(), "8".into()),
+                ("radius".into(), "12".into()),
+                ("outer-radius".into(), "16".into()),
+                ("title".into(), "hover".into()),
+                ("style".into(), "soft".into()),
+                ("buttons".into(), "macos".into()),
+                ("fullscreen-button".into(), "menu".into()),
+                ("double-click".into(), "maximize".into()),
+                ("show".into(), "on".into()),
+            ]
         )
-        .iter()
-        .any(|message| message.contains("не изменён")));
+        .is_empty());
+        let (_, values) = rows(&tools, Some("nl"), None);
+        for (key, value) in [
+            ("zone-color", "#D94C4C"),
+            ("width", "8"),
+            ("radius", "12"),
+            ("outer-radius", "16"),
+            ("title", "hover"),
+            ("style", "soft"),
+            ("buttons", "macos"),
+            ("fullscreen-button", "menu"),
+            ("double-click", "maximize"),
+            ("show", "on"),
+        ] {
+            assert_eq!(self::value(&values, key), value);
+        }
+        assert!(apply(
+            &tools,
+            Some("nl"),
+            None,
+            &[
+                ("zone-color".into(), "default".into()),
+                ("width".into(), "default".into()),
+                ("radius".into(), "default".into()),
+                ("outer-radius".into(), "default".into()),
+                ("title".into(), "default".into()),
+                ("style".into(), "default".into()),
+                ("buttons".into(), "default".into()),
+                ("fullscreen-button".into(), "default".into()),
+                ("double-click".into(), "default".into()),
+                ("show".into(), "default".into()),
+            ]
+        )
+        .is_empty());
+        let (_, values) = rows(&tools, Some("nl"), None);
+        for (key, value) in [
+            ("zone-color", "#123456"),
+            ("width", "3"),
+            ("radius", "4"),
+            ("outer-radius", "8"),
+            ("title", "always"),
+            ("style", "full"),
+            ("buttons", "kde"),
+            ("fullscreen-button", "two"),
+            ("double-click", "none"),
+            ("show", "off"),
+        ] {
+            assert_eq!(self::value(&values, key), value);
+        }
         let request = request(&tools, Some("nl"), None);
         assert!(
             request.starts_with("block\tРамка\nmode\tperms\n"),

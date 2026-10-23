@@ -29,10 +29,10 @@
 //! radius that keeps the curves concentric: niri's less the border, at the
 //! top less the title strip too where it takes room.
 //!
-//! Where a setting comes from, as for the others: Nix (`declared/`) over the
-//! local one, the local one over the default. The switch has no Nix option —
-//! it is flipped for a call and back, and a switch declared in Nix could not
-//! be.
+//! A frame-only `.override` file is an explicit local preview over Nix. It is
+//! separate from old local files so an old value does not wake up on upgrade:
+//! preview > Nix (`declared/`) > ordinary local file > default. The CLI's
+//! `default` removes the preview and old local file, restoring Nix when set.
 //!
 //! None of this is a trust boundary (`docs/WINDOW-FRAME.md` §5.9): a program
 //! can put a popup of its own over the border. The files are out of a zone's
@@ -47,6 +47,14 @@ use crate::container::Source;
 
 /// The per-zone colour, in the zone's directory: `#rrggbb`.
 pub const COLOR_FILE: &str = "frame-color";
+/// Explicit local experiment over a Nix-declared frame value. Kept apart
+/// from legacy local files so an old, previously shadowed value cannot
+/// suddenly become active after an upgrade.
+pub const OVERRIDE_SUFFIX: &str = ".override";
+
+pub fn override_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}{OVERRIDE_SUFFIX}"))
+}
 /// The colours declared in Nix, below `declared/`: `<zone> #rrggbb` per line.
 pub const DECLARED_COLORS: &str = "frame-colors";
 /// The width, a setting file of the config directory (logical pixels).
@@ -266,14 +274,14 @@ pub(crate) fn hsv(h: f64, s: f64, v: f64) -> Rgb {
 /// zone's own file (`vpn-zone frame color`), or [`default_color`]. A value
 /// that does not parse is skipped, as if it were not there.
 pub fn zone_color(state: &Path, config: &Path, zone: &str) -> (Rgb, Source) {
-    if let Ok(text) = crate::declared::read(&config.join(DECLARED_DIR).join(DECLARED_COLORS)) {
-        let declared = text.lines().find_map(|line| {
-            let (name, color) = line.trim().split_once(char::is_whitespace)?;
-            (name == zone).then(|| Rgb::parse(color)).flatten()
-        });
-        if let Some(color) = declared {
-            return (color, Source::Nix);
-        }
+    if let Some(color) = read_setting(&override_path(&state.join(zone), COLOR_FILE))
+        .as_deref()
+        .and_then(Rgb::parse)
+    {
+        return (color, Source::Local);
+    }
+    if let Some(color) = declared_zone_color(config, zone) {
+        return (color, Source::Nix);
     }
     if let Some(color) = read_setting(&state.join(zone).join(COLOR_FILE))
         .as_deref()
@@ -282,6 +290,14 @@ pub fn zone_color(state: &Path, config: &Path, zone: &str) -> (Rgb, Source) {
         return (color, Source::Local);
     }
     (default_color(zone), Source::Default)
+}
+
+pub fn declared_zone_color(config: &Path, zone: &str) -> Option<Rgb> {
+    let text = crate::declared::read(&config.join(DECLARED_DIR).join(DECLARED_COLORS)).ok()?;
+    text.lines().find_map(|line| {
+        let (name, color) = line.trim().split_once(char::is_whitespace)?;
+        (name == zone).then(|| Rgb::parse(color)).flatten()
+    })
 }
 
 /// A width setting file's text: `None` when absent or not a width.
@@ -295,6 +311,9 @@ fn width_file(text: Option<String>) -> Option<i32> {
 
 /// The border's width in logical pixels and where it comes from.
 pub fn width(config: &Path) -> (i32, Source) {
+    if let Some(w) = width_file(read_setting(&override_path(config, WIDTH_SETTING))) {
+        return (w, Source::Local);
+    }
     let declared = crate::declared::setting(&config.join(DECLARED_DIR).join(WIDTH_SETTING));
     if let Some(w) = width_file(declared) {
         return (w, Source::Nix);
@@ -315,7 +334,8 @@ pub fn hidden(config: &Path) -> bool {
     if !config.is_absolute() {
         return false;
     }
-    let value = crate::declared::setting(&config.join(DECLARED_DIR).join(SWITCH_SETTING))
+    let value = read_setting(&override_path(config, SWITCH_SETTING))
+        .or_else(|| crate::declared::setting(&config.join(DECLARED_DIR).join(SWITCH_SETTING)))
         .or_else(|| read_setting(&config.join(SWITCH_SETTING)));
     value.is_some_and(|v| v.trim() == "hidden")
 }
@@ -360,6 +380,9 @@ impl TitleMode {
 /// mode is skipped, as if it were not there.
 pub fn title_mode(config: &Path) -> (TitleMode, Source) {
     let file = |text: Option<String>| text.as_deref().and_then(TitleMode::parse);
+    if let Some(mode) = file(read_setting(&override_path(config, TITLE_SETTING))) {
+        return (mode, Source::Local);
+    }
     if let Some(mode) = file(crate::declared::setting(
         &config.join(DECLARED_DIR).join(TITLE_SETTING),
     )) {
@@ -475,6 +498,12 @@ fn word_setting<T>(
     parse: impl Fn(&str) -> Option<T>,
     default: T,
 ) -> (T, Source) {
+    if let Some(value) = read_setting(&override_path(config, name))
+        .as_deref()
+        .and_then(&parse)
+    {
+        return (value, Source::Local);
+    }
     let declared = crate::declared::setting(&config.join(DECLARED_DIR).join(name));
     if let Some(value) = declared.as_deref().and_then(&parse) {
         return (value, Source::Nix);
@@ -1094,6 +1123,11 @@ mod tests {
         assert_eq!(width(&config), (7, Source::Local));
         crate::declared::declare(&config.join(DECLARED_DIR).join(WIDTH_SETTING), "2\n");
         assert_eq!(width(&config), (2, Source::Nix));
+        fs::write(override_path(&config, WIDTH_SETTING), "9").unwrap();
+        assert_eq!(width(&config), (9, Source::Local));
+        fs::write(override_path(&config, WIDTH_SETTING), "invalid").unwrap();
+        assert_eq!(width(&config), (2, Source::Nix));
+        fs::remove_file(override_path(&config, WIDTH_SETTING)).unwrap();
         for bad in ["-3", "33", "wide", ""] {
             crate::declared::declare(&config.join(DECLARED_DIR).join(WIDTH_SETTING), bad);
             assert_eq!(width(&config), (7, Source::Local), "{bad:?}");
@@ -1258,6 +1292,9 @@ mod tests {
         assert_eq!(buttons(&config), (ButtonStyle::Windows, Source::Nix));
         assert_eq!(style(&config), (Style::Full, Source::Nix));
         assert_eq!(radius(&config), (Radius::Px(16), Source::Nix));
+        fs::write(override_path(&config, RADIUS_SETTING), "8").unwrap();
+        assert_eq!(radius(&config), (Radius::Px(8), Source::Local));
+        fs::remove_file(override_path(&config, RADIUS_SETTING)).unwrap();
         // Not theirs: as if not there.
         crate::declared::declare(&declared.join(BUTTONS_SETTING), "beos");
         crate::declared::declare(&declared.join(STYLE_SETTING), "glass");

@@ -6,10 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Frame-menu appearance controls, including `always`/`hover` title mode,
+  can now preview local values over Nix declarations. A separate override
+  file avoids activating old shadowed local settings; Reset restores the Nix
+  value. This applies to frame width, radii, style, buttons, fullscreen
+  button, double-click action and network colour, without changing the
+  precedence of isolation/security settings.
 - The frame's own menu now offers both inner and outer corner radii and
   separate colours for the current network and its container. Changes take
-  effect on open windows after Save; Nix-declared network colours are shown
-  read-only instead of accepting an ineffective local override.
+  effect on open windows after Save; the network colour can be previewed
+  over a Nix declaration without changing the declaration itself.
 - Each VPN route in Connections and chains now has an expandable packet-path
   schematic. It separates local zone/uplink crossings from remote VPN servers,
   shows the return path, DNS and latency caveats, and flags a missing or cyclic

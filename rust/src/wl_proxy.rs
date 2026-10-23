@@ -6906,6 +6906,9 @@ mod tests {
         let (frame, pixel, _) = live.changed().expect("Nix's width");
         assert_eq!(frame.width, 9);
         assert!(pixel.is_some(), "rounded corners depend on border width");
+        fs::write(crate::frame::override_path(&config, WIDTH_SETTING), "5").unwrap();
+        let (frame, _, _) = live.changed().expect("a live preview over Nix");
+        assert_eq!(frame.width, 5);
         assert_eq!(frame_message(live.setup.frame, None)[0], FRAME);
         let _ = fs::remove_dir_all(&root);
     }
