@@ -6865,7 +6865,7 @@ mod tests {
     /// local one; a change that leaves the frame as it is tells nothing.
     #[test]
     fn a_setting_written_is_the_frame_to_tell() {
-        use crate::frame::{Origin, COLOR_FILE, WIDTH_SETTING};
+        use crate::frame::{Origin, COLOR_FILE, OUTER_RADIUS_SETTING, WIDTH_SETTING};
         let root = std::env::temp_dir().join(format!("vz-live-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let (config, state) = (root.join("config"), root.join("state"));
@@ -6895,12 +6895,17 @@ mod tests {
         let (frame, pixel, _) = live.changed().expect("the colour");
         assert_eq!(frame.color, Rgb(0x12, 0x34, 0x56));
         assert!(pixel.is_some(), "the new colours");
+        fs::write(config.join(OUTER_RADIUS_SETTING), "12").unwrap();
+        let (frame, pixel, _) = live.changed().expect("the outer radius");
+        assert_eq!(frame.outer, crate::frame::Radius::Px(12));
+        assert!(pixel.is_some(), "the new corner geometry");
         crate::declared::declare(
             &config.join(crate::cli::DECLARED_DIR).join(WIDTH_SETTING),
             "9",
         );
         let (frame, pixel, _) = live.changed().expect("Nix's width");
-        assert_eq!((frame.width, pixel.is_none()), (9, true));
+        assert_eq!(frame.width, 9);
+        assert!(pixel.is_some(), "rounded corners depend on border width");
         assert_eq!(frame_message(live.setup.frame, None)[0], FRAME);
         let _ = fs::remove_dir_all(&root);
     }

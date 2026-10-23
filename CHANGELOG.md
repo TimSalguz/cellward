@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- The frame's own menu now offers both inner and outer corner radii and
+  separate colours for the current network and its container. Changes take
+  effect on open windows after Save; Nix-declared network colours are shown
+  read-only instead of accepting an ineffective local override.
 - Each VPN route in Connections and chains now has an expandable packet-path
   schematic. It separates local zone/uplink crossings from remote VPN servers,
   shows the return path, DNS and latency caveats, and flags a missing or cyclic

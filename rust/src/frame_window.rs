@@ -1,7 +1,7 @@
 //! The frame's settings in a window, from the window menu: the same rows as
 //! a container's permissions (`crate::window::render_perms`), for every
-//! window — what `cellward frame …` sets —, and the container's own frame
-//! colour. A setting Nix declares is shown, not offered.
+//! window — what `cellward frame …` sets —, the current zone's colour and
+//! the container's own frame colour. A setting Nix declares is shown, not offered.
 
 use crate::container::Source;
 use crate::tools::Tools;
@@ -11,7 +11,7 @@ use std::ffi::OsString;
 /// A container's colour kept as its zone's: no colour of its own.
 const ZONE_COLOR: &str = "default";
 
-/// The colours offered for a container, by name.
+/// The colours offered for a zone or container, by name.
 const COLORS: [(&str, &str); 9] = [
     ("#D94C4C", "красный"),
     ("#E08A3C", "оранжевый"),
@@ -44,9 +44,14 @@ fn with(mut perm: Perm, now: &str) -> Perm {
     perm
 }
 
-/// The rows, and the values as they are now: `(key, value, fixed)`. The
-/// colour's only with a container (`record`) to keep it.
-pub fn rows(tools: &Tools, record: Option<&str>) -> (Vec<Perm>, Vec<(String, String, bool)>) {
+/// The rows, and the values as they are now: `(key, value, fixed)`.
+/// Zone and container colours are separate: changing one must not silently
+/// recolour the other.
+pub fn rows(
+    tools: &Tools,
+    zone: Option<&str>,
+    record: Option<&str>,
+) -> (Vec<Perm>, Vec<(String, String, bool)>) {
     let c = &tools.config;
     let nix = |s: Source| s == Source::Nix;
     let mut perms = Vec::new();
@@ -148,6 +153,29 @@ pub fn rows(tools: &Tools, record: Option<&str>) -> (Vec<Perm>, Vec<(String, Str
         radius,
         nix(s),
     );
+    let (outer, s) = crate::frame::outer_radius(c);
+    let outer = match outer {
+        crate::frame::Radius::Px(px) => px.to_string(),
+        crate::frame::Radius::Niri(_) => "niri".to_owned(),
+    };
+    push(
+        row(
+            "outer-radius",
+            "Скругление рамки снаружи",
+            &[
+                ("0", "0"),
+                ("4", "4"),
+                ("8", "8"),
+                ("12", "12"),
+                ("16", "16"),
+                ("24", "24"),
+                ("32", "32"),
+                ("niri", "как у niri"),
+            ],
+        ),
+        outer,
+        nix(s),
+    );
     let (button, s) = crate::frame::fullscreen_button(c);
     push(
         row(
@@ -173,6 +201,23 @@ pub fn rows(tools: &Tools, record: Option<&str>) -> (Vec<Perm>, Vec<(String, Str
         click.as_str().to_owned(),
         nix(s),
     );
+    if let Some(zone) = zone.filter(|z| {
+        crate::cli::safe_zone_name(std::ffi::OsStr::new(z)) && tools.state.join(z).is_dir()
+    }) {
+        let (color, source) = crate::frame::zone_color(&tools.state, c, zone);
+        let now = if source == Source::Default {
+            ZONE_COLOR.to_owned()
+        } else {
+            color.hex().to_uppercase()
+        };
+        let mut choices = vec![(ZONE_COLOR, "цвет по имени сети")];
+        choices.extend(COLORS);
+        push(
+            row("zone-color", &format!("Цвет сети «{zone}»"), &choices),
+            now,
+            nix(source),
+        );
+    }
     if let Some(record) = record.filter(|r| *r != crate::container::MAIN_RECORD) {
         let own = crate::container::load(tools, record).and_then(|c| c.frame_color);
         let (now, fixed) = match &own {
@@ -191,12 +236,11 @@ pub fn rows(tools: &Tools, record: Option<&str>) -> (Vec<Perm>, Vec<(String, Str
 }
 
 /// The window's request.
-pub fn request(tools: &Tools, record: Option<&str>) -> String {
-    let (perms, values) = rows(tools, record);
+pub fn request(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> String {
+    let (perms, values) = rows(tools, zone, record);
     let of = PermOf {
         tag: "this".to_owned(),
-        scope: "Для всех окон всех контейнеров; цвет — только этого контейнера. Сразу, у \
-                открытых окон тоже"
+        scope: "Вид и скругления — для всех окон; цвет сети — для всех её окон, цвет контейнера — только для него. После сохранения сразу у открытых окон тоже"
             .to_owned(),
         values,
     };
@@ -206,10 +250,23 @@ pub fn request(tools: &Tools, record: Option<&str>) -> String {
 
 /// The changes the window answered, made: what was done or why not, a line
 /// each.
-pub fn apply(tools: &Tools, record: Option<&str>, changes: &[(String, String)]) -> Vec<String> {
+pub fn apply(
+    tools: &Tools,
+    zone: Option<&str>,
+    record: Option<&str>,
+    changes: &[(String, String)],
+) -> Vec<String> {
     let mut said = Vec::new();
     for (key, value) in changes {
         let args: Vec<OsString> = match key.as_str() {
+            "zone-color" => {
+                let Some(zone) = zone else { continue };
+                let args = vec!["color".into(), zone.into(), value.into()];
+                if crate::cli::frame(tools, &args) != 0 {
+                    said.push(format!("Цвет сети «{zone}» не изменён"));
+                }
+                continue;
+            }
             "color" => {
                 let Some(record) = record else { continue };
                 let color = (value != ZONE_COLOR).then_some(value.as_str());
@@ -222,8 +279,8 @@ pub fn apply(tools: &Tools, record: Option<&str>, changes: &[(String, String)]) 
                 continue;
             }
             "show" => vec![if value == "off" { "hide" } else { "show" }.into()],
-            "width" | "style" | "title" | "buttons" | "radius" | "fullscreen-button"
-            | "double-click" => vec![key.into(), value.into()],
+            "width" | "style" | "title" | "buttons" | "radius" | "outer-radius"
+            | "fullscreen-button" | "double-click" => vec![key.into(), value.into()],
             _ => continue,
         };
         if crate::cli::frame(tools, &args) != 0 {
@@ -257,50 +314,95 @@ mod tests {
     }
 
     /// The rows say the settings as they are; a change is `cellward
-    /// frame …`'s, so the next look says it; the colour only with a
-    /// container to keep it.
+    /// frame …`'s, so the next look says it; zone and container colours
+    /// are independent.
     #[test]
     fn the_frames_settings_are_shown_and_changed() {
         let base = std::env::temp_dir().join(format!("vz-frame-window-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("config")).unwrap();
+        std::fs::create_dir_all(base.join("state/nl")).unwrap();
         let tools = tools_in(&base);
-        let (perms, values) = rows(&tools, None);
-        assert!(perms.iter().all(|p| p.key != "color"));
+        let (perms, values) = rows(&tools, None, None);
+        assert!(perms
+            .iter()
+            .all(|p| p.key != "color" && p.key != "zone-color"));
         assert_eq!(perms.len(), values.len());
         assert_eq!(value(&values, "show"), "on");
         assert_eq!(value(&values, "width"), "4");
+        assert_eq!(value(&values, "outer-radius"), "0");
         assert!(values.iter().all(|(_, _, fixed)| !fixed));
         let said = apply(
             &tools,
+            None,
             None,
             &[
                 ("width".into(), "6".into()),
                 ("show".into(), "off".into()),
                 ("style".into(), "tag".into()),
+                ("outer-radius".into(), "12".into()),
                 ("color".into(), "#D94C4C".into()),
             ],
         );
         assert!(said.is_empty(), "{said:?}");
-        let (_, values) = rows(&tools, None);
+        let (_, values) = rows(&tools, None, None);
         assert_eq!(value(&values, "width"), "6");
         assert_eq!(value(&values, "show"), "off");
         assert_eq!(value(&values, "style"), "tag");
-        assert!(apply(&tools, None, &[("width".into(), "99".into())])
+        assert_eq!(value(&values, "outer-radius"), "12");
+        assert!(apply(&tools, None, None, &[("width".into(), "99".into())])
             .iter()
             .any(|l| l.contains("width")));
         // A value set by hand is a choice of its own.
         std::fs::write(tools.config.join(crate::frame::WIDTH_SETTING), "5").unwrap();
-        let (perms, _) = rows(&tools, None);
+        let (perms, _) = rows(&tools, None, None);
         let width = perms.iter().find(|p| p.key == "width").unwrap();
         assert!(width.choices.iter().any(|(v, _)| v == "5"));
-        let (perms, _) = rows(&tools, Some("work"));
+        let (perms, _) = rows(&tools, None, Some("work"));
         assert!(perms.iter().any(|p| p.key == "color"));
-        assert!(rows(&tools, Some(crate::container::MAIN_RECORD))
+        assert!(rows(&tools, None, Some(crate::container::MAIN_RECORD))
             .0
             .iter()
             .all(|p| p.key != "color"));
-        let request = request(&tools, None);
+        let (perms, values) = rows(&tools, Some("nl"), None);
+        assert!(perms.iter().any(|p| p.key == "zone-color"));
+        assert_eq!(value(&values, "zone-color"), "default");
+        assert!(apply(
+            &tools,
+            Some("nl"),
+            None,
+            &[("zone-color".into(), "#4C7AD9".into())]
+        )
+        .is_empty());
+        assert_eq!(
+            value(&rows(&tools, Some("nl"), None).1, "zone-color"),
+            "#4C7AD9"
+        );
+        assert_eq!(
+            value(&rows(&tools, Some("nl"), None).1, "outer-radius"),
+            "12"
+        );
+        std::fs::create_dir_all(tools.config.join(crate::cli::DECLARED_DIR)).unwrap();
+        crate::declared::declare(
+            &tools
+                .config
+                .join(crate::cli::DECLARED_DIR)
+                .join(crate::frame::DECLARED_COLORS),
+            "nl #123456\n",
+        );
+        let (_, values) = rows(&tools, Some("nl"), None);
+        assert!(values
+            .iter()
+            .any(|(key, color, fixed)| key == "zone-color" && color == "#123456" && *fixed));
+        assert!(apply(
+            &tools,
+            Some("nl"),
+            None,
+            &[("zone-color".into(), "#D94C4C".into())]
+        )
+        .iter()
+        .any(|message| message.contains("не изменён")));
+        let request = request(&tools, Some("nl"), None);
         assert!(
             request.starts_with("block\tРамка\nmode\tperms\n"),
             "{request}"

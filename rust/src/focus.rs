@@ -1055,7 +1055,7 @@ pub fn menu_entries(
         out.push(entry(HEADING, "Рамка — для всех окон".to_owned(), false));
         out.push(entry(
             "frame",
-            "Вид рамки: толщина, кнопки, заголовок, цвет контейнера…".to_owned(),
+            "Вид рамки: толщина, скругления, цвет сети и контейнера…".to_owned(),
             false,
         ));
     }
@@ -1483,11 +1483,12 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             let record = record
                 .as_deref()
                 .filter(|r| *r != crate::container::OPEN_RECORD);
-            let request = crate::frame_window::request(tools, record);
+            let zone = launch.as_ref().map(|l| l.zone.as_str());
+            let request = crate::frame_window::request(tools, zone, record);
             let Some(changes) = crate::window::ask_perms(&tools.window, &request) else {
                 return 0;
             };
-            let said = crate::frame_window::apply(tools, record, &changes);
+            let said = crate::frame_window::apply(tools, zone, record, &changes);
             if !said.is_empty() {
                 notify(&label, &said.join("\n"));
             }

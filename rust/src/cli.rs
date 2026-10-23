@@ -5004,6 +5004,12 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 return 1;
             }
             let name = name.to_string_lossy();
+            if crate::frame::zone_color(&tools.state, &tools.config, &name).1 == Source::Nix {
+                eprintln!(
+                    "цвет зоны {name} задан в Nix (programs.cellward.frame.colors) и меняется там"
+                );
+                return 1;
+            }
             let file = dir.join(COLOR_FILE);
             let written = if value == "default" {
                 match fs::remove_file(&file) {
