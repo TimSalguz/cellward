@@ -408,8 +408,8 @@ fn read_declared(tools: &Tools, name: &str) -> Option<(Conf, Option<Home>)> {
     read_declared_in(&tools.config, name)
 }
 
-/// A container's own frame colour (`frame_color`), Nix's word over the
-/// local one, from the config directory alone: what a launch's supervisor
+/// A container's own frame colour (`frame_color`), an explicit visual
+/// preview over Nix, from the config directory alone: what a launch's supervisor
 /// reads again when the settings change on the fly (`crate::wl_proxy`).
 pub fn frame_color_in(config: &Path, name: &str) -> Option<String> {
     let color = |conf: &[(String, String)]| {
@@ -418,12 +418,21 @@ pub fn frame_color_in(config: &Path, name: &str) -> Option<String> {
             .and_then(crate::frame::Rgb::parse)
             .map(|c| c.hex())
     };
-    read_declared_in(config, name)
-        .and_then(|(conf, _)| color(&conf))
-        .or_else(|| {
-            let local = fs::read_to_string(policy_dir_in(config, name).join(FILE)).ok()?;
-            color(&parse_conf(&local))
-        })
+    frame_color_preview(&policy_dir_in(config, name)).or_else(|| {
+        read_declared_in(config, name)
+            .and_then(|(conf, _)| color(&conf))
+            .or_else(|| {
+                let local = fs::read_to_string(policy_dir_in(config, name).join(FILE)).ok()?;
+                color(&parse_conf(&local))
+            })
+    })
+}
+
+fn frame_color_preview(policy: &Path) -> Option<String> {
+    crate::cli::read_setting(&crate::frame::override_path(policy, "frame-color"))
+        .as_deref()
+        .and_then(crate::frame::Rgb::parse)
+        .map(|color| color.hex())
 }
 
 /// [`read_declared`], from the config dir alone.
@@ -1853,17 +1862,24 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
             .and_then(crate::frame::Rgb::parse)
             .map(|c| c.hex())
     };
-    let frame_color = declared_conf
-        .and_then(color)
+    let frame_color = frame_color_preview(&policy_dir_in(&tools.config, name))
         .map(|value| Sourced {
             value,
-            source: Source::Nix,
+            source: Source::Local,
         })
         .or_else(|| {
-            color(&local).map(|value| Sourced {
-                value,
-                source: Source::Local,
-            })
+            declared_conf
+                .and_then(color)
+                .map(|value| Sourced {
+                    value,
+                    source: Source::Nix,
+                })
+                .or_else(|| {
+                    color(&local).map(|value| Sourced {
+                        value,
+                        source: Source::Local,
+                    })
+                })
         });
 
     // Read the way the sound filter reads it (`microphone::container_setting`):
@@ -2723,15 +2739,9 @@ pub fn set_focus(
 /// locally.
 pub fn set_frame_color(tools: &Tools, selector: &str, color: Option<&str>) -> Result<(), String> {
     let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
-    if container
-        .frame_color
-        .as_ref()
-        .is_some_and(|c| c.source == Source::Nix)
-    {
-        return Err(format!(
-            "цвет рамки контейнера {selector} задан в Nix — меняется там"
-        ));
-    }
+    let preview = crate::frame::override_path(&container.policy, "frame-color");
+    let declared = read_declared(tools, &container.name)
+        .is_some_and(|(conf, _)| values(&conf, "frame_color").last().is_some());
     let value = match color {
         Some(text) => Some(
             crate::frame::Rgb::parse(text)
@@ -2740,12 +2750,23 @@ pub fn set_frame_color(tools: &Tools, selector: &str, color: Option<&str>) -> Re
         ),
         None => None,
     };
-    write_key(
-        &container.policy.join(FILE),
-        "frame_color",
-        value.as_deref(),
-        true,
-    )
+    if let Some(value) = value.as_deref().filter(|_| declared || preview.exists()) {
+        fs::create_dir_all(&container.policy).map_err(|e| e.to_string())?;
+        fs::write(&preview, value).map_err(|e| e.to_string())
+    } else {
+        if color.is_none() {
+            match fs::remove_file(&preview) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+                _ => {}
+            }
+        }
+        write_key(
+            &container.policy.join(FILE),
+            "frame_color",
+            value.as_deref(),
+            true,
+        )
+    }
 }
 
 /// Give a container a microphone setting of its own (`None`: none — the
@@ -3514,6 +3535,35 @@ mod tests {
         assert!(set_frame_color(&tools, "work", Some("red")).is_err());
         set_frame_color(&tools, "work", None).unwrap();
         assert_eq!(load(&tools, "work").unwrap().frame_color, None);
+        fs::create_dir_all(tools.config.join(DECLARED)).unwrap();
+        crate::declared::declare(
+            &declared_file(&tools, "work"),
+            "home = private\nframe_color = #123456\n",
+        );
+        assert_eq!(
+            load(&tools, "work").unwrap().frame_color,
+            Some(Sourced {
+                value: "#123456".into(),
+                source: Source::Nix
+            })
+        );
+        set_frame_color(&tools, "work", Some("#D94C4C")).unwrap();
+        assert_eq!(
+            frame_color_in(&tools.config, "work"),
+            Some("#d94c4c".into())
+        );
+        assert_eq!(
+            load(&tools, "work").unwrap().frame_color,
+            Some(Sourced {
+                value: "#d94c4c".into(),
+                source: Source::Local
+            })
+        );
+        set_frame_color(&tools, "work", None).unwrap();
+        assert_eq!(
+            frame_color_in(&tools.config, "work"),
+            Some("#123456".into())
+        );
     }
 
     /// The network a program was pinned to becomes its container's

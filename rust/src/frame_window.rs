@@ -256,16 +256,16 @@ pub fn rows(
     }
     if let Some(record) = record.filter(|r| *r != crate::container::MAIN_RECORD) {
         let own = crate::container::load(tools, record).and_then(|c| c.frame_color);
-        let (now, fixed) = match &own {
-            Some(color) => (color.value.to_uppercase(), color.source == Source::Nix),
-            None => (ZONE_COLOR.to_owned(), false),
+        let now = match &own {
+            Some(color) => color.value.to_uppercase(),
+            None => ZONE_COLOR.to_owned(),
         };
-        let mut choices = vec![(ZONE_COLOR, "как у сети")];
+        let mut choices = vec![(ZONE_COLOR, "вернуть как в Nix или у сети")];
         choices.extend(COLORS);
         push(
             row("color", &format!("Цвет — контейнера «{record}»"), &choices),
             now,
-            fixed,
+            false,
         );
     }
     (perms, values)
