@@ -79,7 +79,10 @@ struct Net {
 /// path backwards; this is not a second exit from the host network.
 fn route_path(net: &Net, networks: &[Net], who: &str) -> String {
     if net.route == "system" {
-        return format!("{who} → системная зона {} (awg0) → Интернет", net.upstream);
+        return format!(
+            "{who} → системная зона {} (VPN-туннель) → Интернет",
+            net.upstream
+        );
     }
     if net.route != "chain" && net.route != "chain-user" {
         return format!("{who} → {} → Интернет", network_text(&net.name));
@@ -114,13 +117,96 @@ fn route_path(net: &Net, networks: &[Net], who: &str) -> String {
         if index > 0 {
             path.push_str(" → uplink (hostif)");
         }
-        path.push_str(&format!(" → {hop} (awg0: слой {})", index + 1));
+        path.push_str(&format!(" → {hop} (VPN-туннель: слой {})", index + 1));
     }
     for (index, hop) in hops.iter().enumerate().rev() {
         path.push_str(&format!(" → сервер {hop} (снят слой {})", index + 1));
     }
     path.push_str(" → Интернет\nОтвет ← теми же звеньями в обратном порядке");
     path
+}
+
+/// Names in packet order, from the outer tunnel's server to the innermost
+/// one. A missing/cyclic prefix must never be drawn as a working route.
+fn route_servers(net: &Net, networks: &[Net]) -> Result<Vec<String>, &'static str> {
+    if net.route == "system" {
+        return if net.upstream.is_empty() {
+            Err("не указана системная VPN-зона")
+        } else {
+            Ok(vec![net.upstream.clone()])
+        };
+    }
+    let mut inner_to_outer = vec![net.name.clone()];
+    let mut current = net;
+    for _ in 0..=networks.len() {
+        if current.route != "chain" && current.route != "chain-user" {
+            inner_to_outer.reverse();
+            return Ok(inner_to_outer);
+        }
+        if current.upstream.is_empty() || inner_to_outer.contains(&current.upstream) {
+            return Err("цикл или отсутствует внешнее звено");
+        }
+        inner_to_outer.push(current.upstream.clone());
+        if current.route == "chain" {
+            inner_to_outer.reverse();
+            return Ok(inner_to_outer);
+        }
+        current = networks
+            .iter()
+            .find(|n| n.name == current.upstream)
+            .ok_or("внешняя пользовательская VPN-зона не найдена")?;
+    }
+    Err("слишком длинная или циклическая цепочка")
+}
+
+/// A compact, truthful schematic for the connection manager. It distinguishes
+/// namespace crossings from remote servers; arrows on the second half do not
+/// mean a new plaintext exit through the host interface.
+fn route_diagram(net: &Net, networks: &[Net]) -> Vec<String> {
+    if net.kind != "zone" {
+        return Vec::new();
+    }
+    let servers = match route_servers(net, networks) {
+        Ok(servers) => servers,
+        Err(why) => return vec![format!("⚠ Схема неполна: {why}")],
+    };
+    let mut lines = if net.route == "system" {
+        vec![format!(
+            "Программа → зона {} → системный VPN {}",
+            net.name, servers[0]
+        )]
+    } else {
+        vec![format!("Программа → зона {} → её VPN-туннель", net.name)]
+    };
+    if net.route != "system" {
+        for pair in servers.iter().rev().collect::<Vec<_>>().windows(2) {
+            lines.push(format!(
+                "Локальный uplink зоны {} → туннель зоны {} · пакет остаётся зашифрованным",
+                pair[0], pair[1]
+            ));
+        }
+        lines.push(format!(
+            "Uplink внешней зоны {} → физический интерфейс",
+            servers[0]
+        ));
+    }
+    lines.push(format!(
+        "Физический интерфейс → сервер {} · для этой цепочки провайдер видит адрес первого сервера",
+        servers[0]
+    ));
+    for pair in servers.windows(2) {
+        lines.push(format!(
+            "Сервер {} → сервер {} · первое звено видит адрес следующего, не его полезную нагрузку",
+            pair[0], pair[1]
+        ));
+    }
+    lines.push(format!(
+        "Сервер {} → сайт · последнее звено видит адрес назначения; содержимое HTTPS защищено отдельно",
+        servers.last().unwrap()
+    ));
+    lines.push("Ответ ← теми же звеньями в обратном порядке; на физическом интерфейсе остаётся внешний туннель".into());
+    lines.push("DNS программ: через выбранную зону; внешний резолвер, если выбран, видит имена. Задержка каждого звена суммируется; ping здесь не измеряется.".into());
+    lines
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -778,7 +864,17 @@ fn route_preview(data: &Data, name: &str, node: &str, kind: &str, via: &str) -> 
         name
     };
     match kind {
-        "direct" => format!("Программа → {shown} (VPN-узел {node}) → Интернет"),
+        "direct" => {
+            let net = Net {
+                name: shown.into(),
+                kind: "zone".into(),
+                ..Net::default()
+            };
+            format!(
+                "VPN-узел: {node}\n{}",
+                route_diagram(&net, &data.networks).join("\n")
+            )
+        }
         "user" | "system" if !via.is_empty() => {
             let net = Net {
                 name: shown.into(),
@@ -793,8 +889,9 @@ fn route_preview(data: &Data, name: &str, node: &str, kind: &str, via: &str) -> 
                 ..Net::default()
             };
             format!(
-                "VPN-узел: {node}\n{}",
-                route_path(&net, &data.networks, "Программа")
+                "VPN-узел: {node}\n{}\n{}",
+                route_path(&net, &data.networks, "Программа"),
+                route_diagram(&net, &data.networks).join("\n")
             )
         }
         _ => "Выбери внешнее звено — тогда появится путь пакетов".into(),
@@ -929,6 +1026,7 @@ enum Msg {
     AddRouteGo,
     RouteAllow(String),
     RouteDeny(String),
+    RouteDetails(String),
     NewContainerAsk,
     NewName(String),
     NewHome(&'static str),
@@ -1017,6 +1115,8 @@ struct Panel {
     scheme_pin: Option<String>,
     scheme_hover: Option<(String, usize)>,
     scheme_focus: Option<String>,
+    /// A connection's schematic, kept open across the once-a-second reload.
+    route_details: HashSet<String>,
 }
 
 /// Run `cellward <args>` off the window's threads; its output, or why not.
@@ -1182,6 +1282,7 @@ impl Panel {
             scheme_pin: None,
             scheme_hover: None,
             scheme_focus: None,
+            route_details: HashSet::new(),
         }
     }
 
@@ -1309,6 +1410,12 @@ impl Panel {
             Msg::Fold(key) => {
                 if !self.folded.remove(&key) {
                     self.folded.insert(key);
+                }
+                Task::none()
+            }
+            Msg::RouteDetails(name) => {
+                if !self.route_details.remove(&name) {
+                    self.route_details.insert(name);
                 }
                 Task::none()
             }
@@ -1731,7 +1838,7 @@ impl Panel {
                 Task::none()
             }
             Msg::AddNodeGo => match self.pending.clone() {
-                Some(Pending::AddNode { conf, name }) if !name.trim().is_empty() => {
+                Some(Pending::AddNode { conf, name }) if route_name_ok(name.trim()) => {
                     self.act(vec!["node".into(), "add".into(), name.trim().into(), conf])
                 }
                 _ => Task::none(),
@@ -2907,8 +3014,9 @@ impl Panel {
                     .on_submit(Msg::AddNodeGo)
                     .size(14)
                     .padding(6),
+                text("Имя: латинские буквы, цифры, _ и -; не начинай с -.").size(12),
                 row![
-                    go("Сохранить без подключения", (!name.trim().is_empty()).then_some(Msg::AddNodeGo), false),
+                    go("Сохранить без подключения", route_name_ok(name.trim()).then_some(Msg::AddNodeGo), false),
                     cancel
                 ]
                 .spacing(6)
@@ -3538,6 +3646,33 @@ impl Panel {
             } else {
                 column![].into()
             };
+            let route_detail: Element<'_, Msg> = if n.kind == "zone" {
+                let open = self.route_details.contains(&n.name);
+                let mut details = column![button(
+                    text(if open {
+                        "▾ Скрыть схему пути"
+                    } else {
+                        "▸ Показать схему пути"
+                    })
+                    .size(12)
+                )
+                .padding([2, 6])
+                .style(button::text)
+                .on_press(Msg::RouteDetails(n.name.clone()))]
+                .spacing(3);
+                if open {
+                    for line in route_diagram(n, &self.data.networks) {
+                        details = details.push(
+                            text(line)
+                                .size(12)
+                                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        );
+                    }
+                }
+                details.into()
+            } else {
+                column![].into()
+            };
             // Where its programs' names go past the tunnel: a public
             // resolver is asked in clear by the VPN's server — said in red.
             let dns: Element<'_, Msg> = match self.data.dns.get(&n.name) {
@@ -3563,6 +3698,7 @@ impl Panel {
                     .spacing(8)
                     .align_y(Alignment::Center),
                     dns,
+                    route_detail,
                     buttons,
                     next_hop,
                 ]
@@ -3884,7 +4020,9 @@ mod tests {
         assert!(d.networks[0].up && !d.networks[0].locked);
         assert_eq!(d.networks[0].route, "chain");
         let path = route_path(&d.networks[0], &d.networks, "work");
-        assert!(path.contains("work → nl (awg0: слой 1) → uplink (hostif) → corp (awg0: слой 2)"));
+        assert!(path.contains(
+            "work → nl (VPN-туннель: слой 1) → uplink (hostif) → corp (VPN-туннель: слой 2)"
+        ));
         assert!(path.contains("сервер corp (снят слой 2) → сервер nl (снят слой 1)"));
         assert!(path.contains("Ответ ← теми же звеньями в обратном порядке"));
         assert!(d.networks[2].locked);
@@ -3959,7 +4097,7 @@ mod tests {
         assert!(route_args(&d, "nl", "inner", "direct", "").is_none());
         assert!(route_args(&d, "-bad", "inner", "direct", "").is_none());
         assert!(route_preview(&d, "ch", "inner", "user", "nl")
-            .contains("ch (awg0: слой 1) → uplink (hostif) → nl (awg0: слой 2)"));
+            .contains("ch (VPN-туннель: слой 1) → uplink (hostif) → nl (VPN-туннель: слой 2)"));
         let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Zones);
         panel.data = d;
         let _ = panel.update(Msg::ExtendRoute("unpublished".into()));
@@ -4133,22 +4271,67 @@ mod tests {
         let networks = vec![
             Net {
                 name: "vps".into(),
+                kind: "zone".into(),
                 upstream: "ch".into(),
                 route: "chain-user".into(),
                 ..Net::default()
             },
             Net {
                 name: "ch".into(),
+                kind: "zone".into(),
                 upstream: "nl".into(),
                 route: "chain".into(),
                 ..Net::default()
             },
         ];
         let path = route_path(&networks[0], &networks, "game");
-        assert!(path.contains("game → vps (awg0: слой 1) → uplink (hostif) → ch (awg0: слой 2) → uplink (hostif) → nl (awg0: слой 3)"));
+        assert!(path.contains("game → vps (VPN-туннель: слой 1) → uplink (hostif) → ch (VPN-туннель: слой 2) → uplink (hostif) → nl (VPN-туннель: слой 3)"));
         assert!(path.contains(
             "сервер nl (снят слой 3) → сервер ch (снят слой 2) → сервер vps (снят слой 1)"
         ));
+        assert_eq!(
+            route_servers(&networks[0], &networks),
+            Ok(vec!["nl".into(), "ch".into(), "vps".into()])
+        );
+        let diagram = route_diagram(&networks[0], &networks).join("\n");
+        assert!(diagram.contains("Физический интерфейс → сервер nl"));
+        assert!(diagram.contains("Сервер nl → сервер ch"));
+        assert!(diagram.contains("Сервер ch → сервер vps"));
+        assert!(diagram.contains("Ответ ← теми же звеньями"));
+        assert!(diagram.contains("DNS программ"));
+    }
+
+    #[test]
+    fn route_schematic_does_not_draw_a_broken_prefix_as_working() {
+        let broken = Net {
+            name: "inner".into(),
+            kind: "zone".into(),
+            route: "chain-user".into(),
+            upstream: "missing".into(),
+            ..Net::default()
+        };
+        assert!(route_diagram(&broken, &[broken.clone()])[0].starts_with("⚠"));
+        let mut cycle = broken;
+        cycle.upstream = "inner".into();
+        assert!(route_servers(&cycle, &[cycle.clone()]).is_err());
+        let borrowed = Net {
+            name: "apps".into(),
+            kind: "zone".into(),
+            route: "system".into(),
+            upstream: "home".into(),
+            ..Net::default()
+        };
+        assert_eq!(route_servers(&borrowed, &[]), Ok(vec!["home".into()]));
+        assert!(route_diagram(&borrowed, &[])[0].contains("системный VPN home"));
+        assert!(!route_diagram(&borrowed, &[])
+            .join("\n")
+            .contains("её VPN-туннель"));
+
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Zones);
+        let _ = panel.update(Msg::RouteDetails("apps".into()));
+        assert!(panel.route_details.contains("apps"));
+        let _ = panel.update(Msg::RouteDetails("apps".into()));
+        assert!(!panel.route_details.contains("apps"));
     }
 
     #[test]

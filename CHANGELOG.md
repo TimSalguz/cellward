@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Each VPN route in Connections and chains now has an expandable packet-path
+  schematic. It separates local zone/uplink crossings from remote VPN servers,
+  shows the return path, DNS and latency caveats, and flags a missing or cyclic
+  outer route rather than presenting it as working. The route-creation preview
+  shows the same details. Invalid pooled-node names cannot be submitted.
 - The Connections and chains window now offers configured system VPNs and
   published user VPN routes as selectable outer hops, previews each new
   route's packet path, and checks names and prerequisites before creation.
