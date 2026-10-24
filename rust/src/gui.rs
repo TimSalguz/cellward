@@ -80,7 +80,7 @@ pub fn main() -> ExitCode {
         b"profile-add" => panel_or(&tools, "containers", profile_add),
         b"profile-rm" => panel_or(&tools, "containers", profile_rm),
         b"settings" => panel_or(&tools, "settings", settings),
-        b"forget" => panel_or(&tools, "settings", forget),
+        b"forget" => panel_or(&tools, "defaults", forget),
         b"containers" => containers(&tools),
         b"monitor" => monitor(&tools),
         b"kill" => panel_or(&tools, "zones", kill),

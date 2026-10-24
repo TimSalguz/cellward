@@ -28,9 +28,9 @@
 //! `cellward explain` says of its permissions; a new container.
 //! **Зоны**: each zone up or down, its tunnel as the watch last found it,
 //! locked or not — to bring up, down, restart, check, lock, cut off, remove;
-//! a new zone from its config. **Настройки**: the network and the container
-//! a program is first offered, the launchers' mode, the screen's and the
-//! input's guard, and the programs pinned to a container, to forget.
+//! a new zone from its config. **Настройки**: appearance. **По умолчанию**:
+//! launch defaults with their sources and local reset, plus per-program
+//! remembered container choices, each of which can be forgotten.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -759,15 +759,17 @@ enum Tab {
     Containers,
     Zones,
     Settings,
+    Defaults,
 }
 
-const TABS: [Tab; 6] = [
+const TABS: [Tab; 7] = [
     Tab::Network,
     Tab::Scheme,
     Tab::Tasks,
     Tab::Containers,
     Tab::Zones,
     Tab::Settings,
+    Tab::Defaults,
 ];
 
 /// A launch's name for the person: its program's, else its cgroup's.
@@ -1033,6 +1035,7 @@ enum Msg {
     NewContainerGo,
     /// `cellward <setting> <value>`.
     SetSetting(&'static str, String),
+    ResetSetting(&'static str),
     SetTheme(ThemeChoice),
     Forget(String),
     ForgetAllAsk,
@@ -1935,6 +1938,7 @@ impl Panel {
                 _ => Task::none(),
             },
             Msg::SetSetting(name, value) => self.act(vec![name.to_owned(), value]),
+            Msg::ResetSetting(name) => self.act(vec!["setting-reset".into(), name.into()]),
             Msg::Forget(key) => self.act(vec!["forget".into(), key]),
             Msg::ForgetAllAsk => {
                 self.pending = Some(Pending::ForgetAll);
@@ -2059,6 +2063,7 @@ impl Panel {
             tab("Контейнеры", Tab::Containers),
             tab("Подключения", Tab::Zones),
             tab("Настройки", Tab::Settings),
+            tab("По умолчанию", Tab::Defaults),
             container(text(note).size(13)).width(Length::Fill),
             button(text("Закрыть  Esc").size(14))
                 .padding([6, 14])
@@ -2074,6 +2079,7 @@ impl Panel {
             Tab::Containers => self.view_containers(),
             Tab::Zones => self.view_zones(),
             Tab::Settings => self.view_settings(),
+            Tab::Defaults => self.view_defaults(),
         };
         let mut page = column![top].spacing(12).padding(16);
         // What the last action said, whichever tab it was in.
@@ -3724,8 +3730,8 @@ impl Panel {
             .unwrap_or_default()
     }
 
-    /// One setting's choices, the current one marked; one set in Nix is
-    /// changed there — said, and not offered.
+    /// One setting's choices, the current one marked. A local override can
+    /// be removed; a Nix declaration is read-only here.
     fn setting_row<'a>(
         &'a self,
         title: &'a str,
@@ -3756,6 +3762,14 @@ impl Panel {
         let mut block = column![text(title).size(16)].spacing(6);
         if declared {
             block = block.push(text("задано в Nix — меняется там").size(12));
+        } else if source == "local" {
+            block = block.push(
+                button(text("Отменить своё значение · вернуть исходное").size(12))
+                    .style(button::secondary)
+                    .on_press_maybe(idle.then_some(Msg::ResetSetting(name))),
+            );
+        } else {
+            block = block.push(text("исходное значение cellward").size(12));
         }
         block.push(buttons).into()
     }
@@ -3767,6 +3781,14 @@ impl Panel {
             text("Window colours only; network colours keep their meaning. Changes apply immediately.").size(12),
             pick_list(ThemeChoice::ALL.as_slice(), Some(self.theme_choice), Msg::SetTheme),
         ].spacing(6));
+        scrollable(page).height(Length::Fill).into()
+    }
+
+    fn view_defaults(&self) -> Element<'_, Msg> {
+        let mut page = column![
+            text("Настройки запуска и запомненные программы").size(18),
+            text("Изменения применяются к следующим запускам; уже открытые программы не переносятся в другой контейнер.").size(12),
+        ].spacing(16);
         if let Some(block) = self.pending.as_ref().and_then(|p| self.view_general(p)) {
             page = page.push(block);
         }
@@ -3826,7 +3848,8 @@ impl Panel {
             ],
         ));
         let idle = !self.busy && self.pending.is_none();
-        let mut pins = column![text("Закреплённые программы").size(16)].spacing(4);
+        let mut pins =
+            column![text("Запомненный выбор для отдельных программ").size(16)].spacing(4);
         if self.data.pins.is_empty() {
             pins = pins.push(text("нет — контейнер спрашивается при каждом запуске").size(13));
         }
@@ -3835,7 +3858,7 @@ impl Panel {
             pins = pins.push(
                 row![
                     text(format!("{name} → {to}")).size(13).width(Length::Fill),
-                    button(text("Забыть").size(13))
+                    button(text("Отменить выбор").size(13))
                         .padding([3, 8])
                         .style(button::secondary)
                         .on_press_maybe(idle.then(|| Msg::Forget(key.clone()))),
@@ -3897,6 +3920,7 @@ pub fn run(args: &[String]) -> iced::Result {
             "--tab" if value == "containers" => tab = Tab::Containers,
             "--tab" if value == "zones" => tab = Tab::Zones,
             "--tab" if value == "settings" => tab = Tab::Settings,
+            "--tab" if value == "defaults" => tab = Tab::Defaults,
             _ => {}
         }
     }

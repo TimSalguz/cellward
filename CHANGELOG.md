@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- The cellward panel now has a separate launch-defaults tab: it shows where
+  each value comes from, allows a local override to be reset, and lets a
+  remembered container choice be forgotten for one program. Nix-declared
+  values remain read-only. `cellward setting-reset <name>` offers the same
+  local reset for the four panel launch settings.
 - Each clipboard buffer now has a Favourites tab. Saving a clip copies it to
   encrypted per-buffer storage without changing the Wayland selection; the
   original and saved copy can be removed independently.

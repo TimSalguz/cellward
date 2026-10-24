@@ -165,6 +165,7 @@ pub fn main() -> ExitCode {
         b"mode" => mode(&tools, rest),
         b"default-profile" => default_profile(&tools, rest),
         b"default" => default_network(&tools, rest),
+        b"setting-reset" => setting_reset(&tools, rest),
         b"pins" => pins(&tools),
         b"forget" => forget(&tools, rest),
         // Hidden: the tab-completion scripts call it (rust/src/completion.rs).
@@ -461,6 +462,33 @@ pub(crate) fn reset_setting(tools: &Tools, name: &str) -> Result<(), String> {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
     }
+}
+
+/// Reset only the launch settings exposed in the panel. A caller cannot use
+/// this verb to remove arbitrary files in the configuration directory.
+fn setting_reset(tools: &Tools, args: &[OsString]) -> u8 {
+    let Some(name) = args.first().and_then(|a| a.to_str()) else {
+        eprintln!("cellward setting-reset <default|default-profile|mode|wayland-sandbox>");
+        return 1;
+    };
+    if args.len() != 1
+        || !matches!(
+            name,
+            "default" | "default-profile" | "mode" | "wayland-sandbox"
+        )
+    {
+        eprintln!("cellward setting-reset: неизвестная настройка");
+        return 1;
+    }
+    if let Err(e) = reset_setting(tools, name) {
+        eprintln!("{e}");
+        return 1;
+    }
+    println!("{name}: локальное значение сброшено");
+    if name == "mode" {
+        return run_sync(tools);
+    }
+    0
 }
 
 /// A frame preview may temporarily win over Nix without editing its
@@ -5101,7 +5129,7 @@ fn default_profile(tools: &Tools, args: &[OsString]) -> u8 {
 }
 
 fn default_network(tools: &Tools, args: &[OsString]) -> u8 {
-    let Some(value) = required(args, 0, "вариант: offline | unconfined | <имя зоны>")
+    let Some(value) = required(args, 0, "вариант: offline | host | unconfined | <имя зоны>")
     else {
         return 1;
     };
@@ -5113,6 +5141,7 @@ fn default_network(tools: &Tools, args: &[OsString]) -> u8 {
     };
     // A zone that is not there would be a row the picker does not offer.
     if value != "offline"
+        && value != "host"
         && value != launch::UNCONFINED
         && !tools.state.join(value).join("config.conf").is_file()
     {

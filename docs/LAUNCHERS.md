@@ -157,6 +157,13 @@ assign` and `cellward launch` go through the same function.
 
 ## 4. What becomes of launcher entries
 
+The cellward panel's **Defaults** tab lists the launch network and container
+defaults, launcher mode, Wayland sandbox setting, and remembered per-program
+container choices. A local default can be removed to return to cellward's
+built-in value (`cellward setting-reset <name>`); a Nix-declared value is
+read-only there. **Forget** on one program clears only its remembered launch
+choice for subsequent launches, not the container's data or running process.
+
 The owner's thought was that per-zone entries are no longer needed once every
 program lives in a container with its network. Assessment, and the decision
 (owner, 2026-09-17: **deprecate now**):
