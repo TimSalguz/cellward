@@ -50,10 +50,25 @@ can be pasted into that launch by the same explicit action as a history
 entry. Opening either tab never sets a Wayland selection.
 Marking a text clip as a password confirms its removal from ordinary history
 and saves it encrypted under that buffer's `.secrets` directory with a label.
+Matching text copies in this buffer's history and favourites are also
+removed, including copies with other text MIME types and HTML. Other buffers
+are untouched. Deletion is logical; old encrypted records leave the disk
+when their segments are merged. This is neither secure media erasure nor
+clearing the source application's clipboard.
 The list hides its contents. Explicit paste from a launch, or confirmed copy
 from the host manager, still uses the ordinary selection; it is not yet a
 protected typing channel. Text search and ordinary cross-buffer moves of
 passwords are disabled.
+"Edit…" changes the label and optionally the password without revealing the
+current contents. An empty new-password field keeps the previous text.
+Copy/paste timestamps are preserved, and matching ordinary copies of the
+new password are removed from this buffer as well.
+"Transfer password…" requires a destination and separate confirmation. The
+entry is durably saved in the destination's encrypted password shelf before
+the source is deleted; matching ordinary destination copies are removed.
+The current clipboard stays unchanged. If the password already exists there,
+its destination label is kept. A failure between saving and deletion can
+leave both copies, rather than deleting the only durable password.
 Copying an already-marked password in the same buffer is omitted from normal
 history even when its text MIME representations change. Neither the current
 selection nor counts or entry ids are changed by this match. An explicit
@@ -149,6 +164,5 @@ targets. Each operation allows 32 KiB / 8192 characters and, in Unicode mode,
 
 - **stillconf.** Add a separate clipboard page with a control for
   `programs.cellward.clipboard.history = true`; keep the default unchanged.
-- Editing stored passwords and a separate policy for cross-buffer password
-  transfers. Marking an existing history entry does not currently remove
-  copies already saved separately in favourites.
+- A compositor-level separation of host and container selections; history
+  tabs alone cannot provide that isolation.

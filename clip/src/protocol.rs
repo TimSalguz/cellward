@@ -10,6 +10,8 @@
 //! move⇥<from>⇥<id>⇥<to>                       ok⇥<new id>
 //! favorite⇥<history>⇥<id>                    ok⇥<favorite id>
 //! secret⇥<history>⇥<id>⇥<label>             ok⇥<secret id>; source removed
+//! secret-edit⇥<history>⇥<id>⇥<label>⇥<text>  ok⇥<replacement id>; empty text keeps the password
+//! secret-move⇥<from>⇥<id>⇥<to>             ok⇥<target id>; secret-only transfer, source removed
 //! search/get/delete/select with `@favorites:<history>` address that
 //! history's encrypted favourites, kept under `.favorites/` and never
 //! listed as a container history.
@@ -30,6 +32,8 @@ use crate::{Query, Summary};
 
 /// At most this many entries an answer.
 pub const MAX_LIMIT: usize = 200;
+/// Includes a percent-encoded password (at most 32 KiB) and its label.
+pub const MAX_REQUEST: usize = 128 * 1024;
 
 /// `%`, tab, line feed and `=` written as `%xx`.
 pub fn encode(text: &str) -> String {
@@ -39,6 +43,7 @@ pub fn encode(text: &str) -> String {
             '%' => out.push_str("%25"),
             '\t' => out.push_str("%09"),
             '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
             '=' => out.push_str("%3D"),
             c => out.push(c),
         }

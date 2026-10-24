@@ -190,6 +190,97 @@ impl Store {
         names
     }
 
+    fn entry(&mut self, name: &str, id: u64) -> Result<clipstore::Entry, String> {
+        self.history(name)?
+            .get(id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "записи нет".to_owned())
+    }
+
+    /// Purge matching text even when a favourite kept HTML or a different
+    /// text MIME alongside it. Other buffers are not touched implicitly.
+    fn clean_password_copies(&mut self, name: &str, content: &Content) -> Result<(), String> {
+        for shelf in [name.to_owned(), format!("@favorites:{name}")] {
+            if shelf.starts_with('@') && !self.dir.join(".favorites").join(name).is_dir() {
+                continue;
+            }
+            let history = self.history(&shelf)?;
+            let mut before = None;
+            loop {
+                let ids = history
+                    .query(&clipstore::Query::default(), before, 200)
+                    .map_err(|e| e.to_string())?;
+                if ids.is_empty() {
+                    break;
+                }
+                before = ids.iter().copied().min();
+                for id in ids {
+                    let entry = history.get(id).map_err(|e| e.to_string())?;
+                    if entry
+                        .is_some_and(|e| password_content(&e.contents).as_ref() == Some(content))
+                    {
+                        history.delete(id).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            history.sync().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn edit_secret(&mut self, name: &str, id: u64, label: &str, text: &str) -> Result<u64, String> {
+        if name.starts_with('@') {
+            return Err("нужно имя буфера, не полки".into());
+        }
+        let preview = secret_preview(label)?;
+        let text = clipstore::protocol::decode(text).ok_or("текст пароля не читается")?;
+        if text.len() > 32 * 1024 {
+            return Err("новый пароль длиннее 32 КиБ".into());
+        }
+        let secrets = format!("@secrets:{name}");
+        let entry = self.entry(&secrets, id)?;
+        let content = if text.is_empty() {
+            password_content(&entry.contents).ok_or("у пароля нет текста")?
+        } else {
+            Content {
+                mime: "text/plain;charset=utf-8".into(),
+                data: text.into_bytes(),
+            }
+        };
+        let new = self
+            .history(&secrets)?
+            .replace(id, vec![content.clone()], preview)
+            .map_err(|e| e.to_string())?
+            .ok_or("записи нет")?;
+        self.clean_password_copies(name, &content)?;
+        Ok(new)
+    }
+
+    fn move_secret(&mut self, from: &str, id: u64, to: &str) -> Result<u64, String> {
+        if from.starts_with('@') || to.starts_with('@') || from == to {
+            return Err("нужны два разных буфера".into());
+        }
+        // Validate the target before constructing any nested shelf path.
+        if !recorder::valid_history(to)
+            || to == recorder::NO_HISTORY
+            || !self.names().iter().any(|n| n == to)
+        {
+            return Err("буфера назначения нет".into());
+        }
+        let source = format!("@secrets:{from}");
+        let destination = format!("@secrets:{to}");
+        let entry = self.entry(&source, id)?;
+        let content = password_content(&entry.contents).ok_or("у пароля нет текста")?;
+        let target = self.history(&destination)?;
+        let added = target.import(&entry).map_err(|e| e.to_string())?.id();
+        target.sync().map_err(|e| e.to_string())?;
+        self.clean_password_copies(to, &content)?;
+        let source = self.history(&source)?;
+        source.delete(id).map_err(|e| e.to_string())?;
+        source.sync().map_err(|e| e.to_string())?;
+        Ok(added)
+    }
+
     /// The answer to one request line (`clipstore::protocol`).
     fn answer(&mut self, request: &str) -> Reply {
         use clipstore::protocol;
@@ -298,12 +389,10 @@ impl Store {
                 if name.starts_with('@') {
                     return error(&"паролем можно отметить только запись истории");
                 }
-                let Some(label) = protocol::decode(label) else {
-                    return error(&"метка пароля не читается");
+                let preview = match secret_preview(label) {
+                    Ok(p) => p,
+                    Err(e) => return error(&e),
                 };
-                if label.chars().count() > 80 || label.chars().any(char::is_control) {
-                    return error(&"метка пароля слишком длинная или содержит управляющие символы");
-                }
                 let entry = match self.history(name).map(|h| h.get(id)) {
                     Ok(Ok(Some(entry))) => entry,
                     Ok(Ok(None)) => return error(&"записи нет"),
@@ -317,25 +406,37 @@ impl Store {
                 let added = match self.history(&secrets).map(|h| {
                     h.append(NewEntry {
                         copied_at: entry.copied_at,
-                        contents: vec![content],
-                        preview: Some(if label.trim().is_empty() {
-                            "Пароль".to_owned()
-                        } else {
-                            format!("Пароль: {}", label.trim())
-                        }),
+                        contents: vec![content.clone()],
+                        preview: Some(preview),
+                    })
+                    .and_then(|added| {
+                        h.sync()?;
+                        Ok(added)
                     })
                 }) {
                     Ok(Ok(added)) => added,
                     Ok(Err(e)) => return error(&e),
                     Err(e) => return error(&e),
                 };
-                match self.history(name).map(|h| h.delete(id)) {
-                    Ok(Ok(true)) => Reply::Text(format!("ok\t{}\n", added.id())),
-                    Ok(Ok(false)) => error(&"запись исчезла до удаления"),
-                    Ok(Err(e)) => error(&e),
+                match self.clean_password_copies(name, &content) {
+                    Ok(()) => Reply::Text(format!("ok\t{}\n", added.id())),
                     Err(e) => error(&e),
                 }
             }
+            ["secret-edit", name, id, label, text] => match id.parse::<u64>() {
+                Ok(id) => match self.edit_secret(name, id, label, text) {
+                    Ok(id) => Reply::Text(format!("ok\t{id}\n")),
+                    Err(e) => error(&e),
+                },
+                Err(_) => error(&"не номер"),
+            },
+            ["secret-move", from, id, to] => match id.parse::<u64>() {
+                Ok(id) => match self.move_secret(from, id, to) {
+                    Ok(id) => Reply::Text(format!("ok\t{id}\n")),
+                    Err(e) => error(&e),
+                },
+                Err(_) => error(&"не номер"),
+            },
             ["delete", name, id] => {
                 let Ok(id) = id.parse::<u64>() else {
                     return error(&"не номер");
@@ -402,6 +503,18 @@ impl Store {
     }
 }
 
+fn secret_preview(encoded: &str) -> Result<String, String> {
+    let label = clipstore::protocol::decode(encoded).ok_or("метка пароля не читается")?;
+    if label.chars().count() > 80 || label.chars().any(char::is_control) {
+        return Err("метка пароля слишком длинная или содержит управляющие символы".into());
+    }
+    Ok(if label.trim().is_empty() {
+        "Пароль".into()
+    } else {
+        format!("Пароль: {}", label.trim())
+    })
+}
+
 /// One canonical representation makes a marked password recognizable when
 /// the next copy offers a different set of clipboard MIME representations.
 fn password_content(contents: &[Content]) -> Option<Content> {
@@ -460,8 +573,9 @@ fn serve(store: &mut Store, mut stream: std::os::unix::net::UnixStream) -> Optio
     let Ok(clone) = stream.try_clone() else {
         return None;
     };
-    let mut reader = std::io::BufReader::new(clone);
-    if reader.read_line(&mut line).is_err() || line.len() > 4096 {
+    let mut reader =
+        std::io::BufReader::new(clone).take(clipstore::protocol::MAX_REQUEST as u64 + 1);
+    if reader.read_line(&mut line).is_err() || line.len() > clipstore::protocol::MAX_REQUEST {
         return None;
     }
     match store.answer(&line) {
@@ -1127,6 +1241,170 @@ mod tests {
         assert!(
             matches!(store.answer("select\t@secrets:host\t1"), Reply::Select(ref c) if c.iter().any(|c| c.mime == recorder::SECRET_HINT && c.data == b"secret"))
         );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn passwords_clean_favourites_edit_and_move_only_between_secret_shelves() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("cw-secret-edit-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = Key::load_or_create(&dir.join("key")).unwrap();
+        let mut store = Store {
+            dir: dir.clone(),
+            key,
+            open: HashMap::new(),
+        };
+        let text = |s: &str, mime: &str| NewEntry {
+            copied_at: 100,
+            contents: vec![Content {
+                mime: mime.into(),
+                data: s.as_bytes().to_vec(),
+            }],
+            preview: None,
+        };
+        let ok = |reply| match reply {
+            Reply::Text(s) => s
+                .strip_prefix("ok\t")
+                .expect(&s)
+                .trim()
+                .parse::<u64>()
+                .unwrap(),
+            _ => panic!("unexpected response"),
+        };
+        let id = store
+            .history("host")
+            .unwrap()
+            .append(text("first", "text/plain"))
+            .unwrap()
+            .id();
+        let fav = ok(store.answer(&format!("favorite\thost\t{id}")));
+        // The old copy is behind more than one page, and a second MIME copy
+        // has its own id. Clean all matching text, not just one record hash.
+        for i in 0..205 {
+            store
+                .history("@favorites:host")
+                .unwrap()
+                .append(text(&format!("note-{i}"), "text/plain"))
+                .unwrap();
+        }
+        let mut rich = text("first", "UTF8_STRING");
+        rich.contents.push(Content {
+            mime: "text/html".into(),
+            data: b"<b>first</b>".to_vec(),
+        });
+        let rich_id = store
+            .history("@favorites:host")
+            .unwrap()
+            .append(rich)
+            .unwrap()
+            .id();
+        let duplicate = store
+            .history("host")
+            .unwrap()
+            .append(text("first", "UTF8_STRING"))
+            .unwrap()
+            .id();
+        let unrelated = store
+            .history("other")
+            .unwrap()
+            .append(text("first", "text/plain"))
+            .unwrap()
+            .id();
+        let secret = ok(store.answer(&format!("secret\thost\t{id}\tMail")));
+        for removed in [id, duplicate] {
+            assert!(store
+                .history("host")
+                .unwrap()
+                .get(removed)
+                .unwrap()
+                .is_none());
+        }
+        for removed in [fav, rich_id] {
+            assert!(store
+                .history("@favorites:host")
+                .unwrap()
+                .get(removed)
+                .unwrap()
+                .is_none());
+        }
+        assert!(store
+            .history("other")
+            .unwrap()
+            .get(unrelated)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            store
+                .history("@favorites:host")
+                .unwrap()
+                .query(&clipstore::Query::default(), None, 1000)
+                .unwrap()
+                .len(),
+            205
+        );
+        let renamed = ok(store.answer(&format!("secret-edit\thost\t{secret}\tNew label\t")));
+        assert_ne!(secret, renamed);
+        let entry = store.entry("@secrets:host", renamed).unwrap();
+        assert_eq!(entry.preview, "Пароль: New label");
+        assert_eq!(entry.contents[0].data, b"first");
+        assert_eq!(entry.copies, [100]);
+        assert!(store.entry("@secrets:host", secret).is_err());
+        // Invalid updates/transfers do not remove or modify the source.
+        for command in [
+            format!("secret-edit\thost\t{renamed}\tbad%0Alabel\tchanged"),
+            format!("secret-move\thost\t{renamed}\t../other"),
+            format!("secret-move\thost\t{renamed}\tmissing"),
+            format!("secret-move\thost\t{renamed}\t@favorites:other"),
+            format!("secret-move\thost\t{renamed}\thost"),
+        ] {
+            assert!(
+                matches!(store.answer(&command), Reply::Text(ref s) if s.starts_with("error\t"))
+            );
+        }
+        assert!(store.entry("@secrets:host", renamed).is_ok());
+        let replacement = store
+            .history("host")
+            .unwrap()
+            .append(text("second\r\nvalue", "text/plain"))
+            .unwrap()
+            .id();
+        let saved = ok(store.answer(&format!(
+            "secret-edit\thost\t{renamed}\tMail\tsecond%0D%0Avalue"
+        )));
+        assert!(store.entry("host", replacement).is_err());
+        assert_eq!(
+            store.entry("@secrets:host", saved).unwrap().contents[0].data,
+            b"second\r\nvalue"
+        );
+        let other_copy = store
+            .history("other")
+            .unwrap()
+            .append(text("second\r\nvalue", "UTF8_STRING"))
+            .unwrap()
+            .id();
+        let other_fav = ok(store.answer(&format!("favorite\tother\t{other_copy}")));
+        let moved = ok(store.answer(&format!("secret-move\thost\t{saved}\tother")));
+        assert!(store.entry("@secrets:host", saved).is_err());
+        assert!(store.entry("other", other_copy).is_err());
+        assert!(store.entry("@favorites:other", other_fav).is_err());
+        let entry = store.entry("@secrets:other", moved).unwrap();
+        assert_eq!(entry.preview, "Пароль: Mail");
+        assert_eq!(entry.contents[0].data, b"second\r\nvalue");
+        drop(store);
+        let key = Key::load_or_create(&dir.join("key")).unwrap();
+        let mut store = Store {
+            dir: dir.clone(),
+            key,
+            open: HashMap::new(),
+        };
+        assert_eq!(store.entry("@secrets:other", moved).unwrap(), entry);
+        assert!(store.entry("@secrets:host", saved).is_err());
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

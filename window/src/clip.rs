@@ -190,7 +190,7 @@ pub enum Msg {
     Thumb(String, u64, Result<crate::thumb::Thumb, String>),
     Fold(u64),
     MoveAsk(u64),
-    Histories(Result<Vec<String>, String>),
+    Histories(String, Result<Vec<String>, String>),
     Tabs(Result<Vec<String>, String>),
     Switch(String),
     Shelf(bool),
@@ -205,6 +205,14 @@ pub enum Msg {
     CopySecretAsk(u64),
     CopySecretYes(u64),
     CopiedSecret(Result<String, String>),
+    EditSecret(u64),
+    EditedLabel(String),
+    EditedPassword(String),
+    SaveSecret(u64),
+    SavedSecret(String, Result<String, String>),
+    TransferSecret(u64, String),
+    TransferSecretYes(u64),
+    TransferredSecret(String, Result<String, String>),
     Typing(bool),
     TypeMode(TypeMode),
     TypeDelay(&'static str, String),
@@ -297,6 +305,10 @@ pub struct Clip {
     secreting: Option<u64>,
     secret_label: String,
     copying_secret: Option<u64>,
+    editing_secret: Option<u64>,
+    edited_label: String,
+    edited_password: String,
+    transferring_secret: Option<(u64, String)>,
     launch: Option<u32>,
     type_enabled: bool,
     type_busy: bool,
@@ -484,10 +496,18 @@ impl Clip {
         self.deleting = None;
         self.secreting = None;
         self.copying_secret = None;
+        self.clear_secret_editor();
+        self.transferring_secret = None;
         self.error = None;
         self.notice = None;
         self.typed += 1;
         self.search()
+    }
+
+    fn clear_secret_editor(&mut self) {
+        self.editing_secret = None;
+        self.edited_label.clear();
+        self.edited_password.clear();
     }
 
     fn type_timing(&self) -> Result<Timing, String> {
@@ -552,6 +572,10 @@ impl Clip {
             secreting: None,
             secret_label: String::new(),
             copying_secret: None,
+            editing_secret: None,
+            edited_label: String::new(),
+            edited_password: String::new(),
+            transferring_secret: None,
             launch: None,
             type_enabled: false,
             type_busy: false,
@@ -819,6 +843,9 @@ impl Clip {
                     self.moving = None;
                     self.deleting = None;
                     self.secreting = None;
+                    self.copying_secret = None;
+                    self.clear_secret_editor();
+                    self.transferring_secret = None;
                 }
             }
             Msg::Paste(id) => {
@@ -875,26 +902,31 @@ impl Clip {
                 self.whole.remove(&id);
             }
             Msg::MoveAsk(id) => {
-                if self.secrets {
+                if self.entry(id).is_none() {
                     return Task::none();
                 }
+                self.clear_secret_editor();
+                self.transferring_secret = None;
+                self.copying_secret = None;
                 self.deleting = None;
                 self.moving = Some((id, None));
                 let socket = self.socket.clone();
+                let history = self.active_history();
                 return Task::perform(
                     clipd::off_thread(move || {
                         clipd::ask_text(&socket, "histories")
                             .map_err(|f| f.text())
                             .and_then(|a| clipd::parse_histories(&a))
                     }),
-                    |r| {
+                    move |r| {
                         Msg::Histories(
+                            history.clone(),
                             r.unwrap_or_else(|| Err("служба истории не ответила".to_owned())),
                         )
                     },
                 );
             }
-            Msg::Histories(result) => match result {
+            Msg::Histories(history, result) if history == self.active_history() => match result {
                 Ok(mut names) => {
                     if !self.favorites {
                         names.retain(|n| *n != self.history);
@@ -908,6 +940,7 @@ impl Clip {
                     self.error = Some(why);
                 }
             },
+            Msg::Histories(_, _) => {}
             Msg::Tabs(result) => match result {
                 Ok(mut names) => {
                     names.push("host".to_owned());
@@ -992,6 +1025,7 @@ impl Clip {
                         self.thumbs.remove(&id);
                         self.selected = None;
                         self.notice = Some("Перемещено в пароли этого буфера".to_owned());
+                        return self.search();
                     }
                     Err(why) => self.error = Some(why),
                 }
@@ -1018,6 +1052,87 @@ impl Clip {
                     Err(why) => self.error = Some(why),
                 }
             }
+            Msg::EditSecret(id) => {
+                if self.secrets {
+                    if let Some(entry) = self.entry(id) {
+                        self.edited_label = entry
+                            .preview
+                            .strip_prefix("Пароль: ")
+                            .unwrap_or("")
+                            .to_owned();
+                        self.edited_password.clear();
+                        self.editing_secret = Some(id);
+                        self.moving = None;
+                        self.transferring_secret = None;
+                        self.copying_secret = None;
+                        self.deleting = None;
+                    }
+                }
+            }
+            Msg::EditedLabel(value) => self.edited_label = value,
+            Msg::EditedPassword(value) => self.edited_password = value,
+            Msg::SaveSecret(id) => {
+                if !self.secrets || self.editing_secret != Some(id) {
+                    return Task::none();
+                }
+                let history = self.history.clone();
+                let request = clipd::edit_secret_request(
+                    &history,
+                    id,
+                    &self.edited_label,
+                    &self.edited_password,
+                );
+                self.clear_secret_editor();
+                return self.ok(request, move |r| Msg::SavedSecret(history.clone(), r));
+            }
+            Msg::SavedSecret(history, result) if self.secrets && history == self.history => {
+                match result {
+                    Ok(_) => {
+                        self.notice = Some("Пароль сохранён".into());
+                        return self.search();
+                    }
+                    Err(why) => self.error = Some(why),
+                }
+            }
+            Msg::SavedSecret(_, _) => {}
+            Msg::TransferSecret(id, to) => {
+                if self.secrets
+                    && to != self.history
+                    && self.entry(id).is_some()
+                    && self.moving.as_ref().is_some_and(|(entry, names)| {
+                        *entry == id && names.as_ref().is_some_and(|n| n.contains(&to))
+                    })
+                {
+                    self.transferring_secret = Some((id, to));
+                    self.moving = None;
+                }
+            }
+            Msg::TransferSecretYes(id) => {
+                if !self.secrets {
+                    return Task::none();
+                }
+                let Some((pending, to)) = self.transferring_secret.take() else {
+                    return Task::none();
+                };
+                if pending != id {
+                    return Task::none();
+                }
+                let history = self.history.clone();
+                let request = clipd::move_secret_request(&history, id, &to);
+                return self.ok(request, move |r| {
+                    Msg::TransferredSecret(history.clone(), r.map(|_| to.clone()))
+                });
+            }
+            Msg::TransferredSecret(history, result) if self.secrets && history == self.history => {
+                match result {
+                    Ok(to) => {
+                        self.notice = Some(format!("Пароль перенесён в буфер «{to}»"));
+                        return self.search();
+                    }
+                    Err(why) => self.error = Some(why),
+                }
+            }
+            Msg::TransferredSecret(_, _) => {}
             Msg::Typing(enabled) => {
                 if !self.type_busy {
                     self.type_enabled = enabled;
@@ -1165,6 +1280,9 @@ impl Clip {
                 }
             }
             Msg::MoveTo(id, to) => {
+                if self.secrets {
+                    return Task::none();
+                }
                 let request = clipd::move_request(&self.active_history(), id, &to);
                 return self.ok(request, move |r| {
                     Msg::Moved(r.map(|_| format!("Скопировано в историю «{to}»")))
@@ -1178,6 +1296,8 @@ impl Clip {
                 }
             }
             Msg::DeleteAsk(id) => {
+                self.clear_secret_editor();
+                self.transferring_secret = None;
                 self.moving = None;
                 self.deleting = Some(id);
             }
@@ -1207,6 +1327,8 @@ impl Clip {
             }
             Msg::Deleted(_, _, _) => {}
             Msg::Cancel => {
+                self.clear_secret_editor();
+                self.transferring_secret = None;
                 self.moving = None;
                 self.deleting = None;
                 self.secreting = None;
@@ -1364,11 +1486,15 @@ impl Clip {
                     || self.moving.is_some()
                     || self.secreting.is_some()
                     || self.copying_secret.is_some()
+                    || self.editing_secret.is_some()
+                    || self.transferring_secret.is_some()
                 {
                     self.deleting = None;
                     self.moving = None;
                     self.secreting = None;
                     self.copying_secret = None;
+                    self.clear_secret_editor();
+                    self.transferring_secret = None;
                 } else if self.builder_open {
                     self.builder_open = false;
                 } else if self.dates_open {
@@ -1383,6 +1509,9 @@ impl Clip {
             }
             // The builder's own fields take the arrows and Enter.
             _ if self.builder_open => {}
+            // Editing fields own Enter and the arrows; never turn them into
+            // an implicit paste or a different selected password.
+            _ if self.editing_secret.is_some() => {}
             Press::Up | Press::Down => {
                 if self.entries.is_empty() {
                     return Task::none();
@@ -1398,6 +1527,7 @@ impl Clip {
                     self.deleting = None;
                     self.secreting = None;
                     self.copying_secret = None;
+                    self.transferring_secret = None;
                 }
                 self.selected = Some(next);
                 let reveal = self.reveal();
@@ -1412,6 +1542,8 @@ impl Clip {
                     && self.moving.is_none()
                     && self.secreting.is_none()
                     && self.copying_secret.is_none()
+                    && self.editing_secret.is_none()
+                    && self.transferring_secret.is_none()
                 {
                     if let Some(e) = self.selected.and_then(|i| self.entries.get(i)) {
                         return self.update(Msg::Paste(e.id));
@@ -1779,6 +1911,41 @@ impl Clip {
     }
 
     fn actions<'a>(&'a self, e: &'a Entry) -> Element<'a, Msg> {
+        if self.editing_secret == Some(e.id) {
+            return column![
+                text("Изменить метку или задать новый пароль. Текущий пароль не раскрывается.")
+                    .size(13),
+                text_input("Метка (не сам пароль)", &self.edited_label)
+                    .on_input(Msg::EditedLabel)
+                    .size(13),
+                text_input(
+                    "Новый пароль; пусто — оставить прежний",
+                    &self.edited_password
+                )
+                .secure(true)
+                .on_input(Msg::EditedPassword)
+                .size(13),
+                row![
+                    button(text("Сохранить").size(13)).on_press(Msg::SaveSecret(e.id)),
+                    button(text("Отмена").size(13)).on_press(Msg::Cancel),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6)
+            .into();
+        }
+        if let Some((id, to)) = &self.transferring_secret {
+            if *id == e.id {
+                return column![
+                    text(format!("Перенести пароль в буфер «{to}» и удалить отсюда? Доступ будет у приложений этого буфера после вашей вставки. Совпадающие записи его истории и избранного будут скрыты.")).size(13),
+                    row![
+                        button(text("Перенести пароль").size(13)).style(button::danger)
+                            .on_press(Msg::TransferSecretYes(e.id)),
+                        button(text("Отмена").size(13)).on_press(Msg::Cancel),
+                    ].spacing(8),
+                ].spacing(6).into();
+            }
+        }
         if self.copying_secret == Some(e.id) {
             return row![
                 text(
@@ -1796,7 +1963,7 @@ impl Clip {
         }
         if self.secreting == Some(e.id) {
             return column![
-                text("Убрать запись из истории и сохранить как пароль этого буфера?").size(13),
+                text("Сохранить как пароль и убрать совпадающие записи из истории и избранного этого буфера?").size(13),
                 text_input(
                     "Метка, например «Почта» (не сам пароль)",
                     &self.secret_label
@@ -1844,9 +2011,14 @@ impl Clip {
         }
         if let Some((id, names)) = &self.moving {
             if *id == e.id {
-                let mut line = row![text("Скопировать в:").size(13)]
-                    .spacing(6)
-                    .align_y(Alignment::Center);
+                let mut line = row![text(if self.secrets {
+                    "Перенести пароль в:"
+                } else {
+                    "Скопировать в:"
+                })
+                .size(13)]
+                .spacing(6)
+                .align_y(Alignment::Center);
                 match names {
                     None => line = line.push(text("…").size(13)),
                     Some(names) if names.is_empty() => {
@@ -1857,7 +2029,11 @@ impl Clip {
                             line = line.push(
                                 button(text(n.as_str()).size(13))
                                     .style(button::secondary)
-                                    .on_press(Msg::MoveTo(e.id, n.clone())),
+                                    .on_press(if self.secrets {
+                                        Msg::TransferSecret(e.id, n.clone())
+                                    } else {
+                                        Msg::MoveTo(e.id, n.clone())
+                                    }),
                             );
                         }
                     }
@@ -1909,11 +2085,25 @@ impl Clip {
                 );
             }
         }
-        if !self.secrets {
+        if self.secrets {
             line = line.push(
-                button(text("Скопировать в…").size(13))
+                button(text("Изменить…").size(13))
                     .style(button::secondary)
-                    .on_press(Msg::MoveAsk(e.id)),
+                    .on_press(Msg::EditSecret(e.id)),
+            );
+        }
+        {
+            line = line.push(
+                button(
+                    text(if self.secrets {
+                        "Перенести пароль…"
+                    } else {
+                        "Скопировать в…"
+                    })
+                    .size(13),
+                )
+                .style(button::secondary)
+                .on_press(Msg::MoveAsk(e.id)),
             );
         }
         line.push(
@@ -2504,9 +2694,60 @@ mod tests {
         c.entries.push(entry(1, 10));
         let _ = c.update(Msg::Whole(1));
         let _ = c.update(Msg::MoveAsk(1));
-        assert!(c.whole.is_empty() && c.moving.is_none());
+        assert!(c.whole.is_empty() && c.moving.is_some());
         let _ = c.update(Msg::Shelf(false));
         assert_eq!(c.active_history(), "main");
+    }
+
+    #[test]
+    fn password_editor_never_loads_plaintext_and_clears_on_cancel_or_switch() {
+        let mut c = clip();
+        let _ = c.update(Msg::Secrets);
+        let mut e = entry(1, 10);
+        e.preview = "Пароль: Mail".into();
+        c.entries.push(e);
+        c.selected = Some(0);
+        let _ = c.update(Msg::EditSecret(1));
+        assert_eq!(c.edited_label, "Mail");
+        assert!(c.edited_password.is_empty() && c.whole.is_empty());
+        let _ = c.update(Msg::EditedPassword("new password".into()));
+        let _ = c.key(Press::Enter);
+        assert_eq!(c.editing_secret, Some(1));
+        let _ = c.key(Press::Escape);
+        assert!(c.editing_secret.is_none() && c.edited_password.is_empty());
+        let _ = c.update(Msg::EditSecret(1));
+        let _ = c.update(Msg::EditedPassword("another".into()));
+        let _ = c.update(Msg::Shelf(false));
+        assert!(c.editing_secret.is_none() && c.edited_password.is_empty());
+    }
+
+    #[test]
+    fn secret_transfer_requires_destination_and_separate_confirmation() {
+        let mut c = clip();
+        let _ = c.update(Msg::Secrets);
+        c.entries.push(entry(1, 10));
+        let _ = c.update(Msg::TransferSecret(1, "host".into()));
+        assert!(c.transferring_secret.is_none());
+        let _ = c.update(Msg::MoveAsk(1));
+        let _ = c.update(Msg::Histories(
+            "main".into(),
+            Ok(vec!["wrong shelf".into()]),
+        ));
+        assert_eq!(c.moving.as_ref().unwrap().1, None);
+        let _ = c.update(Msg::Histories(
+            "@secrets:main".into(),
+            Ok(vec!["main".into(), "host".into()]),
+        ));
+        assert_eq!(c.moving.as_ref().unwrap().1.as_ref().unwrap(), &["host"]);
+        let _ = c.update(Msg::TransferSecret(1, "host".into()));
+        assert_eq!(c.transferring_secret, Some((1, "host".into())));
+        let _ = c.key(Press::Enter);
+        assert!(
+            c.transferring_secret.is_some(),
+            "Enter is not a transfer confirmation"
+        );
+        let _ = c.update(Msg::Cancel);
+        assert!(c.transferring_secret.is_none());
     }
 
     #[test]

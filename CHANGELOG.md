@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Stored passwords can be relabelled or replaced without revealing their
+  current text, and transferred to another buffer's encrypted password shelf
+  with explicit confirmation. Copy/paste timestamps survive edits and moves.
+  Marking or editing a password removes matching ordinary-history and favourite
+  copies in that buffer, including alternative text MIME representations.
 - The clipboard manager has a separate per-buffer Passwords tab. Marking a
   text clip moves it out of ordinary history into encrypted storage with an
   optional label. Preview text is hidden; explicit paste from a launch or

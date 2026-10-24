@@ -601,6 +601,15 @@ impl History {
             }
         }
 
+        self.append_new(e)
+    }
+
+    fn append_new(&mut self, e: NewEntry) -> Result<Appended> {
+        let size: usize = e.contents.iter().map(|c| c.mime.len() + c.data.len()).sum();
+        if size > MAX_ENTRY {
+            return Err(Error::TooLarge(size));
+        }
+        let hash = self.keys.dedup(&canonical(&e.contents));
         let id = self.next_id;
         let text = primary_text(&e.contents);
         let preview = e
@@ -681,6 +690,37 @@ impl History {
             self.event(PASTED, id, t)?;
         }
         Ok(a)
+    }
+
+    /// Replace contents/preview without deduplicating away an edited label.
+    /// A fresh id preserves the immutable log format. The replacement and its
+    /// original copy/paste times are durable before the old id is deleted.
+    pub fn replace(
+        &mut self,
+        id: u64,
+        contents: Vec<Content>,
+        preview: String,
+    ) -> Result<Option<u64>> {
+        let Some(old) = self.get(id)? else {
+            return Ok(None);
+        };
+        let new = self
+            .append_new(NewEntry {
+                copied_at: old.copied_at,
+                contents,
+                preview: Some(preview),
+            })?
+            .id();
+        for &at in old.copies.iter().skip(1) {
+            self.event(COPIED, new, at)?;
+        }
+        for &at in &old.pastes {
+            self.event(PASTED, new, at)?;
+        }
+        self.sync()?;
+        self.delete(id)?;
+        self.sync()?;
+        Ok(Some(new))
     }
 
     /// Record that entry `id` was copied again at `at` (false: no such

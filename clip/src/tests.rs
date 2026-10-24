@@ -56,6 +56,31 @@ fn text(t: i64, s: &str) -> NewEntry {
     }
 }
 
+#[test]
+fn replacement_keeps_times_changes_label_and_survives_reopen() {
+    let tmp = Tmp::new("replace");
+    let k = key(31);
+    let mut h = History::open_with(tmp.path(), &k, small()).unwrap();
+    let first = h.append(text(10, "password")).unwrap().id();
+    h.record_copy(first, 20).unwrap();
+    h.record_paste(first, 30).unwrap();
+    let contents = h.get(first).unwrap().unwrap().contents;
+    let second = h
+        .replace(first, contents.clone(), "Mail".into())
+        .unwrap()
+        .unwrap();
+    assert_ne!(second, first, "an edit must not deduplicate away its label");
+    assert!(h.get(first).unwrap().is_none());
+    assert!(h.replace(first, contents, "Gone".into()).unwrap().is_none());
+    drop(h);
+    let h = History::open(tmp.path(), &k).unwrap();
+    let entry = h.get(second).unwrap().unwrap();
+    assert_eq!(entry.preview, "Mail");
+    assert_eq!(entry.copies, [10, 20]);
+    assert_eq!(entry.pastes, [30]);
+    assert!(h.get(first).unwrap().is_none());
+}
+
 /// Small segments, merges early: every path of the store in a few entries.
 fn small() -> Options {
     Options {

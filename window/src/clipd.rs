@@ -37,6 +37,7 @@ pub fn encode(text: &str) -> String {
             '%' => out.push_str("%25"),
             '\t' => out.push_str("%09"),
             '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
             '=' => out.push_str("%3D"),
             c => out.push(c),
         }
@@ -244,6 +245,19 @@ pub fn favorite_request(history: &str, id: u64) -> String {
 /// Move a text entry into the same buffer's separately encrypted password shelf.
 pub fn secret_request(history: &str, id: u64, label: &str) -> String {
     format!("secret\t{}\t{id}\t{}", encode(history), encode(label))
+}
+
+pub fn edit_secret_request(history: &str, id: u64, label: &str, text: &str) -> String {
+    format!(
+        "secret-edit\t{}\t{id}\t{}\t{}",
+        encode(history),
+        encode(label),
+        encode(text)
+    )
+}
+
+pub fn move_secret_request(from: &str, id: u64, to: &str) -> String {
+    format!("secret-move\t{}\t{id}\t{}", encode(from), encode(to))
 }
 
 pub fn select_request(history: &str, id: u64) -> String {
