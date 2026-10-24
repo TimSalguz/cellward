@@ -68,6 +68,14 @@ use crate::frame::{
     MAX_RADIUS, MAX_WIDTH as MAX_BORDER,
 };
 
+/// Numeric inner settings remain bounded by MAX_RADIUS; following niri
+/// must also cover the larger supported outer radius without moving its centre.
+const MAX_DRAWN_RADIUS: i32 = if MAX_OUTER_RADIUS > MAX_RADIUS {
+    MAX_OUTER_RADIUS
+} else {
+    MAX_RADIUS
+};
+
 /// The font the package was built with (`package.nix`), if it was.
 pub const FONT: Option<&str> = option_env!("VPN_ZONE_FRAME_FONT");
 /// A font file larger than this is not the one the package names.
@@ -525,6 +533,10 @@ pub struct Look {
     /// ([`inner_radii`]).
     pub radius: i32,
     pub radius_top: i32,
+    /// Vertical offset of the top arc's centre relative to its square.
+    /// Following niri with an always-visible title keeps the same circle,
+    /// rather than replacing it with a smaller circle below the title.
+    pub top_inset: i32,
     /// The frame's own corners, outside, logical pixels: 0 square
     /// ([`Look::outer_corners`]); and what they are drawn over — the
     /// border's width and whether the title strip is under the top ones
@@ -807,13 +819,11 @@ pub struct Outer {
     pub band: bool,
 }
 
-/// The radii of the window's corners inside `frame`, the top's and the
-/// bottom's: its setting's number, both; niri's (`crate::frame::Radius::
-/// Niri`) less the border, and at the top less the title strip too where it
-/// takes room (mode `always`). The uniform border's offset shares the
-/// outer arc's centre. Subtracting the title height is only an approximation
-/// for the non-uniform top inset, not a generally concentric construction.
-/// Below 0 is square.
+/// Visible extents of the inner arcs. A numeric radius is the same at both
+/// ends. Following niri subtracts the border, and the top's visible height
+/// also excludes an always-visible title. Look::of keeps the full circle's
+/// radius separately from that title offset; the top extent is not itself
+/// a smaller circle. Below 0 is square.
 pub fn inner_radii(frame: &Frame) -> (i32, i32) {
     match frame.radius {
         Radius::Px(r) => (r, r),
@@ -841,6 +851,7 @@ pub const LOOK: Look = Look {
     buttons: CELLWARD,
     radius: 0,
     radius_top: 0,
+    top_inset: 0,
     outer: 0,
     border: 0,
     band: false,
@@ -872,6 +883,8 @@ impl Look {
     /// The launch's look, as its settings have it.
     pub fn of(frame: &Frame) -> Self {
         let (top, bottom) = inner_radii(frame);
+        let follows_title =
+            matches!(frame.radius, Radius::Niri(_)) && frame.title == TitleMode::Always && top > 0;
         let outer = if frame.style == Style::Tag {
             0
         } else {
@@ -880,8 +893,9 @@ impl Look {
         Self {
             style: frame.style,
             buttons: buttons_look(frame.buttons).with_fullscreen(frame.fullscreen_button),
-            radius: bottom.clamp(0, MAX_RADIUS),
-            radius_top: top.clamp(0, MAX_RADIUS),
+            radius: bottom.clamp(0, MAX_DRAWN_RADIUS),
+            radius_top: if follows_title { bottom } else { top }.clamp(0, MAX_DRAWN_RADIUS),
+            top_inset: if follows_title { HEIGHT } else { 0 },
             outer,
             border: if outer > 0 {
                 frame.width.clamp(0, MAX_BORDER)
@@ -906,8 +920,8 @@ impl Look {
             (0, 0)
         } else {
             (
-                self.radius_top.clamp(0, MAX_RADIUS),
-                self.radius.clamp(0, MAX_RADIUS),
+                self.radius_top.clamp(0, MAX_DRAWN_RADIUS),
+                self.radius.clamp(0, MAX_DRAWN_RADIUS),
             )
         }
     }
@@ -1618,6 +1632,19 @@ pub fn render_tag(
 /// pixels, and the pixels of all four one after the other (a radius of 0:
 /// none of that corner).
 pub fn render_corners(top: i32, bottom: i32, scale: u32, color: Rgb) -> (i32, i32, Vec<u8>) {
+    render_corners_inset(top, bottom, 0, scale, color)
+}
+
+/// Keep the top arc's horizontal centre and radius when a title takes
+/// space above the content. Below the centre the edge is straight, not
+/// the lower half of a circle curling back into the window.
+fn render_corners_inset(
+    top: i32,
+    bottom: i32,
+    inset: i32,
+    scale: u32,
+    color: Rgb,
+) -> (i32, i32, Vec<u8>) {
     let (dt, db) = (device(top, scale).max(0), device(bottom, scale).max(0));
     let (st, sb) = (dt as usize, db as usize);
     let mut pixels = Vec::with_capacity(2 * (st * st + sb * sb) * 4);
@@ -1626,11 +1653,17 @@ pub fn render_corners(top: i32, bottom: i32, scale: u32, color: Rgb) -> (i32, i3
         let r = d as f32;
         // The circle's centre: the corner of the image nearest the window's
         // middle.
-        let (cx, cy) = (if right { 0.0 } else { r }, if lower { 0.0 } else { r });
+        let cx = if right { 0.0 } else { r };
+        let cy = if lower {
+            0.0
+        } else {
+            r - device(inset.max(0), scale) as f32
+        };
         for y in 0..d {
             for x in 0..d {
                 let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                let dist = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+                let dy = if lower { py - cy } else { (py - cy).min(0.0) };
+                let dist = ((px - cx).powi(2) + dy.powi(2)).sqrt();
                 pixels.extend_from_slice(&premultiplied(color, (dist - r + 0.5).clamp(0.0, 1.0)));
             }
         }
@@ -1982,8 +2015,8 @@ impl Prepared {
                     let look = Look {
                         style,
                         buttons: buttons_look(buttons).with_fullscreen(fullscreen),
-                        radius: MAX_RADIUS,
-                        radius_top: MAX_RADIUS,
+                        radius: MAX_DRAWN_RADIUS,
+                        radius_top: MAX_DRAWN_RADIUS,
                         ..LOOK
                     };
                     most = most.max(self.memfd_size_as(&look));
@@ -2299,7 +2332,7 @@ impl Text {
             return None;
         }
         self.region_at(&self.corners, scale, |scale| {
-            render_corners(top, bottom, scale, self.bg)
+            render_corners_inset(top, bottom, self.look.top_inset, scale, self.bg)
         })
     }
 
@@ -3099,7 +3132,7 @@ mod tests {
                 ..soft
             }
             .corners(),
-            (MAX_RADIUS, MAX_RADIUS)
+            (MAX_DRAWN_RADIUS, MAX_DRAWN_RADIUS)
         );
         // The pixels: opaque, or nothing at all; premultiplied in between.
         assert_eq!(u32::from_ne_bytes(Square::Color(c).word()), 0xff12_80c0);
@@ -3169,7 +3202,10 @@ mod tests {
             ..frame
         };
         assert_eq!(inner_radii(&wide), (16, 36));
-        assert_eq!(Look::of(&wide).corners(), (16, MAX_RADIUS));
+        assert_eq!(
+            Look::of(&wide).corners(),
+            (MAX_DRAWN_RADIUS, MAX_DRAWN_RADIUS)
+        );
         assert_eq!(
             inner_radii(&Frame {
                 width: 0,
@@ -3202,6 +3238,68 @@ mod tests {
             }),
             (9, 9)
         );
+    }
+
+    #[test]
+    fn niri_arcs_keep_their_centre_with_a_thin_border_and_a_title() {
+        let frame = Frame {
+            color: Rgb(255, 255, 255),
+            width: 1,
+            title: TitleMode::Always,
+            buttons: ButtonStyle::Cellward,
+            style: Style::Full,
+            radius: Radius::Niri(32),
+            outer: Radius::Niri(32),
+            fullscreen: crate::frame::DEFAULT_FULLSCREEN,
+            fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
+            double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+        };
+        let look = Look::of(&frame);
+        assert_eq!(
+            look.corners(),
+            (31, 31),
+            "niri's radius is not capped at 16"
+        );
+        assert_eq!(look.top_inset, HEIGHT);
+        for scale in [120, 180, 240] {
+            let (t, b, pixels) = render_corners_inset(31, 31, HEIGHT, scale, frame.color);
+            assert_eq!(t, b);
+            let alpha = |corner: usize, x: i32, y: i32| {
+                pixels[(corner * (t * t) as usize + (y * t + x) as usize) * 4 + 3]
+            };
+            let r = t as f32;
+            let cy = r - device(HEIGHT, scale) as f32;
+            for y in 0..t {
+                for x in 0..t {
+                    let dx = x as f32 + 0.5 - r;
+                    let dy = (y as f32 + 0.5 - cy).min(0.0);
+                    let expected = (((dx * dx + dy * dy).sqrt() - r + 0.5).clamp(0.0, 1.0) * 255.0)
+                        .round() as u8;
+                    assert_eq!(alpha(0, x, y), expected);
+                    assert_eq!(alpha(0, x, y), alpha(1, t - 1 - x, y));
+                    assert_eq!(alpha(2, x, y), alpha(3, t - 1 - x, y));
+                }
+            }
+            // Once the title-offset centre is reached the left edge is
+            // straight; it must not curl inward again near the image bottom.
+            assert_eq!(alpha(0, 0, t - 1), 0);
+            assert_eq!(alpha(0, 0, 0), 255);
+        }
+        let hover = Look::of(&Frame {
+            title: TitleMode::Hover,
+            ..frame
+        });
+        assert_eq!((hover.corners(), hover.top_inset), ((31, 31), 0));
+        let small = Look::of(&Frame {
+            radius: Radius::Niri(20),
+            ..frame
+        });
+        assert_eq!(small.corners(), (0, 19));
+        let numeric = Look::of(&Frame {
+            radius: Radius::Px(12),
+            ..frame
+        });
+        assert_eq!((numeric.corners(), numeric.top_inset), ((12, 12), 0));
     }
 
     /// The tag: the label between its pads and the row at the look's end,

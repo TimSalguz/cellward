@@ -78,6 +78,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- Niri-following inner corners no longer truncate radii above 16 px. The
+  always-visible title offsets the top arc's centre instead of substituting a
+  smaller circle. Rendering buffers account for the larger supported radius.
+- Explicit `wl-sandbox --frame` widths remain intact when no settings directory
+  is supplied, instead of silently reverting to the default border width.
 - Character typing no longer cancels on keyboard focus enter/leave, including
   changes during a run. The original keymap and actual focus are restored on
   completion; Escape and the manager's Stop button remain explicit cancellation.

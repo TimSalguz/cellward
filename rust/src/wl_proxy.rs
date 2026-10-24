@@ -6291,7 +6291,14 @@ mod tests {
                 .collect();
             assert_eq!(adds.len(), 1, "{adds:?}");
             let tag_w = adds[0][2];
-            assert_eq!((adds[0][0], adds[0][1], adds[0][3]), (0, 0, 20));
+            assert_eq!(
+                (adds[0][0], adds[0][1], adds[0][3]),
+                (
+                    0,
+                    crate::wl_frame::HOVER_EDGE,
+                    20 - crate::wl_frame::HOVER_EDGE
+                )
+            );
             assert!((72 + 16 + 20..300).contains(&tag_w), "{tag_w}");
             // The tag's image, and its buttons on it.
             let on_row: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == row).collect();

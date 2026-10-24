@@ -1044,6 +1044,7 @@ impl Setup {
                     .and_then(|c| crate::container::frame_color_in(&self.switch, c));
                 Frame::of_launch(&o.state, &self.switch, &zone, color.as_deref())
             }
+            None if self.switch.as_os_str().is_empty() => self.frame,
             None => Frame {
                 width: width(&self.switch).0,
                 ..self.frame
@@ -1057,6 +1058,18 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[test]
+    fn an_explicit_frame_without_a_settings_directory_keeps_its_width() {
+        let frame = Frame::parse_arg("ff00ff:1:always:cellward:full:niri32:niri32").unwrap();
+        let setup = Setup {
+            frame,
+            title: "test".into(),
+            switch: PathBuf::new(),
+            always_focused: false,
+            origin: None,
+        };
+        assert_eq!(setup.read_again(), frame);
+    }
     fn dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("vz-frame-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
