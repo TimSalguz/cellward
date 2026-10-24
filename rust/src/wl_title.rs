@@ -1,5 +1,5 @@
 //! The title strip's text, drawn by the Wayland proxy (`docs/WINDOW-FRAME.md`
-//! §5.6, §5.10; stage 2, its second part): `<zone> · <container>` on the
+//! §5.6, §5.10; stage 2, its second part): network and container on the
 //! zone's colour, as pixels the compositor is handed in `wl_shm`.
 //!
 //! **The font** is a file of the Nix package, named by its store path when
@@ -8,7 +8,7 @@
 //! proxy is forked, the proxy lays the line out before it loads its filter
 //! (`crate::wl_proxy::confine`); what it rasterizes after is only that line,
 //! at a new scale. Nothing of it comes from the program: the text is the
-//! launch's (`crate::frame::title_text`, cleaned of control and bidi
+//! launch's (`crate::frame::window_title_text`, cleaned of control and bidi
 //! characters), the font is ours, the scale is the compositor's and bounded
 //! here.
 //!

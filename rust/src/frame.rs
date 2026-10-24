@@ -761,13 +761,23 @@ pub fn title_text(zone: &str, container: &str) -> String {
     format!("{} · {}", title_part(zone), title_part(container))
 }
 
+/// The window frame spells out what each part means. Keep the separator so
+/// [`Setup::current_title`] can replace only the network after a live switch.
+pub fn window_title_text(zone: &str, container: &str) -> String {
+    format!(
+        "Сеть: {} · Контейнер: {}",
+        title_part(zone),
+        title_part(container)
+    )
+}
+
 /// What came on a command line (`wl-sandbox --frame-title`), cleaned again
-/// by the same rules, for the whole: two parts and the dot between.
+/// by the same rules, with room for the window frame's explicit field names.
 pub fn clean_title(text: &str) -> String {
     let clean: String = text
         .chars()
         .filter(drawable)
-        .take(2 * MAX_TITLE_PART + 3)
+        .take(2 * MAX_TITLE_PART + 24)
         .collect();
     clean.trim().to_owned()
 }
@@ -1004,7 +1014,12 @@ impl Setup {
         let Some((_, container)) = self.title.split_once(" · ") else {
             return self.title.clone();
         };
-        title_text(&origin.current_zone(), container)
+        if self.title.starts_with("Сеть: ") {
+            let container = container.strip_prefix("Контейнер: ").unwrap_or(container);
+            window_title_text(&origin.current_zone(), container)
+        } else {
+            title_text(&origin.current_zone(), container)
+        }
     }
 
     /// The frame as the settings have it now: `config` the settings'
@@ -1567,6 +1582,10 @@ mod tests {
     #[test]
     fn the_title_text_is_two_clean_bounded_parts() {
         assert_eq!(title_text("nl", "основной"), "nl · основной");
+        assert_eq!(
+            window_title_text("nl", "для программы «Helium»"),
+            "Сеть: nl · Контейнер: для программы «Helium»"
+        );
         // Control characters and bidi overrides go: "\u{202E}ln" reads
         // backwards, a line break would start a line of its own.
         assert_eq!(
@@ -1585,7 +1604,7 @@ mod tests {
         assert_eq!(clean_title(" nl\u{202E} · a\r"), "nl · a");
         assert_eq!(
             clean_title(&"z".repeat(1000)).chars().count(),
-            2 * MAX_TITLE_PART + 3
+            2 * MAX_TITLE_PART + 24
         );
     }
 
@@ -1621,7 +1640,7 @@ mod tests {
         fs::write(instance.join(crate::instance::NETWORK), "nl\n").unwrap();
         let setup = Setup {
             frame: Frame::of_launch(&state, &config, "nl", None),
-            title: title_text("nl", "Свой контейнер"),
+            title: window_title_text("nl", "для программы «Firefox»"),
             switch: config,
             always_focused: false,
             origin: Some(Origin {
@@ -1630,12 +1649,21 @@ mod tests {
                 container: Some("app-firefox".to_owned()),
             }),
         };
-        assert_eq!(setup.current_title(), "nl · Свой контейнер");
+        assert_eq!(
+            setup.current_title(),
+            "Сеть: nl · Контейнер: для программы «Firefox»"
+        );
         fs::write(instance.join(crate::instance::NETWORK), "de\n").unwrap();
-        assert_eq!(setup.current_title(), "de · Свой контейнер");
+        assert_eq!(
+            setup.current_title(),
+            "Сеть: de · Контейнер: для программы «Firefox»"
+        );
         assert_eq!(setup.read_again().color, Rgb(0xa0, 0xb0, 0xc0));
         fs::write(instance.join(crate::instance::ID), "someone-else\n").unwrap();
-        assert_eq!(setup.current_title(), "nl · Свой контейнер");
+        assert_eq!(
+            setup.current_title(),
+            "Сеть: nl · Контейнер: для программы «Firefox»"
+        );
         let _ = fs::remove_dir_all(state.parent().unwrap());
     }
 }

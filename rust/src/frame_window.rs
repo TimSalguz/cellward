@@ -1,7 +1,8 @@
 //! The frame's settings in a window, from the window menu: the same rows as
 //! a container's permissions (`crate::window::render_perms`), for every
 //! window — what `cellward frame …` sets —, the current zone's colour and
-//! the container's own frame colour. A setting Nix declares is shown, not offered.
+//! the container's own frame colour. Local visual overrides can temporarily
+//! replace Nix declarations; resetting restores the declared value.
 
 use crate::container::Source;
 use crate::tools::Tools;

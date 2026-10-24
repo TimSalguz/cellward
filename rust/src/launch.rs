@@ -1026,10 +1026,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 // the owner needs to read.
                 "временный".to_owned()
             } else {
-                crate::picker::container_label_in(tools, &selector.to_string_lossy())
+                frame_container_label(tools, &selector.to_string_lossy(), label.as_deref())
             };
             wrap.push("--frame-title".into());
-            wrap.push(crate::frame::title_text(&zone_name, &shown).into());
+            wrap.push(crate::frame::window_title_text(&zone_name, &shown).into());
             wrap.push("--frame-switch".into());
             wrap.push(tools.config.clone().into());
             // Where it comes from, for the supervisor to read it again when
@@ -2297,6 +2297,22 @@ pub fn container_name(selection: &Selection) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// A frame has to identify a program-owned home without reducing every such
+/// container to the same ambiguous word, "свой". The remembered application
+/// label is display-only; the actual container identity stays in the launch.
+fn frame_container_label(tools: &Tools, selector: &str, app_label: Option<&str>) -> String {
+    let name = selector
+        .strip_prefix(crate::picker::SANDBOX_PREFIX)
+        .unwrap_or(selector);
+    if let Some(id) = name.strip_prefix("app-") {
+        let shown = app_label
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(id);
+        return format!("для программы «{shown}»");
+    }
+    crate::picker::container_label_in(tools, selector)
 }
 
 /// Whose record of permissions a launch takes: its container's, or the main
@@ -3633,6 +3649,24 @@ mod tests {
             })
             .collect();
         Tools::from_entries(Path::new("/m.json"), &entries).unwrap()
+    }
+
+    #[test]
+    fn the_frame_names_a_programs_own_container() {
+        let base = std::env::temp_dir().join(format!("vz-frame-label-{}", std::process::id()));
+        let tools = tools_in(&base);
+        assert_eq!(
+            frame_container_label(&tools, "app-helium", Some("Helium")),
+            "для программы «Helium»"
+        );
+        assert_eq!(
+            frame_container_label(&tools, "sb:app-firefox", None),
+            "для программы «firefox»"
+        );
+        assert_eq!(
+            frame_container_label(&tools, "main", None),
+            crate::picker::container_label_in(&tools, "main")
+        );
     }
 
     /// One launch, one container (`docs/PERMISSIONS.md` §11.7): the name,
