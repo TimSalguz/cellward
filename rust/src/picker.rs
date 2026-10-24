@@ -8,12 +8,9 @@
 //!
 //! **The network is the container's** (`docs/PERMISSIONS.md` §11.8): a
 //! container bound to a network is started there with no question; one with
-//! no network yet — and the main home, and a throwaway one — has it asked,
-//! and the answer binds a named container. A program has no network of its
-//! own any more: "always" in the main home moves it to the container of the
-//! main home bound to that network (`main-<network>`), and the programs'
-//! network pins of before (`.pinned/<program>`) became their containers'
-//! networks at the first look (`container::migrate_pins`).
+//! no network yet — and the main home, and a throwaway one — has it asked.
+//! A named container keeps its network; "always" in the built-in main home
+//! pins only that program's network, without creating another container.
 //!
 //! **What the question starts on** (`docs/GOTCHAS.md` §11):
 //!
@@ -700,7 +697,12 @@ pub fn autostart_plan(
     // The network of the global default container is not a choice for this
     // program: nobody made one.
     let via_default = memory.pinned_profile.is_empty() && is_default(memory, &container);
-    let (zone, network_guessed) = match bound_of(&container).filter(|_| !via_default) {
+    let bound = if container.selector().is_empty() {
+        (!memory.bound.is_empty()).then(|| memory.bound.clone())
+    } else {
+        bound_of(&container).filter(|_| !via_default)
+    };
+    let (zone, network_guessed) = match bound {
         Some(network) => (network, false),
         None => ("offline".to_owned(), true),
     };
@@ -1318,6 +1320,7 @@ fn ask_window(
     // or its preset offers into a second, hidden choice.
     if reply.net == launch::UNCONFINED {
         let _ = fs::remove_file(tools.state.join(".pinnedprofile").join(key));
+        let _ = fs::remove_file(tools.state.join(".pinned").join(key));
         let container = Container {
             profile: crate::container::OPEN_RECORD.to_owned(),
             ..Container::default()
@@ -1342,6 +1345,7 @@ fn ask_window(
     }
     let container = with_permissions(tools, key, &reply, container);
     let shared = !reply.pin_container && shared_default(memory, &container, None);
+    let _ = fs::remove_file(tools.state.join(".pinned").join(key));
     let container = settle_network(tools, key, container, &reply.net, reply.pin_net, shared);
     // The preset's offers ticked: the chosen container's words — one that
     // keeps words, named or the program's own.
@@ -1436,8 +1440,8 @@ fn is_default(memory: &Memory, container: &Container) -> bool {
 /// "Always" for a network (`docs/PERMISSIONS.md` §11.8): the network is
 /// made the container's — a named container with no network yet is bound to
 /// it, the program's own one is made with it, and in the main home the
-/// program moves to the container of the main home bound to it,
-/// `main-<network>`. Without "always" nothing is bound: a binding is an
+/// program keeps its own network pin in the built-in main home. Without
+/// "always" nothing is bound: a binding is an
 /// action of its own, never a side effect of one launch (I1). A throwaway
 /// container keeps nothing, and a container that is the program's only by
 /// the global default is not bound from it (`shared_default`). A sandbox
@@ -1463,20 +1467,9 @@ fn settle_network(
     }
     let network = Network::Named(launch::network_name(net).to_owned());
     if container.profile.is_empty() && container.sandbox.is_empty() {
-        return match crate::container::main_for_network(tools, net) {
-            Ok(name) => {
-                remember(&tools.state, ".pinnedprofile", key, &name);
-                remember(&tools.state, ".lastprofile", key, &name);
-                Container {
-                    profile: name,
-                    ..Container::default()
-                }
-            }
-            Err(why) => {
-                eprintln!("vpn-zone-pick: {why}");
-                container
-            }
-        };
+        remember(&tools.state, ".pinned", key, launch::network_name(net));
+        remember(&tools.state, ".pinnedprofile", key, MAIN);
+        return container;
     }
     if shared {
         let name = container.selector();
@@ -2822,6 +2815,16 @@ fn read_memory_with(tools: &Tools, key: &str, tidy: bool) -> Memory {
             }
         }
     }
+    if would_use.selector().is_empty() {
+        let path = state.join(".pinned").join(key);
+        let pinned =
+            crate::launch::network_name(&read_setting(&path).unwrap_or_default()).to_owned();
+        if !pinned.is_empty() && crate::container::network_exists(tools, &pinned) {
+            memory.bound = pinned;
+        } else if tidy && path.exists() {
+            let _ = fs::remove_file(path);
+        }
+    }
     memory
 }
 
@@ -3821,6 +3824,18 @@ mod tests {
             default_profile: "ask".to_owned(),
             ..Memory::default()
         }
+    }
+
+    #[test]
+    fn the_builtin_main_home_keeps_a_programs_network_without_a_named_container() {
+        let mut m = memory();
+        m.pinned_profile = MAIN.to_owned();
+        m.bound = "host".to_owned();
+        assert_eq!(net_step(&m), NetStep::Bound { zone: "host".into() });
+        let plan = autostart_plan(&m, "terminal", |_| false, |_| None);
+        assert_eq!(plan.zone, "host");
+        assert!(plan.container.selector().is_empty());
+        assert!(!plan.network_guessed);
     }
 
     /// `ask` shows the picker at login only when something had to be guessed

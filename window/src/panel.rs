@@ -2768,12 +2768,14 @@ impl Panel {
                 .style(button::secondary)
                 .on_press_maybe(idle.then_some(Msg::MergeAsk)),
         );
-        acts = acts.push(
-            button(text("Удалить…").size(13))
-                .padding([4, 10])
-                .style(button::danger)
-                .on_press_maybe(idle.then_some(Msg::RemoveAsk)),
-        );
+        if c.name != "open" {
+            acts = acts.push(
+                button(text("Удалить…").size(13))
+                    .padding([4, 10])
+                    .style(button::danger)
+                    .on_press_maybe(idle.then_some(Msg::RemoveAsk)),
+            );
+        }
         page = page.push(text("Действия").size(16));
         page = page.push(acts);
         // What is blocked for it (blocked on the network's tab).

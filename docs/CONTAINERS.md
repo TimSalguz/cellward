@@ -62,11 +62,13 @@ Consequences, in order of importance:
 What the picker remembers is per program: `.pinned`/`.last` (network) and
 `.pinnedprofile`/`.lastprofile` (container). The two axes are independent,
 which is exactly what lets one program's identity travel between networks.
-**Since 2026-09-26 the network is the container's** ([PERMISSIONS.md](PERMISSIONS.md)
-§11.8): `.pinned` is gone — moved into the containers' networks once —, a
-container with no network has it asked and bound at its first launch, and
-"always" in the main home moves the program to `main-<network>`, a container
-of the main home bound to it. `.last` only says where a question starts.
+For a named container the network is its own ([PERMISSIONS.md](PERMISSIONS.md)
+§11.8); old `.pinned` entries migrate there once. The built-in main home is
+the exception: one record and one network instance per network, with a
+per-program `.pinned` network choice. "Always" there no longer creates
+`main-<network>` containers. Existing named main-home containers are left
+untouched for an explicit decision about their permissions and assignments.
+`.last` only says where a question starts.
 
 ## 3. The model
 

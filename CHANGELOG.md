@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- A remembered network for a program in the built-in main home now stays a
+  per-program choice; it no longer creates `main-<network>` containers.
+  Existing named main-home containers are preserved. The built-in host network
+  and the `open` container cannot be removed as ordinary user resources.
 - The cellward panel now has a separate launch-defaults tab: it shows where
   each value comes from, allows a local override to be reset, and lets a
   remembered container choice be forgotten for one program. Nix-declared

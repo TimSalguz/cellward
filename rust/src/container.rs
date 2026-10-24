@@ -553,51 +553,6 @@ enum Owner {
     Free,
 }
 
-/// The name of the container of the main home a program pinned to `network`
-/// in the main home goes to: `main-<network>`, a free name if that one is
-/// something else.
-fn main_container_name(tools: &Tools, network: &str) -> Option<String> {
-    let base = format!("main-{network}");
-    (1..100)
-        .map(|n| {
-            if n == 1 {
-                base.clone()
-            } else {
-                format!("{base}-{n}")
-            }
-        })
-        .filter(|name| valid_name(name))
-        .find(|name| match load_quiet(tools, name) {
-            None => true,
-            Some(c) => {
-                c.home == Home::Main && c.network.value == Network::Named(network.to_owned())
-            }
-        })
-}
-
-/// The container of the main home bound to `network`, made when there is
-/// none (`main-<network>`): where a program of the main home goes when its
-/// network is chosen "always" (`docs/PERMISSIONS.md` §11.8). Its settings are
-/// written in one go: never a container of the main home with no network.
-pub fn main_for_network(tools: &Tools, network: &str) -> Result<String, String> {
-    let network = crate::launch::network_name(network);
-    let name = main_container_name(tools, network)
-        .ok_or_else(|| format!("нет имени для контейнера настоящего дома в сети {network}"))?;
-    if load_quiet(tools, &name).is_none() {
-        let file = policy_dir(tools, &name).join(FILE);
-        let text = format!(
-            "# Локальные настройки контейнера cellward (docs/CONTAINERS.md).\n\
-             # Пишет `cellward container`; значения из Nix лежат в ~/.config/vpn-zones/declared.\n\
-             home = {}\nnetwork = {network}\n",
-            Home::Main.setting()
-        );
-        fs::create_dir_all(policy_dir(tools, &name))
-            .and_then(|()| write_atomically(&file, &text))
-            .map_err(|e| format!("не записать {}: {e}", file.display()))?;
-    }
-    Ok(name)
-}
-
 /// Is `network` one a launch can go to: `offline`, the host's own (its
 /// zone made when first wanted), unconfined, or a zone that still has its
 /// config?
@@ -624,8 +579,8 @@ pub fn network_exists(tools: &Tools, network: &str) -> bool {
 ///   choice for this program: binding it would send every new program into
 ///   that network unasked. It is left alone, as is one bound already or
 ///   declared in Nix.
-/// * A program of the main home goes to a container of the main home bound
-///   to that network, `main-<network>`.
+/// * A program of the main home keeps its network pin and the built-in main
+///   record; no extra named container is created.
 /// * Otherwise the network is the last choice, where the question starts.
 /// * A pin to a zone that is gone is dropped.
 ///
@@ -715,25 +670,19 @@ pub fn migrate_pins(tools: &Tools) -> Vec<String> {
                 .entry(name)
                 .or_default()
                 .push((file.clone(), key, net)),
-            Owner::Main => match main_for_network(tools, &net) {
-                Ok(name) => match fs::write(tools.state.join(".pinnedprofile").join(&key), &name) {
-                    Ok(()) => {
-                        let _ = fs::remove_file(file);
-                        said.push(format!(
-                            "{key}: сеть {net} была закреплена за программой в основном \
-                                 доме — теперь она в контейнере {name} (настоящий дом, сеть {net})"
-                        ));
-                    }
+            Owner::Main => {
+                // A per-program network pin is meaningful for the built-in
+                // main home: its instances already have separate networks.
+                match fs::write(tools.state.join(".pinnedprofile").join(&key), "__main__") {
+                    Ok(()) => said.push(format!(
+                        "{key}: сеть {net} осталась закреплена за программой в настоящем доме"
+                    )),
                     Err(e) => {
                         failed = true;
-                        said.push(format!("{key}: не перенести закрепление сети {net}: {e}"));
+                        said.push(format!("{key}: не сохранить основной дом: {e}"));
                     }
-                },
-                Err(why) => {
-                    failed = true;
-                    said.push(format!("{key}: {why}"));
                 }
-            },
+            }
             Owner::Throwaway | Owner::Free => {
                 as_last(&key, &net);
                 let _ = fs::remove_file(file);
@@ -3640,14 +3589,14 @@ mod tests {
             read_setting(&state.join(".last/x")).is_none(),
             "a gone zone is no choice"
         );
-        let main = load(&tools, "main-offline").unwrap();
-        assert_eq!(
-            (main.home, main.network.value),
-            (Home::Main, Network::Named("offline".into()))
-        );
+        assert!(load(&tools, "main-offline").is_none());
         assert_eq!(
             read_setting(&state.join(".pinnedprofile/d")).as_deref(),
-            Some("main-offline")
+            Some("__main__")
+        );
+        assert_eq!(
+            read_setting(&state.join(".pinned/d")).as_deref(),
+            Some("offline")
         );
         for (key, last) in [
             ("b", "nl"),
@@ -3662,7 +3611,7 @@ mod tests {
                 "{key}"
             );
         }
-        assert!(visible_entries(&state.join(".pinned")).is_empty());
+        assert_eq!(visible_entries(&state.join(".pinned")).len(), 1);
         // Once: a pin written afterwards is nobody's.
         fs::write(state.join(".pinned/a"), "de").unwrap();
         assert!(migrate_pins(&tools).is_empty());

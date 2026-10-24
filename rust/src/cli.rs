@@ -2120,11 +2120,12 @@ fn remove(tools: &Tools, args: &[OsString]) -> u8 {
     // `unconfined` and `offline` are built-in choices of the picker, not zones:
     // unconfined traffic is the absence of a zone, and the empty one is
     // recreated by the first launch that asks for it. (`docs/GOTCHAS.md` §2)
-    // A directory left with the name `unconfined` from before it was taken is
-    // a zone all the same, and removable.
-    if name == launch::UNCONFINED_ALIAS
+    // Old directories under those names are not removed implicitly either:
+    // the words now designate built-ins, never an ordinary zone.
+    if name == launch::HOST
+        || name == launch::UNCONFINED_ALIAS
         || name == launch::OFFLINE
-        || (name == launch::UNCONFINED && !tools.state.join(name).is_dir())
+        || name == launch::UNCONFINED
     {
         eprintln!("«{name_text}» — встроенный вариант, его нельзя удалить");
         return 1;
@@ -2507,6 +2508,10 @@ fn container_create(tools: &Tools, name: &OsStr, home: crate::container::Home) -
 /// declared — the module would make it again.
 fn container_remove(tools: &Tools, name: &OsStr) -> u8 {
     let text = name.to_string_lossy();
+    if text == crate::container::OPEN_RECORD && !crate::container::foreign_open_record(tools) {
+        eprintln!("«без изоляции» — встроенный контейнер, его нельзя удалить");
+        return 1;
+    }
     if text == crate::container::MAIN_RECORD {
         eprintln!(
             "настоящий дом не удаляется; его разрешения возвращаются к умолчанию: cellward \
@@ -5175,7 +5180,10 @@ fn pins(tools: &Tools) -> u8 {
             .unwrap_or_else(|| key.to_string_lossy().into_owned());
         let value = read_setting(&file).unwrap_or_default();
         let shown = match value.as_str() {
-            "__main__" | "" => "настоящий дом, сеть спрашивается при запуске".to_owned(),
+            "__main__" | "" => match read_setting(&tools.state.join(".pinned").join(key)) {
+                Some(network) => format!("настоящий дом (сеть {network})"),
+                None => "настоящий дом, сеть спрашивается при запуске".to_owned(),
+            },
             "__fs__" => "разовый контейнер, сеть спрашивается при запуске".to_owned(),
             selector => match crate::container::load(tools, selector) {
                 Some(c) => match &c.network.value {

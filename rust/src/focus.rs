@@ -630,8 +630,7 @@ pub enum Pin {
     /// A container bound here (not in Nix): unbind it, and its network is
     /// asked at its next launch.
     Unbind { container: String, network: String },
-    /// The main home: the program moves to the container of the main home
-    /// bound to the network it runs in (`main-<network>`).
+    /// The main home: pin this program's network without making a container.
     Main,
     /// Nothing to pin: a throwaway container, a network declared in Nix, a
     /// launch not known.
@@ -1395,18 +1394,15 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             let done = match &pin {
                 Pin::Bind(container) => crate::container::set_network(tools, container, &network)
                     .map(|()| format!("Контейнер «{container}» теперь всегда {}", in_net(&l.zone))),
-                Pin::Main => crate::container::main_for_network(tools, &l.zone).and_then(|name| {
-                    let dir = tools.state.join(".pinnedprofile");
-                    fs::create_dir_all(&dir)
-                        .and_then(|()| fs::write(dir.join(p), &name))
+                Pin::Main => {
+                    let state = &tools.state;
+                    fs::create_dir_all(state.join(".pinned"))
+                        .and_then(|()| fs::create_dir_all(state.join(".pinnedprofile")))
+                        .and_then(|()| fs::write(state.join(".pinned").join(p), &l.zone))
+                        .and_then(|()| fs::write(state.join(".pinnedprofile").join(p), "__main__"))
                         .map_err(|e| e.to_string())
-                        .map(|()| {
-                            format!(
-                                "Теперь в контейнере «{name}»: настоящий дом, всегда {}",
-                                in_net(&l.zone)
-                            )
-                        })
-                }),
+                        .map(|()| format!("Настоящий дом, всегда {}", in_net(&l.zone)))
+                }
                 _ => return 0,
             };
             match done {

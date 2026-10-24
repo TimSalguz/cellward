@@ -338,6 +338,15 @@ pub fn data(tools: &Tools) -> String {
         let label = crate::cli::read_setting(&tools.state.join(".labels").join(&key))
             .unwrap_or_else(|| key.clone());
         let to = crate::cli::read_setting(&profile_pins.join(&key)).unwrap_or_default();
+        let to = if to == "__main__" {
+            let network = crate::cli::read_setting(&tools.state.join(".pinned").join(&key));
+            match network {
+                Some(network) => format!("Настоящий дом · сеть {network}"),
+                None => "Настоящий дом".to_owned(),
+            }
+        } else {
+            to
+        };
         line(&["pin", &key, &label, &to]);
     }
     out
