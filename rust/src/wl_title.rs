@@ -1664,12 +1664,11 @@ pub fn render_outer(o: &Outer, rings: &[(i32, Rgb)], bg: Rgb, scale: u32) -> (i3
         .collect();
     // What of the frame is at the top left's pixel (`x`, `y`): a ring's
     // colour, the title strip's, or nothing (the program's).
-    let under = |x: i32, y: i32, upper: bool| -> Option<Rgb> {
-        let depth = x.min(y);
-        if depth < border {
+    let under = |depth: f32, y: i32, upper: bool| -> Option<Rgb> {
+        if depth < border as f32 + 0.5 {
             return ends
                 .iter()
-                .find(|(end, _)| depth < *end)
+                .find(|(end, _)| depth < *end as f32)
                 .or(ends.last())
                 .map(|&(_, color)| color);
         }
@@ -1684,16 +1683,25 @@ pub fn render_outer(o: &Outer, rings: &[(i32, Rgb)], bg: Rgb, scale: u32) -> (i3
                 // The top left's pixel this one mirrors.
                 let x = if right { w - 1 - col } else { col };
                 let y = if lower { h - 1 - row } else { row };
-                let pixel = match under(x, y, !lower) {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                // Rings follow the rounded edge, not the straight L of the
+                // old rectangular border. At width 1 that L left almost the
+                // entire corner arc missing.
+                let depth = if px < r && py < r {
+                    r - ((px - r).powi(2) + (py - r).powi(2)).sqrt()
+                } else {
+                    px.min(py)
+                };
+                let pixel = match under(depth, y, !lower) {
                     None => [0; 4],
                     Some(color) => {
-                        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-                        let cover = if px < r && py < r {
-                            let dist = ((px - r).powi(2) + (py - r).powi(2)).sqrt();
-                            (r - dist + 0.5).clamp(0.0, 1.0)
-                        } else {
+                        let outside = (depth + 0.5).clamp(0.0, 1.0);
+                        let inside = if !lower && o.band && y < row_end {
                             1.0
+                        } else {
+                            (border as f32 - depth + 0.5).clamp(0.0, 1.0)
                         };
+                        let cover = outside.min(inside);
                         premultiplied(color, cover)
                     }
                 };
@@ -3430,6 +3438,24 @@ mod tests {
         // At 1.5 the sizes of the scale.
         let (w, top, _) = render_outer(&o, &rings, bg, 180);
         assert_eq!((w, top), (18, 36));
+    }
+
+    #[test]
+    fn a_one_pixel_border_has_a_curved_arc_not_two_disconnected_lines() {
+        let o = Outer {
+            radius: 8,
+            side: 8,
+            top: 8,
+            border: 1,
+            band: false,
+        };
+        let (w, _, pixels) = render_outer(&o, &[(1, Rgb(200, 80, 20))], Rgb(0, 0, 0), 120);
+        let alpha = |x: usize, y: usize| pixels[(y * w as usize + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 0, "outside the outer circle");
+        assert!(alpha(2, 2) > 0, "the diagonal arc must exist at width 1");
+        assert_eq!(alpha(3, 3), 0, "inside the inner circle stays clear");
+        assert!(alpha(7, 0) > 240, "the arc joins the top border");
+        assert!(alpha(0, 7) > 240, "the arc joins the side border");
     }
 
     /// The look of the settings: the frame's own corners where the outer

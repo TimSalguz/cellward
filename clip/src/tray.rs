@@ -78,11 +78,11 @@ impl Item {
     }
 
     fn secondary_activate(&self, _x: i32, _y: i32) {
-        self.open()
+        // Do not turn an alternate activation into opening the manager.
     }
 
     fn context_menu(&self, _x: i32, _y: i32) {
-        self.open()
+        // The panel owns pinning and tray-item settings on right click.
     }
 }
 

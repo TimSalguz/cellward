@@ -71,6 +71,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- Character typing no longer cancels on keyboard focus enter/leave, including
+  changes during a run. The original keymap and actual focus are restored on
+  completion; Escape and the manager's Stop button remain explicit cancellation.
+- Target selection uses a translucent highlight rather than hiding the field
+  behind opaque white. Clipboard windows honour Cellward's appearance setting
+  after reopening, and a right click on the tray item no longer opens them.
+- Thin rounded frames draw a curved border ring rather than clipping two
+  straight strips, which previously removed most of the one-pixel corner arc.
 - A live container network switch now updates both the frame colour and its
   network label; the switch menu checks the resulting live network before
   reporting success. The fullscreen title accepts double-click to leave

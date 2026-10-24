@@ -4141,7 +4141,6 @@ impl WlKeyboardHandler for Keyboard {
         fd: &Rc<OwnedFd>,
         size: u32,
     ) {
-        typing::keyboard_changed(slf);
         if format == WlKeyboardKeymapFormat::XKB_V1 {
             self.typing.borrow_mut().keymap = Some((fd.clone(), size));
             if let Some(text) = crate::clip::read_keymap(fd, size) {
@@ -4150,7 +4149,9 @@ impl WlKeyboardHandler for Keyboard {
             let chord = crate::clip::paste_chord(&self.paste);
             self.set_focus(|f| f.chord = chord);
         }
-        slf.send_keymap(format, fd, size);
+        if !typing::owns_keyboard(slf) {
+            slf.send_keymap(format, fd, size);
+        }
     }
 
     fn handle_enter(
@@ -4166,7 +4167,7 @@ impl WlKeyboardHandler for Keyboard {
             state.on = programs(surface);
             state.serial = serial;
         }
-        let typed = typing::keyboard_changed(slf);
+        let typed = typing::owns_keyboard(slf);
         self.menu = !programs(surface);
         let on = !self.menu;
         self.set_focus(|f| {
@@ -4175,7 +4176,9 @@ impl WlKeyboardHandler for Keyboard {
         });
         if !self.menu {
             if let Some(gone) = self.held.take().and_then(|w| w.upgrade()).filter(programs) {
-                slf.send_leave(serial, &gone);
+                if !typed {
+                    slf.send_leave(serial, &gone);
+                }
             }
             self.down = keys
                 .as_chunks::<4>()
@@ -4192,7 +4195,11 @@ impl WlKeyboardHandler for Keyboard {
 
     fn handle_leave(&mut self, slf: &Rc<WlKeyboard>, serial: u32, surface: &Rc<WlSurface>) {
         self.typing.borrow_mut().on = false;
-        if typing::keyboard_changed(slf) {
+        if typing::owns_keyboard(slf) {
+            self.set_focus(|f| f.on = false);
+            self.held = None;
+            self.down.clear();
+            self.menu = false;
             return;
         }
         if programs(surface) {

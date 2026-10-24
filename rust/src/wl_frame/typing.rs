@@ -141,7 +141,7 @@ fn overlay(window: &Rc<RefCell<Window>>, f: &Rc<Frames>, white: &Rc<OwnedFd>) ->
     );
     let pool = shm.new_send_create_pool(white, 4);
     quiet(&*pool);
-    let buffer = pool.new_send_create_buffer(0, 1, 1, 4, WlShmFormat::XRGB8888);
+    let buffer = pool.new_send_create_buffer(0, 1, 1, 4, WlShmFormat::ARGB8888);
     quiet(&*buffer);
     pool.send_destroy();
     attach_whole(&surface, &buffer, 1, 1);
@@ -393,10 +393,8 @@ impl Run {
             }
         }
         let state = self.target.keyboard_state.borrow();
-        if self.keymap.is_some() {
-            if let Some((fd, size)) = &state.keymap {
-                kb.send_keymap(WlKeyboardKeymapFormat::XKB_V1, fd, *size);
-            }
+        if let Some((fd, size)) = &state.keymap {
+            kb.send_keymap(WlKeyboardKeymapFormat::XKB_V1, fd, *size);
         }
         if let Some(root) = self.target.root.upgrade().filter(programs) {
             kb.send_leave(self.target.serial, &root);
@@ -459,7 +457,9 @@ pub(super) fn key(kb: &Rc<WlKeyboard>, key: u32, pressed: bool) -> bool {
             .as_ref()
             .is_some_and(|r| Weak::ptr_eq(&r.target.keyboard, &Rc::downgrade(kb)))
         {
-            if pressed {
+            // Focus changes and unrelated real input must not abort a host-
+            // selected background run. Escape remains an explicit cancellation.
+            if pressed && key == KEY_ESC {
                 t.cancel();
             }
             return true;
@@ -468,17 +468,11 @@ pub(super) fn key(kb: &Rc<WlKeyboard>, key: u32, pressed: bool) -> bool {
     })
 }
 
-pub(super) fn keyboard_changed(kb: &Rc<WlKeyboard>) -> bool {
-    TYPER.with_borrow_mut(|t| {
-        if t.run
+pub(super) fn owns_keyboard(kb: &Rc<WlKeyboard>) -> bool {
+    TYPER.with_borrow(|t| {
+        t.run
             .as_ref()
             .is_some_and(|r| r.began && Weak::ptr_eq(&r.target.keyboard, &Rc::downgrade(kb)))
-        {
-            t.cancel();
-            true
-        } else {
-            false
-        }
     })
 }
 

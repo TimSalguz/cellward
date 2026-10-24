@@ -1726,7 +1726,7 @@ impl Clip {
             } else if self.type_target.is_some() {
                 "Точка выбрана. Выберите текст или пароль и нажмите «Напечатать»."
             } else {
-                "Менеджер скроется. Нажмите на нужное поле в белом окне; Esc — отмена."
+                "Менеджер скроется. Нажмите на нужное поле в подсвеченном окне; Esc — отмена."
             })
             .size(12),
             row![
@@ -2615,7 +2615,7 @@ pub fn run(args: &[String]) -> iced::Result {
         clip_view,
     )
     .title(move |_: &Clip, _window| title.clone())
-    .theme(|_: &Clip, _window| None::<iced::Theme>)
+    .theme(|_: &Clip, _window| crate::appearance::load().theme())
     .subscription(Clip::subscription)
     .run()?;
     // Closed without a paste.

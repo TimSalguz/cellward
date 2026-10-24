@@ -95,6 +95,7 @@ def main():
     parser.add_argument("--grim")
     parser.add_argument("--window", help="also exercise the actual clipboard manager UI")
     parser.add_argument("--gui-only", action="store_true")
+    parser.add_argument("--frame-history", action="store_true", help="exercise the launch-bound history window instead of the tray manager")
     parser.add_argument("--fonts", help="small font directory to avoid scanning the host font collection")
     args = parser.parse_args()
     if args.gui_only and not args.window:
@@ -180,6 +181,14 @@ def main():
             wait_for(lambda: any(w["app_id"] == f"other-{mode}" for w in windows()))
             request = PREFIX + b"\1" + struct.pack("<QHHHB", token, 100, 150 if mode == 2 else 20, 5, min(mode, 1) if mode != 2 else 0) + text.encode()
             run = connect(pid, request)
+            if mode != 2:
+                # Previously only a pre-start focus change was exercised.
+                # Enter/leave while keys are already being emitted must not
+                # cancel the run or deliver the suffix to another window.
+                time.sleep(0.12)
+                msg(f"[con_id={target['id']}]", "focus")
+                time.sleep(0.08)
+                msg(f"[app_id=other-{mode}]", "focus")
             if mode == 2:
                 time.sleep(0.4)
                 cancel = connect(pid, PREFIX + b"\2" + struct.pack("<Q", token))
@@ -262,7 +271,9 @@ def main():
                             client.sendall(b"error\tunexpected test request\n")
             server = threading.Thread(target=serve, daemon=True)
             server.start()
-            manager = start([str(Path(args.window).resolve()), "clip", "--manager"], "manager")
+            gui_marker = wait_for(lambda: next((runtime / "vpn-zones/ask").glob("*.typing"), None))
+            gui_args = ["--history", "host", "--launch", gui_marker.stem] if args.frame_history else ["--manager"]
+            manager = start([str(Path(args.window).resolve()), "clip", *gui_args], "manager")
             manager_window = wait_for(lambda: next((w for w in windows() if w["app_id"] == "vpn-zone-window"), None))
             time.sleep(0.3)
             manager_window = next(w for w in windows() if w["app_id"] == "vpn-zone-window")
@@ -281,9 +292,10 @@ def main():
             rect = dict(manager_window["rect"])
             rect["x"] += (rect["width"] - manager_window["window_rect"]["width"]) // 2
             rect["y"] += rect["height"] - manager_window["window_rect"]["height"] - 1
-            click(rect["x"] + 25, rect["y"] + 95)
+            tab_offset = -36 if args.frame_history else 0
+            click(rect["x"] + 25, rect["y"] + 95 + tab_offset)
             screenshot("manager-typing-controls")
-            click(rect["x"] + 110, rect["y"] + 126)
+            click(rect["x"] + 110, rect["y"] + 126 + tab_offset)
             wait_for(lambda: not any(w["app_id"] == "vpn-zone-window" for w in windows()))
             time.sleep(0.3)
             screenshot("manager-point-overlay")
@@ -291,7 +303,7 @@ def main():
             wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
             time.sleep(0.2)
             screenshot("manager-point-chosen")
-            click(rect["x"] + 225, rect["y"] + 63)
+            click(rect["x"] + 225, rect["y"] + 63 + tab_offset)
             screenshot("manager-password-selected")
             for key in [103, 28]:
                 for down in [1, 0]:

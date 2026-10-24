@@ -1468,7 +1468,8 @@ impl Proxy {
             }
             descriptor = match request {
                 crate::type_input::Request::Select { .. } => {
-                    sealed_memfd(c"cw-type-overlay", &[255; 4], 4).ok()
+                    // Premultiplied white, 19% opacity: the field must stay visible.
+                    sealed_memfd(c"cw-type-overlay", &[48; 4], 4).ok()
                 }
                 crate::type_input::Request::Cancel { .. } => None,
                 crate::type_input::Request::Type { text, mode, .. } => {
