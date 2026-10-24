@@ -78,6 +78,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- Rounded title bars reserve only the space required by the arc, rather than
+  shifting buttons inward by the whole radius. The title and its buttons stay
+  above the corner pieces and share consistent drawing and input bounds.
 - Niri-following inner corners no longer truncate radii above 16 px. The
   always-visible title offsets the top arc's centre instead of substituting a
   smaller circle. Rendering buffers account for the larger supported radius.

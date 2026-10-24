@@ -602,6 +602,30 @@ pub(crate) fn trim(r: Rect, pieces: &[Rect]) -> Rect {
     }
 }
 
+/// The title's opaque rectangle may overlap a corner piece as far as the
+/// arc at its top permits. Reserving the entire radius shifts its buttons
+/// unnecessarily inward. Keep the whole rectangle inside the circle,
+/// including hover/pressed backgrounds, and its buttons inside the parent:
+/// some compositors do not hit-test children beyond the parent's bounds.
+fn rounded_title_span(mut title: Rect, pieces: &[Rect], radius: i32) -> Rect {
+    let mut end = title.x.saturating_add(title.w);
+    for (side, piece) in pieces.iter().take(2).enumerate() {
+        if title.y >= piece.y.saturating_add(piece.h) {
+            continue;
+        }
+        let r = f64::from(radius.max(0));
+        let dy = (r - f64::from(title.y.saturating_sub(piece.y))).clamp(0.0, r);
+        let inset = (r - (r * r - dy * dy).max(0.0).sqrt()).ceil() as i32;
+        if side == 0 {
+            title.x = title.x.max(piece.x.saturating_add(inset));
+        } else {
+            end = end.min(piece.x.saturating_add(piece.w).saturating_sub(inset));
+        }
+    }
+    title.w = end.saturating_sub(title.x).max(0);
+    title
+}
+
 /// The input region of the frame's own corner `corner` (top left, top
 /// right, bottom left, bottom right), in its own coordinates: the border's
 /// band — a press there resizes, as on the strips it stands for — and, on
@@ -2527,7 +2551,7 @@ impl Window {
         let strip = if self.look.tag() {
             tag_row(area, i, over)
         } else {
-            title_strip(area, i, over).map(|r| trim(r, pieces))
+            title_strip(area, i, over).map(|r| rounded_title_span(r, pieces, self.look.outer))
         };
         if self.laid == Some((area, i, strip)) {
             // Nothing moves; whether the strip shows may still change (the
@@ -2557,6 +2581,12 @@ impl Window {
         self.lay_title(f, root, top, strip);
         self.lay_corners(f, root, top, area);
         self.lay_outer(outer);
+        if outer.is_some() {
+            // Outer pieces are made before the title on the first layout.
+            // Restore the documented stacking order now that the title can
+            // overlap their opaque interiors: corners below title/buttons.
+            self.raise(top);
+        }
     }
 
     /// The round corners over `area`'s, before the program's commit: made
@@ -6556,6 +6586,53 @@ mod tests {
         border: 4,
         title: TITLE_HEIGHT,
     };
+
+    #[test]
+    fn button_rows_reclaim_corner_space_without_crossing_the_arc() {
+        for radius in [4, 12, 20, 32] {
+            for border in [0, 1, 4, 16] {
+                let i = Insets {
+                    border,
+                    title: TITLE_HEIGHT,
+                };
+                let o = Outer {
+                    radius,
+                    side: radius.max(border),
+                    top: radius.max(border + TITLE_HEIGHT),
+                    border,
+                    band: true,
+                };
+                let pieces = outer_rects(R, i, &o).unwrap();
+                let title = title_strip(R, i, true).unwrap();
+                let span = rounded_title_span(title, &pieces, radius);
+                let background = trim(title, &pieces);
+                assert!(span.x <= background.x);
+                assert!(span.x + span.w >= background.x + background.w);
+                let whole = geometry_up(R, i);
+                let r = f64::from(radius);
+                for x in [span.x, span.x + span.w] {
+                    let dx = f64::from((x - whole.x).min(whole.x + whole.w - x));
+                    let dy = f64::from(span.y - whole.y);
+                    if dx < r && dy < r {
+                        assert!((dx - r).powi(2) + (dy - r).powi(2) <= r * r + 0.001);
+                    }
+                }
+                if radius == 32 && border == 1 {
+                    assert!(span.w > background.w, "do not reserve a whole 32px radius");
+                    for look in [crate::wl_title::CELLWARD, crate::wl_title::MACOS] {
+                        let at = title_layout(span.w, &look).buttons.unwrap() + span.x;
+                        assert!(at >= span.x);
+                        assert!(at + look.width_all() <= span.x + span.w);
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            rounded_title_span(R, &[], 32),
+            R,
+            "square/fullscreen layouts unchanged"
+        );
+    }
 
     #[test]
     fn the_geometry_grows_by_the_frame() {

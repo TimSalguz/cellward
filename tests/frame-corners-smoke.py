@@ -6,12 +6,14 @@ screenshots and logs stay in the printed temporary directory.
 """
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import signal
 import subprocess
 import tempfile
 import time
+import sys
 
 
 def wait_for(fn, timeout=20):
@@ -58,6 +60,12 @@ def main():
         env["SWAYSOCK"] = str(wait_for(lambda: next(runtime.glob("sway-ipc*.sock"), None)))
         env["WAYLAND_DISPLAY"] = wait_for(lambda: next((p.name for p in runtime.glob("wayland-*") if not p.name.endswith(".lock")), None))
         outer_display = env["WAYLAND_DISPLAY"]
+        fifo = root / "pointer.fifo"
+        start([sys.executable, str(Path(__file__).with_name("vm-pointer.py")), str(fifo), "1200", "900"], "pointer")
+        wait_for(fifo.exists)
+        pointer = open(fifo, "w", buffering=1)
+        logs.append(pointer)
+        time.sleep(0.2)
         niri = root / "niri.kdl"
         niri.write_text('output "winit" { scale 1.0; }\nlayout { gaps 30; focus-ring { off; }; border { off; }; default-column-width { fixed 640; }; }\nprefer-no-csd\nanimations { off; }\nhotkey-overlay { skip-at-startup; }\nwindow-rule { geometry-corner-radius 32; clip-to-geometry true; }\n')
         env["NIRI_CONFIG"] = str(niri)
@@ -96,9 +104,19 @@ def main():
                     # 16px image: that cap left this part unpainted.
                     red, green, blue = pixel(left + 3, bottom - 20)
                     assert red > 100 and blue > 100 and green < 40, "thin inner arc is missing"
-                subprocess.run([args.niri, "msg", "action", "close-window"], env=env, check=True, stdout=subprocess.DEVNULL)
+                top = min(ys)
+                # Reveal the hover row, then target the newly reclaimed
+                # edge of the close cell (outside the old radius-sized inset).
+                pointer.write(f"move {(left + right) // 2} {top + width}\n")
+                time.sleep(0.2)
+                safe = math.ceil(32 - math.sqrt(32 * 32 - (32 - width) ** 2))
+                x, y = right + 1 - safe - 2, top + width + 10
+                pointer.write(f"move {x} {y}\n")
+                time.sleep(0.3)
+                subprocess.run([args.grim, str(root / f"{name}-close-hover.png")], env=env, check=True)
+                pointer.write("press\nrelease\n")
                 terminal.wait(timeout=10)
-                print(f"{name}: mapped, frame drawn, screenshot saved", flush=True)
+                print(f"{name}: frame drawn, new button position accepts real click; screenshots saved", flush=True)
     finally:
         for proc in reversed(processes):
             if proc.poll() is None:
