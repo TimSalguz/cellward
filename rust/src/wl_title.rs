@@ -522,6 +522,7 @@ pub fn premultiplied(color: Rgb, alpha: f32) -> [u8; 4] {
 /// look does not take the pointer, nor start a move.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Look {
+    pub interaction: crate::frame::Interaction,
     /// `full`, `soft` or `tag` (`crate::frame::Style`): the colours
     /// ([`Look::squares`], [`Look::title_color`]), the border's rings
     /// ([`Look::rings`]), and whether the title is a strip or a tag.
@@ -847,6 +848,7 @@ pub fn inner_radii(frame: &Frame) -> (i32, i32) {
 /// Stage 3's look, `full` with `cellward`'s buttons and square corners: the
 /// one the proxy's wire tests and the VM's old pixel checks are of.
 pub const LOOK: Look = Look {
+    interaction: crate::frame::DEFAULT_INTERACTION,
     style: Style::Full,
     buttons: CELLWARD,
     radius: 0,
@@ -891,6 +893,7 @@ impl Look {
             frame.outer.px().clamp(0, MAX_OUTER_RADIUS)
         };
         Self {
+            interaction: frame.interaction,
             style: frame.style,
             buttons: buttons_look(frame.buttons).with_fullscreen(frame.fullscreen_button),
             radius: bottom.clamp(0, MAX_DRAWN_RADIUS),
@@ -3156,6 +3159,7 @@ mod tests {
             fullscreen: crate::frame::DEFAULT_FULLSCREEN,
             fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
             double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+            interaction: crate::frame::DEFAULT_INTERACTION,
         };
         assert_eq!(
             Look::of(&frame),
@@ -3185,6 +3189,7 @@ mod tests {
             fullscreen: crate::frame::DEFAULT_FULLSCREEN,
             fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
             double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+            interaction: crate::frame::DEFAULT_INTERACTION,
         };
         // A niri of 20, a border of 4 — the strip of 20 over it
         // leaves the top square.
@@ -3253,6 +3258,7 @@ mod tests {
             fullscreen: crate::frame::DEFAULT_FULLSCREEN,
             fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
             double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+            interaction: crate::frame::DEFAULT_INTERACTION,
         };
         let look = Look::of(&frame);
         assert_eq!(
@@ -3574,6 +3580,7 @@ mod tests {
             fullscreen: crate::frame::DEFAULT_FULLSCREEN,
             fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
             double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+            interaction: crate::frame::DEFAULT_INTERACTION,
         };
         let look = Look::of(&frame);
         assert_eq!((look.outer, look.border, look.band), (20, 4, true));

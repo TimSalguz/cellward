@@ -91,6 +91,44 @@ pub const FULLSCREEN_NOTICE_SETTING: &str = "frame-fullscreen-notice";
 pub const FULLSCREEN_BUTTON_SETTING: &str = "frame-fullscreen-button";
 /// What a double click on the title strip does: `maximize` or `none`.
 pub const DOUBLE_CLICK_SETTING: &str = "frame-double-click";
+pub const HOVER_EDGE_SETTING: &str = "frame-hover-edge";
+pub const RESIZE_CORNER_SETTING: &str = "frame-resize-corner";
+
+/// Hit regions, not extra access to the program's content. The resize
+/// band's thickness remains the visual border width; this controls how
+/// far along its ends a drag resizes both edges rather than just one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interaction {
+    pub hover_edge: i32,
+    pub resize_corner: i32,
+}
+pub const DEFAULT_INTERACTION: Interaction = Interaction {
+    hover_edge: 2,
+    resize_corner: 16,
+};
+
+pub fn parse_hover_edge(text: &str) -> Option<i32> {
+    whole(text, 12).filter(|v| *v >= 1)
+}
+pub fn parse_resize_corner(text: &str) -> Option<i32> {
+    whole(text, 64)
+}
+pub fn hover_edge(config: &Path) -> (i32, Source) {
+    word_setting(
+        config,
+        HOVER_EDGE_SETTING,
+        parse_hover_edge,
+        DEFAULT_INTERACTION.hover_edge,
+    )
+}
+pub fn resize_corner(config: &Path) -> (i32, Source) {
+    word_setting(
+        config,
+        RESIZE_CORNER_SETTING,
+        parse_resize_corner,
+        DEFAULT_INTERACTION.resize_corner,
+    )
+}
 
 /// The most characters of one part of the title — the zone's name, the
 /// container's — that are drawn; a longer one is cut, with an ellipsis.
@@ -808,6 +846,7 @@ pub struct Frame {
     pub fullscreen: Fullscreen,
     pub fullscreen_button: FullscreenButton,
     pub double_click: DoubleClick,
+    pub interaction: Interaction,
 }
 
 impl Frame {
@@ -823,6 +862,10 @@ impl Frame {
             outer: outer_radius(config).0,
             fullscreen: fullscreen(config),
             fullscreen_button: fullscreen_button(config).0,
+            interaction: Interaction {
+                hover_edge: hover_edge(config).0,
+                resize_corner: resize_corner(config).0,
+            },
             double_click: double_click(config).0,
         }
     }
@@ -853,16 +896,25 @@ impl Frame {
     pub fn to_arg(self) -> String {
         let default = (DEFAULT_BUTTONS, DEFAULT_STYLE, DEFAULT_RADIUS);
         let fullscreen = (self.fullscreen, self.fullscreen_button, self.double_click);
-        let tail = if fullscreen
-            == (
-                DEFAULT_FULLSCREEN,
-                DEFAULT_FULLSCREEN_BUTTON,
-                DEFAULT_DOUBLE_CLICK,
-            ) {
+        let interaction = if self.interaction == DEFAULT_INTERACTION {
             String::new()
         } else {
             format!(
-                ":{}:{}:{}:{}:{}",
+                ":{}:{}",
+                self.interaction.hover_edge, self.interaction.resize_corner
+            )
+        };
+        let tail = if interaction.is_empty()
+            && fullscreen
+                == (
+                    DEFAULT_FULLSCREEN,
+                    DEFAULT_FULLSCREEN_BUTTON,
+                    DEFAULT_DOUBLE_CLICK,
+                ) {
+            String::new()
+        } else {
+            format!(
+                ":{}:{}:{}:{}:{}{interaction}",
                 fullscreen_width_word(self.fullscreen.width),
                 self.fullscreen.title.as_str(),
                 self.fullscreen.notice,
@@ -942,6 +994,16 @@ impl Frame {
             None => DEFAULT_DOUBLE_CLICK,
             Some(click) => DoubleClick::parse(click)?,
         };
+        let interaction = Interaction {
+            hover_edge: match parts.next() {
+                Some(value) => parse_hover_edge(value)?,
+                None => DEFAULT_INTERACTION.hover_edge,
+            },
+            resize_corner: match parts.next() {
+                Some(value) => parse_resize_corner(value)?,
+                None => DEFAULT_INTERACTION.resize_corner,
+            },
+        };
         if parts.next().is_some() {
             return None;
         }
@@ -956,6 +1018,7 @@ impl Frame {
             fullscreen,
             fullscreen_button,
             double_click,
+            interaction,
         })
     }
 }
@@ -1057,6 +1120,43 @@ impl Setup {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn interaction_bounds_round_trip_without_changing_legacy_arguments() {
+        let old = Frame::parse_arg("ff00ff:4:hover").unwrap();
+        assert_eq!(old.interaction, DEFAULT_INTERACTION);
+        assert_eq!(old.to_arg(), "ff00ff:4:hover");
+        for hover_edge in [1, 6, 12] {
+            for resize_corner in [0, 24, 64] {
+                let frame = Frame {
+                    interaction: Interaction {
+                        hover_edge,
+                        resize_corner,
+                    },
+                    ..old
+                };
+                assert_eq!(Frame::parse_arg(&frame.to_arg()), Some(frame));
+            }
+        }
+        for bad in ["0", "13", "-1", " 2", "1.5"] {
+            assert!(parse_hover_edge(bad).is_none());
+        }
+        for bad in ["65", "-1", "NaN"] {
+            assert!(parse_resize_corner(bad).is_none());
+        }
+        let base = old.to_arg();
+        let extended = Frame {
+            interaction: Interaction {
+                hover_edge: 6,
+                resize_corner: 24,
+            },
+            ..old
+        }
+        .to_arg();
+        assert!(Frame::parse_arg(&extended.replace(":6:24", ":0:24")).is_none());
+        assert!(Frame::parse_arg(&format!("{extended}:extra")).is_none());
+        assert_eq!(Frame::parse_arg(&base), Some(old));
+    }
 
     #[test]
     fn an_explicit_frame_without_a_settings_directory_keeps_its_width() {
@@ -1197,6 +1297,7 @@ mod tests {
             fullscreen: DEFAULT_FULLSCREEN,
             fullscreen_button: DEFAULT_FULLSCREEN_BUTTON,
             double_click: DEFAULT_DOUBLE_CLICK,
+            interaction: crate::frame::DEFAULT_INTERACTION,
         };
         assert_eq!(f.to_arg(), "0102ff:6:hover");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));
@@ -1240,6 +1341,7 @@ mod tests {
             fullscreen: DEFAULT_FULLSCREEN,
             fullscreen_button: DEFAULT_FULLSCREEN_BUTTON,
             double_click: DEFAULT_DOUBLE_CLICK,
+            interaction: crate::frame::DEFAULT_INTERACTION,
         };
         assert_eq!(f.to_arg(), "ff00ff:4:always:macos:tag:12");
         assert_eq!(Frame::parse_arg(&f.to_arg()), Some(f));

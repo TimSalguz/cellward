@@ -30,6 +30,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for tool in ["core", "sway", "swaymsg", "niri", "foot", "grim", "fonts"]:
         p.add_argument(f"--{tool}", required=True)
+    p.add_argument("--hover-edge", type=int, default=2, choices=range(1, 13))
+    p.add_argument("--resize-corner", type=int, default=16, choices=range(65))
     args = p.parse_args()
     root = Path(tempfile.mkdtemp(prefix="cellward-corners-"))
     print(f"Artifacts: {root}", flush=True)
@@ -76,7 +78,7 @@ def main():
             for width in [1, 4]:
                 name = f"corners-{mode}-{width}"
                 terminal = start([str(Path(args.core).resolve()), "wl-sandbox", name, "--frame",
-                                  f"ff00ff:{width}:{mode}:cellward:full:niri32:niri32",
+                                  f"ff00ff:{width}:{mode}:cellward:full:niri32:niri32:same:hover:3:one:maximize:{args.hover_edge}:{args.resize_corner}",
                                   "--frame-title", f"Network: test | Container: {name}", "--",
                                   args.foot, "--app-id", name, "--font", "DejaVu Sans Mono:size=14",
                                   "sh", "-c", "printf 'Thin rounded frame\n'; sleep 120"], name)
@@ -107,7 +109,7 @@ def main():
                 top = min(ys)
                 # Reveal the hover row, then target the newly reclaimed
                 # edge of the close cell (outside the old radius-sized inset).
-                pointer.write(f"move {(left + right) // 2} {top + width}\n")
+                pointer.write(f"move {(left + right) // 2} {top + width + args.hover_edge - 1}\n")
                 time.sleep(0.2)
                 safe = math.ceil(32 - math.sqrt(32 * 32 - (32 - width) ** 2))
                 x, y = right + 1 - safe - 2, top + width + 10

@@ -4588,6 +4588,8 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                          cellward frame fullscreen notice on (3 с, по умолчанию)|off|<0–30>\n\
                          cellward frame fullscreen-button one (по умолчанию)|two|menu|none\n\
                          cellward frame double-click maximize (по умолчанию)|none\n\
+                         cellward frame hover-edge <1–12>|default (по умолчанию 2)\n\
+                         cellward frame resize-corner <0–64>|default (по умолчанию 16)\n\
                          cellward frame color <зона> default (из имени зоны)|<#rrggbb>";
     let title_words = |mode: TitleMode| match mode {
         TitleMode::Always => "всегда (always)",
@@ -4837,6 +4839,43 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 from(source, "programs.cellward.frame.doubleClick")
             );
             0
+        }
+        Some(kind @ ("hover-edge" | "resize-corner")) => {
+            use crate::frame as f;
+            let Some(value) = args
+                .get(1)
+                .and_then(|v| v.to_str())
+                .filter(|_| args.len() == 2)
+            else {
+                eprintln!("cellward frame hover-edge <1–12|default>; resize-corner <0–64|default>");
+                return 1;
+            };
+            let (name, valid) = if kind == "hover-edge" {
+                (f::HOVER_EDGE_SETTING, f::parse_hover_edge(value).is_some())
+            } else {
+                (
+                    f::RESIZE_CORNER_SETTING,
+                    f::parse_resize_corner(value).is_some(),
+                )
+            };
+            let result = if value == "default" {
+                reset_frame_preview(tools, name)
+            } else if valid {
+                write_frame_preview(tools, name, OsStr::new(value))
+            } else {
+                eprintln!("hover-edge: 1–12 px; resize-corner: 0–64 px (0 — только одна сторона)");
+                return 1;
+            };
+            match result {
+                Ok(()) => {
+                    println!("{kind}: {value} — {AT_ONCE}");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("не записать {e}");
+                    1
+                }
+            }
         }
         Some("style") => {
             let Some(value) = args.get(1).and_then(|v| v.to_str()) else {

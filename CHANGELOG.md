@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Frame settings now expose the hover trigger depth (1–12 logical px) and
+  diagonal resize-corner span (0–64 px), with live cosmetic previews and Nix
+  overrides/reset. The app's top two pointer pixels remain accessible; the
+  resize band's thickness still follows the visible border, not hidden input
+  over the app's controls.
 - Frame thickness and inner/outer radii now have live sliders: dragging previews
   the change on open frames, Save commits the local override, and Cancel restores
   the previous settings, including Nix declarations. Permission editors do not

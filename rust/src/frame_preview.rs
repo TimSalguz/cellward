@@ -84,6 +84,8 @@ impl Session {
             crate::frame::WIDTH_SETTING
                 | crate::frame::RADIUS_SETTING
                 | crate::frame::OUTER_RADIUS_SETTING
+                | crate::frame::HOVER_EDGE_SETTING
+                | crate::frame::RESIZE_CORNER_SETTING
         ) || value.len() > 64
             || value.chars().any(char::is_control)
         {

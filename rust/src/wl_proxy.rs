@@ -3540,6 +3540,7 @@ mod tests {
                         fullscreen: crate::frame::DEFAULT_FULLSCREEN,
                         fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
                         double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+                        interaction: crate::frame::DEFAULT_INTERACTION,
                     },
                     title: String::new(),
                     font: None,
@@ -4714,6 +4715,7 @@ mod tests {
                 // Stage 3's row: the fullscreen buttons have their test.
                 fullscreen_button: crate::frame::FullscreenButton::None,
                 double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+                interaction: crate::frame::DEFAULT_INTERACTION,
             },
             title: "nl · основной".to_owned(),
             font,
@@ -6855,6 +6857,7 @@ mod tests {
                 fullscreen: crate::frame::DEFAULT_FULLSCREEN,
                 fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
                 double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+                interaction: crate::frame::DEFAULT_INTERACTION,
             };
             sys::send_with_fds(channel.as_raw_fd(), &frame_message(frame, None), &[]).unwrap();
         };
@@ -6952,6 +6955,7 @@ mod tests {
             fullscreen: crate::frame::DEFAULT_FULLSCREEN,
             fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
             double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+            interaction: crate::frame::DEFAULT_INTERACTION,
         };
         let colours = pixel(blue).unwrap();
         let channel = rig.channel.as_ref().unwrap();
@@ -7027,6 +7031,16 @@ mod tests {
         fs::write(config.join(OUTER_RADIUS_SETTING), "12").unwrap();
         let (frame, pixel, _) = live.changed().expect("the outer radius");
         assert_eq!(frame.outer, crate::frame::Radius::Px(12));
+        fs::write(config.join(crate::frame::HOVER_EDGE_SETTING), "6").unwrap();
+        let (frame, _, _) = live
+            .changed()
+            .expect("hover region changed on an open frame");
+        assert_eq!(frame.interaction.hover_edge, 6);
+        fs::write(config.join(crate::frame::RESIZE_CORNER_SETTING), "24").unwrap();
+        let (frame, _, _) = live
+            .changed()
+            .expect("resize corner changed on an open frame");
+        assert_eq!(frame.interaction.resize_corner, 24);
         assert!(pixel.is_some(), "the new corner geometry");
         crate::declared::declare(
             &config.join(crate::cli::DECLARED_DIR).join(WIDTH_SETTING),

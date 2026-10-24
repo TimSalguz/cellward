@@ -1260,6 +1260,7 @@ mod tests {
                 fullscreen: crate::frame::DEFAULT_FULLSCREEN,
                 fullscreen_button: crate::frame::DEFAULT_FULLSCREEN_BUTTON,
                 double_click: crate::frame::DEFAULT_DOUBLE_CLICK,
+                interaction: crate::frame::DEFAULT_INTERACTION,
             }
         );
         assert_eq!(setup.title, "nl · банк", "cleaned again on the way in");

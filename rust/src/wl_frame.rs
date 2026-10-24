@@ -511,10 +511,23 @@ pub(crate) fn ring_strips(g: Rect, i: Insets, widths: &[i32]) -> Vec<Rect> {
 /// border, on its `side` — resizes: as [`edges`] says of the same point of
 /// the whole border's strip of that side, `outer` ([`strips`]). Every ring
 /// of a side resizes alike, and a corner is a corner of the window.
+#[cfg(test)]
 pub(crate) fn ring_edges(side: Side, strip: Rect, outer: Rect, border: i32, x: f64, y: f64) -> u32 {
+    ring_edges_with_corner(side, strip, outer, border, x, y, CORNER)
+}
+
+fn ring_edges_with_corner(
+    side: Side,
+    strip: Rect,
+    outer: Rect,
+    border: i32,
+    x: f64,
+    y: f64,
+    corner: i32,
+) -> u32 {
     let x = x + f64::from(strip.x) - f64::from(outer.x);
     let y = y + f64::from(strip.y) - f64::from(outer.y);
-    edges(side, outer, border, x, y)
+    edges_with_corner(side, outer, border, x, y, corner)
 }
 
 /// Where the round corners go over the program's geometry `g`: squares of
@@ -699,14 +712,20 @@ pub(crate) const EDGE_RIGHT: u32 = 8;
 
 /// How far from a corner of the window, along either edge, the border
 /// resizes both edges of that corner, logical pixels.
-pub(crate) const CORNER: i32 = 16;
+#[cfg(test)]
+pub(crate) const CORNER: i32 = crate::frame::DEFAULT_INTERACTION.resize_corner;
 
 /// The edges a press at (`x`, `y`) on the border's strip `strip` (on its
 /// `side`, of a border `border` wide; surface-local) resizes: its own, and
 /// the one across it within [`CORNER`] of a corner of the window. The side
 /// strips begin under the top strip and end above the bottom one, `border`
 /// from the corners.
+#[cfg(test)]
 pub(crate) fn edges(side: Side, strip: Rect, border: i32, x: f64, y: f64) -> u32 {
+    edges_with_corner(side, strip, border, x, y, CORNER)
+}
+
+fn edges_with_corner(side: Side, strip: Rect, border: i32, x: f64, y: f64, corner: i32) -> u32 {
     let (own, along, len, from, before, after) = match side {
         Side::Top => (EDGE_TOP, x, strip.w, 0, EDGE_LEFT, EDGE_RIGHT),
         Side::Bottom => (EDGE_BOTTOM, x, strip.w, 0, EDGE_LEFT, EDGE_RIGHT),
@@ -717,7 +736,7 @@ pub(crate) fn edges(side: Side, strip: Rect, border: i32, x: f64, y: f64) -> u32
     // From the window's corner, and the whole edge.
     let at = along + from;
     let whole = f64::from(len) + 2.0 * from;
-    let corner = f64::from(CORNER);
+    let corner = f64::from(corner.clamp(0, 64));
     if at < corner {
         own | before
     } else if at >= whole - corner {
@@ -792,9 +811,14 @@ pub(crate) fn source_width(shown: i32, text: i32, buffer: i32) -> i32 {
 /// wants a hover strip shown (`Some(true)`), hidden (`Some(false)`), or as
 /// it is: at the very top of the window it comes out; under where it would
 /// be, it goes.
+#[cfg(test)]
 pub(crate) fn hover_at(g: Rect, y: f64) -> Option<bool> {
+    hover_at_edge(g, y, HOVER_EDGE)
+}
+
+fn hover_at_edge(g: Rect, y: f64, edge: i32) -> Option<bool> {
     let top = f64::from(g.y);
-    if y < top + f64::from(HOVER_EDGE) {
+    if y < top + f64::from(edge.clamp(1, 12)) {
         Some(true)
     } else if y >= top + f64::from(TITLE_HEIGHT) {
         Some(false)
@@ -2837,7 +2861,15 @@ impl Window {
                     return Hit::Nothing;
                 };
                 let outer = strips(area, i)[side.index()];
-                Hit::Edge(ring_edges(side, trim(strip, pieces), outer, i.border, x, y))
+                Hit::Edge(ring_edges_with_corner(
+                    side,
+                    trim(strip, pieces),
+                    outer,
+                    i.border,
+                    x,
+                    y,
+                    self.look.interaction.resize_corner,
+                ))
             }
             // The frame's own corner: the strip of the border it stands
             // for where the point is in the border's band — a corner of the
@@ -2861,7 +2893,15 @@ impl Window {
                     return Hit::Title;
                 };
                 let outer = strips(area, i)[side.index()];
-                Hit::Edge(ring_edges(side, piece, outer, i.border, x, y))
+                Hit::Edge(ring_edges_with_corner(
+                    side,
+                    piece,
+                    outer,
+                    i.border,
+                    x,
+                    y,
+                    self.look.interaction.resize_corner,
+                ))
             }
         }
     }
@@ -5534,11 +5574,10 @@ impl Pointer {
         let want = match &target {
             Some((_, Spot::Top)) => Some(true),
             Some((_, Spot::Side)) => Some(false),
-            Some((window, Spot::Root)) => window
-                .try_borrow()
-                .ok()
-                .and_then(|w| w.area())
-                .and_then(|g| hover_at(g, y.to_f64())),
+            Some((window, Spot::Root)) => window.try_borrow().ok().and_then(|w| {
+                w.area()
+                    .and_then(|g| hover_at_edge(g, y.to_f64(), w.look.interaction.hover_edge))
+            }),
             None => None,
         };
         if let Some(left) = self.leaving.take().and_then(|w| w.upgrade()) {
@@ -5585,11 +5624,10 @@ impl Pointer {
         let Some(window) = self.on.as_ref().and_then(Weak::upgrade) else {
             return;
         };
-        let want = window
-            .try_borrow()
-            .ok()
-            .and_then(|w| w.area())
-            .and_then(|g| hover_at(g, y.to_f64()));
+        let want = window.try_borrow().ok().and_then(|w| {
+            w.area()
+                .and_then(|g| hover_at_edge(g, y.to_f64(), w.look.interaction.hover_edge))
+        });
         if let Some(on) = want {
             set_hover(&window, on);
         }
@@ -6857,6 +6895,35 @@ mod tests {
         assert_eq!(hover_at(g, top + f64::from(TITLE_HEIGHT) - 1.0), None);
         assert_eq!(hover_at(g, top + f64::from(TITLE_HEIGHT)), Some(false));
         assert_eq!(hover_at(g, top + 300.0), Some(false));
+    }
+
+    #[test]
+    fn configurable_trigger_and_corner_span_do_not_widen_input_over_the_app() {
+        let top = f64::from(R.y);
+        assert_eq!(hover_at_edge(R, top + 5.0, 2), None);
+        assert_eq!(hover_at_edge(R, top + 5.0, 6), Some(true));
+        assert_eq!(hover_at_edge(R, top + 6.0, 6), None);
+        assert_eq!(
+            hover_at_edge(R, top + f64::from(TITLE_HEIGHT), 12),
+            Some(false)
+        );
+        assert_eq!(
+            HOVER_EDGE, 2,
+            "the app's pointer pass-through strip is unchanged"
+        );
+        let strip = strips(R, B)[2];
+        assert_eq!(
+            edges_with_corner(Side::Left, strip, 4, 1.0, 12.0, 8),
+            EDGE_LEFT
+        );
+        assert_eq!(
+            edges_with_corner(Side::Left, strip, 4, 1.0, 12.0, 24),
+            EDGE_LEFT | EDGE_TOP
+        );
+        assert_eq!(
+            edges_with_corner(Side::Left, strip, 4, 1.0, 0.0, 0),
+            EDGE_LEFT
+        );
     }
 
     #[test]

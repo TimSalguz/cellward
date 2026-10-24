@@ -1178,7 +1178,10 @@ impl Window {
     fn preview_number(&self, key: &str, value: &str) {
         if self.req.frame_preview
             && self.perms_only()
-            && matches!(key, "width" | "radius" | "outer-radius")
+            && matches!(
+                key,
+                "width" | "radius" | "outer-radius" | "hover-edge" | "resize-corner"
+            )
         {
             use std::io::Write;
             println!("preview\t{key}\t{value}");

@@ -53,6 +53,8 @@ fn setting_row(
         "outer-radius" => crate::frame::OUTER_RADIUS_SETTING,
         "fullscreen-button" => crate::frame::FULLSCREEN_BUTTON_SETTING,
         "double-click" => crate::frame::DOUBLE_CLICK_SETTING,
+        "hover-edge" => crate::frame::HOVER_EDGE_SETTING,
+        "resize-corner" => crate::frame::RESIZE_CORNER_SETTING,
         _ => name,
     };
     let reset = if crate::declared::declares(config, file) {
@@ -238,6 +240,41 @@ pub fn rows(
         click.as_str().to_owned(),
         false,
     );
+    for (key, label, now, choices) in [
+        (
+            "hover-edge",
+            "Область раскрытия заголовка, px",
+            crate::frame::hover_edge(c).0,
+            vec![
+                ("1", "1"),
+                ("2", "2"),
+                ("4", "4"),
+                ("6", "6"),
+                ("8", "8"),
+                ("12", "12"),
+            ],
+        ),
+        (
+            "resize-corner",
+            "Длина участка углового resize, px",
+            crate::frame::resize_corner(c).0,
+            vec![
+                ("0", "выключить"),
+                ("8", "8"),
+                ("16", "16"),
+                ("24", "24"),
+                ("32", "32"),
+                ("48", "48"),
+                ("64", "64"),
+            ],
+        ),
+    ] {
+        push(
+            with(setting_row(c, key, label, &choices), &now.to_string()),
+            now.to_string(),
+            false,
+        );
+    }
     if let Some(zone) = zone.filter(|z| {
         crate::cli::safe_zone_name(std::ffi::OsStr::new(z)) && tools.state.join(z).is_dir()
     }) {
@@ -277,7 +314,7 @@ pub fn request(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Strin
     let (perms, values) = rows(tools, zone, record);
     let of = PermOf {
         tag: "this".to_owned(),
-        scope: "Вид и скругления — для всех окон; цвет сети — для всех её окон, цвет контейнера — только для него. Толщина и радиусы меняются при движении ползунков; отмена возвращает прежние значения, «Сохранить» закрепляет изменения поверх Nix. Закрепление в Nix — отдельно в stillconf."
+        scope: "Вид — для всех окон; цвет сети — для её окон, цвет контейнера — только для него. Толщина, радиусы и области hover/resize имеют живой предпросмотр; отмена возвращает прежние значения, «Сохранить» закрепляет их поверх Nix. Толщина resize — сама рамка; угловой участок задаёт длину вдоль её краёв. Верхние 2 px доступны приложению. Закрепление в Nix — отдельно в stillconf."
             .to_owned(),
         values,
     };
@@ -294,6 +331,14 @@ fn preview_value(tools: &Tools, key: &str, value: &str) -> Option<(&'static str,
         "width" => (f::WIDTH_SETTING, f::DEFAULT_WIDTH.to_string()),
         "radius" => (f::RADIUS_SETTING, f::DEFAULT_RADIUS.word()),
         "outer-radius" => (f::OUTER_RADIUS_SETTING, f::DEFAULT_OUTER_RADIUS.word()),
+        "hover-edge" => (
+            f::HOVER_EDGE_SETTING,
+            f::DEFAULT_INTERACTION.hover_edge.to_string(),
+        ),
+        "resize-corner" => (
+            f::RESIZE_CORNER_SETTING,
+            f::DEFAULT_INTERACTION.resize_corner.to_string(),
+        ),
         _ => return None,
     };
     let value = if value == "default" {
@@ -305,6 +350,8 @@ fn preview_value(tools: &Tools, key: &str, value: &str) -> Option<(&'static str,
     let valid = match key {
         "width" => value.parse::<u32>().is_ok_and(|n| n <= f::MAX_WIDTH as u32),
         "radius" => f::parse_radius(&value).is_some(),
+        "hover-edge" => f::parse_hover_edge(&value).is_some(),
+        "resize-corner" => f::parse_resize_corner(&value).is_some(),
         _ => f::parse_outer_radius(&value).is_some(),
     };
     valid.then_some((name, value))
@@ -405,7 +452,9 @@ pub fn apply(
                 vec![if value == "off" { "hide" } else { "show" }.into()]
             }
             "width" | "style" | "title" | "buttons" | "radius" | "outer-radius"
-            | "fullscreen-button" | "double-click" => vec![key.into(), value.into()],
+            | "fullscreen-button" | "double-click" | "hover-edge" | "resize-corner" => {
+                vec![key.into(), value.into()]
+            }
             _ => continue,
         };
         if crate::cli::frame(tools, &args) != 0 {
@@ -598,6 +647,8 @@ exit TEST_EXIT
             (crate::frame::BUTTONS_SETTING, "kde"),
             (crate::frame::FULLSCREEN_BUTTON_SETTING, "two"),
             (crate::frame::DOUBLE_CLICK_SETTING, "none"),
+            (crate::frame::HOVER_EDGE_SETTING, "3"),
+            (crate::frame::RESIZE_CORNER_SETTING, "8"),
             (crate::frame::SWITCH_SETTING, "hidden"),
         ] {
             crate::declared::declare(&tools.config.join(crate::cli::DECLARED_DIR).join(name), nix);
@@ -623,6 +674,8 @@ exit TEST_EXIT
                 ("buttons".into(), "macos".into()),
                 ("fullscreen-button".into(), "menu".into()),
                 ("double-click".into(), "maximize".into()),
+                ("hover-edge".into(), "6".into()),
+                ("resize-corner".into(), "24".into()),
                 ("show".into(), "on".into()),
             ]
         )
@@ -638,6 +691,8 @@ exit TEST_EXIT
             ("buttons", "macos"),
             ("fullscreen-button", "menu"),
             ("double-click", "maximize"),
+            ("hover-edge", "6"),
+            ("resize-corner", "24"),
             ("show", "on"),
         ] {
             assert_eq!(self::value(&values, key), value);
@@ -656,6 +711,8 @@ exit TEST_EXIT
                 ("buttons".into(), "default".into()),
                 ("fullscreen-button".into(), "default".into()),
                 ("double-click".into(), "default".into()),
+                ("hover-edge".into(), "default".into()),
+                ("resize-corner".into(), "default".into()),
                 ("show".into(), "default".into()),
             ]
         )
@@ -671,6 +728,8 @@ exit TEST_EXIT
             ("buttons", "kde"),
             ("fullscreen-button", "two"),
             ("double-click", "none"),
+            ("hover-edge", "3"),
+            ("resize-corner", "8"),
             ("show", "off"),
         ] {
             assert_eq!(self::value(&values, key), value);

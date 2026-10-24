@@ -878,6 +878,8 @@ let
     "frame.fullscreen.notice"
     "frame.fullscreenButton"
     "frame.doubleClick"
+    "frame.hoverEdge"
+    "frame.resizeCorner"
     "tray.badge"
     "compositorRestriction.enable"
     "desktop.windowMenu.key"
@@ -1453,6 +1455,19 @@ in
       description = "Двойной клик по строке заголовка: maximize — развернуть окно, повторно — вернуть (что сделает композитор, решает он: плиточные раскладки могут развёртывание не поддерживать); none — ничего. null — не задавать из Nix (тогда cellward frame double-click, иначе maximize). Меняется на ходу.";
     };
 
+    frame.hoverEdge = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 1 12);
+      default = null;
+      example = 4;
+      description = "Глубина области наведения у верхнего края содержимого для раскрытия hover-заголовка, в логических px (по умолчанию 2). Не расширяет перехват указателя: верхние 2 px остаются доступны приложению, например панели Firefox в полном экране. Меняется на ходу; null — локальная настройка cellward frame hover-edge.";
+    };
+    frame.resizeCorner = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 0 64);
+      default = null;
+      example = 24;
+      description = "Длина участка вдоль края рамки, где resize меняет две стороны угла (по умолчанию 16 логических px); 0 — только одна сторона. Толщина области resize остаётся толщиной самой рамки, без невидимого перехвата содержимого. Меняется на ходу; null — локальная настройка cellward frame resize-corner.";
+    };
+
     tray.badge = lib.mkOption {
       type = lib.types.nullOr (
         lib.types.enum [
@@ -1904,6 +1919,12 @@ in
     })
     (lib.mkIf (cfg.frame.doubleClick != null) {
       ".config/vpn-zones/declared/frame-double-click".text = cfg.frame.doubleClick;
+    })
+    (lib.mkIf (cfg.frame.hoverEdge != null) {
+      ".config/vpn-zones/declared/frame-hover-edge".text = toString cfg.frame.hoverEdge;
+    })
+    (lib.mkIf (cfg.frame.resizeCorner != null) {
+      ".config/vpn-zones/declared/frame-resize-corner".text = toString cfg.frame.resizeCorner;
     })
     (lib.mkIf (cfg.compositorRestriction.enable != null) {
       ".config/vpn-zones/declared/wayland-sandbox".text = if cfg.compositorRestriction.enable then "on" else "off";
