@@ -1281,7 +1281,7 @@ in
     clipboard.history = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "История буфера обмена по контейнерам (docs/CLIPBOARD.md): у каждого контейнера своя, у хоста своя, зашифрованы на диске (~/.local/state/cellward-clip). Пишет служба cellward-clip — без сети, только сокеты Unix. cellward-clip histories / list <история>.";
+      description = "История буфера обмена по контейнерам (docs/CLIPBOARD.md): у каждого контейнера своя, у хоста своя, зашифрованы на диске (~/.local/state/cellward-clip). Служба cellward-clip показывает значок в трее и открывает менеджер с вкладками; сеть ей не нужна, только сокеты Unix. cellward-clip histories / list <история>.";
     };
     clipboard.window.textLines = lib.mkOption {
       type = lib.types.ints.between 1 10;
@@ -2148,6 +2148,7 @@ in
     };
     Service = {
       ExecStart = "${cellward-clip}/bin/cellward-clip daemon";
+      Environment = [ "CELLWARD_CLIP_WINDOW=${vpn-zone-window}/bin/vpn-zone-window" ];
       Restart = "on-failure";
       RestartSec = 2;
       RestrictAddressFamilies = [ "AF_UNIX" ];

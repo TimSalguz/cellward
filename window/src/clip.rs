@@ -182,16 +182,19 @@ pub enum Msg {
     Select(usize),
     Paste(u64),
     Whole(u64),
-    Got(u64, Result<String, String>),
-    Thumb(u64, Result<crate::thumb::Thumb, String>),
+    Got(String, u64, Result<String, String>),
+    Thumb(String, u64, Result<crate::thumb::Thumb, String>),
     Fold(u64),
     MoveAsk(u64),
     Histories(Result<Vec<String>, String>),
+    Tabs(Result<Vec<String>, String>),
+    Switch(String),
+    Refresh,
     MoveTo(u64, String),
     Moved(Result<String, String>),
     DeleteAsk(u64),
     DeleteYes(u64),
-    Deleted(u64, Result<String, String>),
+    Deleted(String, u64, Result<String, String>),
     Cancel,
     Key(Press),
     Dismiss,
@@ -226,6 +229,10 @@ pub enum Msg {
 
 pub struct Clip {
     history: String,
+    /// The host manager shows histories as tabs; a frame-opened history stays
+    /// scoped to its launch and cannot silently browse another container.
+    manager: bool,
+    tabs: Vec<String>,
     /// A text's lines shown before «показать целиком», and an image's
     /// thumbnail's height in lines.
     lines: usize,
@@ -421,6 +428,8 @@ impl Clip {
     pub fn new(history: String, can_paste: bool, socket: PathBuf) -> Self {
         Self {
             history,
+            manager: false,
+            tabs: Vec::new(),
             lines: PREVIEW_LINES,
             image_lines: IMAGE_LINES,
             thumbs: HashMap::new(),
@@ -519,6 +528,18 @@ impl Clip {
         self.load(false)
     }
 
+    fn load_tabs(&self) -> Task<Msg> {
+        let socket = self.socket.clone();
+        Task::perform(
+            clipd::off_thread(move || {
+                clipd::ask_text(&socket, "histories")
+                    .map_err(|f| f.text())
+                    .and_then(|a| clipd::parse_histories(&a))
+            }),
+            |r| Msg::Tabs(r.unwrap_or_else(|| Err("служба истории не ответила".to_owned()))),
+        )
+    }
+
     /// Ask the daemon `request` expecting `ok[⇥value]`.
     fn ok(
         &self,
@@ -550,7 +571,7 @@ impl Clip {
             }
             // Asked once: an answer that is an error is kept as one.
             self.thumbs.insert(e.id, Err(String::new()));
-            let (id, socket) = (e.id, self.socket.clone());
+            let (id, socket, history) = (e.id, self.socket.clone(), self.history.clone());
             let request = clipd::get_request(&self.history, id, mime);
             tasks.push(Task::perform(
                 clipd::off_thread(move || {
@@ -559,7 +580,13 @@ impl Clip {
                         .and_then(|bytes| clipd::read_got(bytes.as_slice()))
                         .and_then(|png| crate::thumb::of_png(&png, height))
                 }),
-                move |r| Msg::Thumb(id, r.unwrap_or_else(|| Err("нет ответа".to_owned()))),
+                move |r| {
+                    Msg::Thumb(
+                        history.clone(),
+                        id,
+                        r.unwrap_or_else(|| Err("нет ответа".to_owned())),
+                    )
+                },
             ));
         }
         Task::batch(tasks)
@@ -685,6 +712,7 @@ impl Clip {
                 };
                 let request = clipd::get_request(&self.history, id, &mime);
                 let socket = self.socket.clone();
+                let history = self.history.clone();
                 return Task::perform(
                     clipd::off_thread(move || {
                         clipd::ask(&socket, &request)
@@ -694,24 +722,27 @@ impl Clip {
                     }),
                     move |r| {
                         Msg::Got(
+                            history.clone(),
                             id,
                             r.unwrap_or_else(|| Err("служба истории не ответила".to_owned())),
                         )
                     },
                 );
             }
-            Msg::Got(id, result) => match result {
+            Msg::Got(history, id, result) if history == self.history => match result {
                 Ok(t) => {
                     self.whole.insert(id, t);
                 }
                 Err(why) => self.error = Some(why),
             },
-            Msg::Thumb(id, made) => {
+            Msg::Got(_, _, _) => {}
+            Msg::Thumb(history, id, made) if history == self.history => {
                 self.thumbs.insert(
                     id,
                     made.map(|t| iced::widget::image::Handle::from_rgba(t.width, t.height, t.rgba)),
                 );
             }
+            Msg::Thumb(_, _, _) => {}
             Msg::Fold(id) => {
                 self.whole.remove(&id);
             }
@@ -744,6 +775,32 @@ impl Clip {
                     self.error = Some(why);
                 }
             },
+            Msg::Tabs(result) => match result {
+                Ok(mut names) => {
+                    names.push("host".to_owned());
+                    names.push(self.history.clone());
+                    names.sort();
+                    names.dedup();
+                    self.tabs = names;
+                }
+                Err(why) => self.error = Some(why),
+            },
+            Msg::Switch(history) => {
+                if !self.manager || !self.tabs.contains(&history) || self.history == history {
+                    return Task::none();
+                }
+                self.history = history;
+                self.entries.clear();
+                self.selected = None;
+                self.whole.clear();
+                self.thumbs.clear();
+                self.moving = None;
+                self.deleting = None;
+                self.error = None;
+                self.notice = None;
+                return self.search();
+            }
+            Msg::Refresh => return Task::batch([self.search(), self.load_tabs()]),
             Msg::MoveTo(id, to) => {
                 let request = clipd::move_request(&self.history, id, &to);
                 return self.ok(request, move |r| {
@@ -762,11 +819,12 @@ impl Clip {
                 self.deleting = Some(id);
             }
             Msg::DeleteYes(id) => {
+                let history = self.history.clone();
                 return self.ok(clipd::delete_request(&self.history, id), move |r| {
-                    Msg::Deleted(id, r)
+                    Msg::Deleted(history.clone(), id, r)
                 });
             }
-            Msg::Deleted(id, result) => {
+            Msg::Deleted(history, id, result) if history == self.history => {
                 self.deleting = None;
                 match result {
                     Ok(_) => {
@@ -784,6 +842,7 @@ impl Clip {
                     Err(why) => self.error = Some(why),
                 }
             }
+            Msg::Deleted(_, _, _) => {}
             Msg::Cancel => {
                 self.moving = None;
                 self.deleting = None;
@@ -985,6 +1044,35 @@ impl Clip {
 
     pub fn view(&self) -> Element<'_, Msg> {
         let mut page = column![].spacing(8).padding(12);
+        if self.manager {
+            let mut tabs = row![text("Буферы:").size(13)]
+                .spacing(5)
+                .align_y(Alignment::Center);
+            for name in &self.tabs {
+                let label = if name == "host" {
+                    "Хост"
+                } else {
+                    name.as_str()
+                };
+                tabs = tabs.push(
+                    button(text(label).size(13))
+                        .style(if *name == self.history {
+                            button::primary
+                        } else {
+                            button::secondary
+                        })
+                        .on_press(Msg::Switch(name.clone())),
+                );
+            }
+            tabs = tabs.push(button(text("↻").size(15)).on_press(Msg::Refresh));
+            page = page.push(
+                scrollable(tabs)
+                    .direction(iced::widget::scrollable::Direction::Horizontal(
+                        iced::widget::scrollable::Scrollbar::default(),
+                    ))
+                    .height(Length::Shrink),
+            );
+        }
         if let Some(why) = &self.error {
             page = page.push(
                 row![
@@ -1217,7 +1305,7 @@ impl Clip {
         }
         if let Some((id, names)) = &self.moving {
             if *id == e.id {
-                let mut line = row![text("Перенести в:").size(13)]
+                let mut line = row![text("Скопировать в:").size(13)]
                     .spacing(6)
                     .align_y(Alignment::Center);
                 match names {
@@ -1252,7 +1340,7 @@ impl Clip {
             );
         }
         line.push(
-            button(text("Перенести в…").size(13))
+            button(text("Скопировать в…").size(13))
                 .style(button::secondary)
                 .on_press(Msg::MoveAsk(e.id)),
         )
@@ -1672,12 +1760,17 @@ impl Clip {
 /// `clip …`: the window, until an entry is pasted or it is closed.
 pub fn run(args: &[String]) -> iced::Result {
     let mut history = None;
+    let mut manager = false;
     let mut launch = None;
     let mut title = None;
     let mut lines = PREVIEW_LINES;
     let mut image_lines = IMAGE_LINES;
     let mut rest = args.iter();
     while let Some(flag) = rest.next() {
+        if flag == "--manager" {
+            manager = true;
+            continue;
+        }
         let value = rest.next().cloned().unwrap_or_default();
         match flag.as_str() {
             "--history" if !value.is_empty() => history = Some(value),
@@ -1700,19 +1793,32 @@ pub fn run(args: &[String]) -> iced::Result {
             _ => {}
         }
     }
+    let history = history.or_else(|| manager.then(|| "host".to_owned()));
     let Some(history) = history else {
         eprintln!("vpn-zone-window clip: needs --history <name>");
         std::process::exit(2);
     };
-    let title = title.unwrap_or_else(|| format!("Буфер обмена: {history}"));
-    let can_paste = launch.is_some();
+    let title = title.unwrap_or_else(|| {
+        if manager {
+            "Буферы Cellward".to_owned()
+        } else {
+            format!("Буфер обмена: {history}")
+        }
+    });
+    let can_paste = launch.is_some() && !manager;
     iced::application(
         move || {
             let mut clip = Clip::new(history.clone(), can_paste, clipd::socket_path());
+            clip.manager = manager;
             clip.lines = lines;
             clip.image_lines = image_lines;
             let first = clip.search();
-            (clip, Task::batch([first, operation::focus(SEARCH)]))
+            let tabs = if manager {
+                clip.load_tabs()
+            } else {
+                Task::none()
+            };
+            (clip, Task::batch([first, tabs, operation::focus(SEARCH)]))
         },
         Clip::update,
         Clip::view,
@@ -1756,6 +1862,35 @@ mod tests {
 
     fn clip() -> Clip {
         Clip::new("main".to_owned(), true, PathBuf::from("/nonexistent/sock"))
+    }
+
+    #[test]
+    fn manager_tabs_are_explicit_and_a_switch_cannot_paste() {
+        let mut c = Clip::new("host".to_owned(), false, PathBuf::from("/nonexistent/sock"));
+        c.manager = true;
+        let _ = c.update(Msg::Tabs(Ok(vec![
+            "app-helium".to_owned(),
+            "host".to_owned(),
+        ])));
+        assert_eq!(c.tabs, ["app-helium", "host"]);
+        let _ = c.update(Msg::Switch("app-helium".to_owned()));
+        assert_eq!(c.history, "app-helium");
+        assert!(!c.can_paste);
+        let _ = c.update(Msg::Switch("unknown".to_owned()));
+        assert_eq!(c.history, "app-helium");
+        // A delayed answer from the host with the same entry id must never
+        // be rendered as the container's text or image, nor delete its row.
+        c.entries.push(entry(1, 10));
+        let _ = c.update(Msg::Got("host".to_owned(), 1, Ok("host secret".to_owned())));
+        let _ = c.update(Msg::Thumb(
+            "host".to_owned(),
+            1,
+            Err("host image".to_owned()),
+        ));
+        let _ = c.update(Msg::Deleted("host".to_owned(), 1, Ok(String::new())));
+        assert!(c.whole.is_empty());
+        assert!(c.thumbs.is_empty());
+        assert_eq!(c.entries.len(), 1);
     }
 
     #[test]
@@ -1893,7 +2028,7 @@ mod tests {
         let _ = c.key(Press::Down);
         assert_eq!(c.selected, Some(2));
         // A deleted entry: the choice to its neighbour.
-        let _ = c.update(Msg::Deleted(3, Ok(String::new())));
+        let _ = c.update(Msg::Deleted("main".to_owned(), 3, Ok(String::new())));
         assert_eq!(c.selected, Some(1));
         assert_eq!(c.entries.len(), 2);
     }

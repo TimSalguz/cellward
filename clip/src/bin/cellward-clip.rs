@@ -38,6 +38,9 @@ use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_offer_v1 as wlr_offer, zwlr_data_control_source_v1 as wlr_source,
 };
 
+#[path = "../tray.rs"]
+mod tray;
+
 /// What the daemon offers beside an entry it makes the selection
 /// (`select`): a mark of nobody's — no file names it —, so that what it
 /// sets is not kept again, and no program sees it (proxies drop marks).
@@ -761,6 +764,7 @@ fn daemon(dir: &Path) -> ExitCode {
         key,
         open: HashMap::new(),
     };
+    tray::start();
     eprintln!("cellward-clip: пишу историю в {}", dir.display());
     loop {
         // The compositor's events and the questions, whichever comes.

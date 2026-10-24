@@ -31,7 +31,27 @@ The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):
 - A program of the host that is not proxied reads every selection and every
   mark, as before.
 
-## The history (in progress)
+## The host manager (in progress)
+
+With `clipboard.history = true`, the recorder also owns one host tray icon.
+Its click opens `vpn-zone-window clip --manager`: the host and each history
+that has been created appear as tabs. The manager can browse and explicitly
+**copy** an entry into another history; switching tabs or copying an entry
+does not set the system selection. The source entry remains where it was.
+The frame-opened window stays scoped to its own launch and offers paste only
+there. The tray opens one window at a time; closing it does not stop the
+recorder, and the next click reopens it. Empty containers with no history yet
+do not appear until they copy something.
+
+The host is not a security boundary. An unproxied host program can read the
+compositor's current selection, including one a container just copied;
+the tabbed history does not grant it access to the stored histories, but it
+cannot make the host's Wayland selection private. No entry is silently
+transferred between histories. A true host/container clipboard boundary
+would require host applications to use the same proxy or compositor support
+for separate selections.
+
+## The history
 
 The store and search (`clip/`, crate `clipstore`; its format, its measurements
 and what its index leaks are in its `lib.rs`) and the recorder are built:
@@ -75,10 +95,18 @@ container only when the person moves it there in the window.
   program (the daemon sets both selections with a mark of its own, which it
   does not keep again; the launch's proxy presses Shift+Insert in that
   program's connection once the program has the selection and the focus —
-  Ctrl+V quotes the next key in a terminal); «Перенести в…» moves a copy to
-  another container's history, confirmed.
+  Ctrl+V quotes the next key in a terminal); «Скопировать в…» copies an entry
+  to another container's history after an explicit target choice.
 
-### Planned: typing and secrets
+### Planned: favourites, typing and secrets
+
+- **Favourites.** Separate per-history saved entries, not a copy into the
+  host history. A saved entry must remain under the same encryption key and
+  must not become the current selection just by opening its tab.
+- **Secrets.** A separately marked collection in each history, not a normal
+  favourite: hidden preview, never served through clipboard selection. The
+  existing password-manager hint continues to suppress recording entirely.
+  The mark and any move between containers need a deliberate confirmation.
 
 - **Typing.** For fields that refuse a paste: the proxy types the entry into
   the program's connection with a delay set in ms — not a compositor's

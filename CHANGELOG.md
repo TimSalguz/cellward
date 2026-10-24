@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- The clipboard recorder has a host tray item that opens one manager window
+  with tabs for the host and existing container histories. Moving between
+  histories is an explicit copy and never changes the current selection.
 - Frame-menu appearance controls, including `always`/`hover` title mode,
   can now preview local values over Nix declarations. A separate override
   file avoids activating old shadowed local settings; Reset restores the Nix
@@ -27,6 +30,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Proxy hops remain unavailable until their backend exists.
 
 ### Changed
+- Window frames now name the network and container explicitly. A program's
+  own container uses its remembered application label instead of the ambiguous
+  word "свой"; the network label still updates after a live switch.
 - Launching a program that is already running now asks whether to focus its
   existing window, open another in the same container, or choose a different
   container/network for an independent copy. This uses live launch records,
