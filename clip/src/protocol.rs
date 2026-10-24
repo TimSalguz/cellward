@@ -9,9 +9,12 @@
 //! get⇥<history>⇥<id>⇥<type>                   ok⇥<length>, then the bytes
 //! move⇥<from>⇥<id>⇥<to>                       ok⇥<new id>
 //! favorite⇥<history>⇥<id>                    ok⇥<favorite id>
+//! secret⇥<history>⇥<id>⇥<label>             ok⇥<secret id>; source removed
 //! search/get/delete/select with `@favorites:<history>` address that
 //! history's encrypted favourites, kept under `.favorites/` and never
 //! listed as a container history.
+//! `@secrets:<history>` addresses encrypted passwords under `.secrets/`;
+//! text/regex searching and ordinary moves of passwords are refused.
 //! delete⇥<history>⇥<id>                       ok
 //! select⇥<history>⇥<id>                       ok: it is the selection now
 //! ```

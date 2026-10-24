@@ -159,9 +159,12 @@ struct Store {
 
 impl Store {
     fn history(&mut self, name: &str) -> Result<&mut History, String> {
-        let (dir, real) = match name.strip_prefix("@favorites:") {
-            Some(real) => (self.dir.join(".favorites"), real),
-            None => (self.dir.clone(), name),
+        let (dir, real) = if let Some(real) = name.strip_prefix("@favorites:") {
+            (self.dir.join(".favorites"), real)
+        } else if let Some(real) = name.strip_prefix("@secrets:") {
+            (self.dir.join(".secrets"), real)
+        } else {
+            (self.dir.clone(), name)
         };
         if !recorder::valid_history(real) || real == recorder::NO_HISTORY {
             return Err(format!("«{name}» — не имя истории"));
@@ -214,6 +217,13 @@ impl Store {
             }
             ["search", name, rest @ ..] => match protocol::search(rest) {
                 Ok(search) => match self.history(name) {
+                    Ok(_)
+                        if name.starts_with("@secrets:")
+                            && (!search.query.text_terms.is_empty()
+                                || search.query.pattern.is_some()) =>
+                    {
+                        error(&"поиск по тексту паролей отключён")
+                    }
                     Ok(h) => lines(h, &search.query, search.before, search.limit),
                     Err(e) => error(&e),
                 },
@@ -240,6 +250,9 @@ impl Store {
                 }
             }
             ["move", from, id, to] => {
+                if from.starts_with("@secrets:") || to.starts_with("@secrets:") {
+                    return error(&"пароли нельзя переносить как обычные записи");
+                }
                 let Ok(id) = id.parse::<u64>() else {
                     return error(&"не номер");
                 };
@@ -262,7 +275,7 @@ impl Store {
                 let Ok(id) = id.parse::<u64>() else {
                     return error(&"не номер");
                 };
-                if name.starts_with("@favorites:") {
+                if name.starts_with("@favorites:") || name.starts_with("@secrets:") {
                     return error(&"запись уже из избранного");
                 }
                 let entry = match self.history(name).map(|h| h.get(id)) {
@@ -274,6 +287,51 @@ impl Store {
                 let favorites = format!("@favorites:{name}");
                 match self.history(&favorites).map(|h| h.import(&entry)) {
                     Ok(Ok(added)) => Reply::Text(format!("ok\t{}\n", added.id())),
+                    Ok(Err(e)) => error(&e),
+                    Err(e) => error(&e),
+                }
+            }
+            ["secret", name, id, label] => {
+                let Ok(id) = id.parse::<u64>() else {
+                    return error(&"не номер");
+                };
+                if name.starts_with('@') {
+                    return error(&"паролем можно отметить только запись истории");
+                }
+                let Some(label) = protocol::decode(label) else {
+                    return error(&"метка пароля не читается");
+                };
+                if label.chars().count() > 80 || label.chars().any(char::is_control) {
+                    return error(&"метка пароля слишком длинная или содержит управляющие символы");
+                }
+                let entry = match self.history(name).map(|h| h.get(id)) {
+                    Ok(Ok(Some(entry))) => entry,
+                    Ok(Ok(None)) => return error(&"записи нет"),
+                    Ok(Err(e)) => return error(&e),
+                    Err(e) => return error(&e),
+                };
+                let Some(content) = password_content(&entry.contents) else {
+                    return error(&"паролем можно отметить только текст");
+                };
+                let secrets = format!("@secrets:{name}");
+                let added = match self.history(&secrets).map(|h| {
+                    h.append(NewEntry {
+                        copied_at: entry.copied_at,
+                        contents: vec![content],
+                        preview: Some(if label.trim().is_empty() {
+                            "Пароль".to_owned()
+                        } else {
+                            format!("Пароль: {}", label.trim())
+                        }),
+                    })
+                }) {
+                    Ok(Ok(added)) => added,
+                    Ok(Err(e)) => return error(&e),
+                    Err(e) => return error(&e),
+                };
+                match self.history(name).map(|h| h.delete(id)) {
+                    Ok(Ok(true)) => Reply::Text(format!("ok\t{}\n", added.id())),
+                    Ok(Ok(false)) => error(&"запись исчезла до удаления"),
                     Ok(Err(e)) => error(&e),
                     Err(e) => error(&e),
                 }
@@ -297,7 +355,14 @@ impl Store {
                     Ok(h) => match h.get(id) {
                         Ok(Some(entry)) => {
                             let _ = h.record_paste(id, now_ms());
-                            Reply::Select(entry.contents)
+                            let mut contents = entry.contents;
+                            if name.starts_with("@secrets:") {
+                                contents.push(Content {
+                                    mime: recorder::SECRET_HINT.to_owned(),
+                                    data: b"secret".to_vec(),
+                                });
+                            }
+                            Reply::Select(contents)
                         }
                         Ok(None) => error(&"записи нет"),
                         Err(e) => error(&e),
@@ -310,6 +375,22 @@ impl Store {
     }
 
     fn keep(&mut self, history: &str, entry: NewEntry) {
+        if self.dir.join(".secrets").join(history).is_dir() {
+            if let Some(content) = password_content(&entry.contents) {
+                let secret = format!("@secrets:{history}");
+                match self
+                    .history(&secret)
+                    .map(|h| h.contains_contents(&[content]))
+                {
+                    Ok(Ok(false)) => {}
+                    Ok(Ok(true)) => return,
+                    _ => {
+                        eprintln!("cellward-clip: пароли {history} не читаются — запись истории пропущена");
+                        return;
+                    }
+                }
+            }
+        }
         match self.history(history) {
             Ok(h) => {
                 if let Err(e) = h.append(entry) {
@@ -319,6 +400,27 @@ impl Store {
             Err(e) => eprintln!("cellward-clip: история {e}"),
         }
     }
+}
+
+/// One canonical representation makes a marked password recognizable when
+/// the next copy offers a different set of clipboard MIME representations.
+fn password_content(contents: &[Content]) -> Option<Content> {
+    for mime in [
+        "text/plain;charset=utf-8",
+        "UTF8_STRING",
+        "text/plain",
+        "TEXT",
+        "STRING",
+    ] {
+        if let Some(c) = contents.iter().find(|c| c.mime == mime) {
+            std::str::from_utf8(&c.data).ok()?;
+            return Some(Content {
+                mime: "text/plain;charset=utf-8".into(),
+                data: c.data.clone(),
+            });
+        }
+    }
+    None
 }
 
 /// What a request is answered with.
@@ -929,6 +1031,102 @@ mod tests {
             .unwrap();
         assert_eq!(saved.contents[0].data, b"private note");
         assert!(store.history("@favorites:../host").is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_password_moves_out_of_history_without_searching_its_text() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("cw-clip-secret-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = Key::load_or_create(&dir.join("key")).unwrap();
+        let mut store = Store {
+            dir: dir.clone(),
+            key,
+            open: HashMap::new(),
+        };
+        let id = store
+            .history("host")
+            .unwrap()
+            .append(NewEntry {
+                copied_at: 100,
+                contents: vec![Content {
+                    mime: "text/plain".into(),
+                    data: b"hidden-password".to_vec(),
+                }],
+                preview: None,
+            })
+            .unwrap()
+            .id();
+        assert!(
+            matches!(store.answer(&format!("secret\thost\t{id}\tMail")), Reply::Text(ref s) if s.starts_with("ok\t"))
+        );
+        assert!(store.history("host").unwrap().get(id).unwrap().is_none());
+        assert_eq!(store.names(), ["host"]);
+        let listed = store.answer("search\t@secrets:host\tlimit=10");
+        assert!(
+            matches!(listed, Reply::Text(ref s) if s.contains("Пароль: Mail") && !s.contains("hidden-password"))
+        );
+        assert!(
+            matches!(store.answer("search\t@secrets:host\tq=hidden-password"), Reply::Text(ref s) if s.starts_with("error\t"))
+        );
+        assert!(
+            matches!(store.answer("move\t@secrets:host\t1\thost"), Reply::Text(ref s) if s.starts_with("error\t"))
+        );
+        assert!(store.history("@secrets:../host").is_err());
+        store.keep(
+            "host",
+            NewEntry {
+                copied_at: 200,
+                contents: vec![Content {
+                    mime: "UTF8_STRING".into(),
+                    data: b"hidden-password".to_vec(),
+                }],
+                preview: None,
+            },
+        );
+        assert!(store
+            .history("host")
+            .unwrap()
+            .query(&clipstore::Query::default(), None, 10)
+            .unwrap()
+            .is_empty());
+        let secret = store
+            .history("@secrets:host")
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(secret.copies, [100]);
+        store.keep(
+            "host",
+            NewEntry {
+                copied_at: 300,
+                contents: vec![Content {
+                    mime: "text/plain".into(),
+                    data: b"ordinary note".to_vec(),
+                }],
+                preview: None,
+            },
+        );
+        let kept = store
+            .history("host")
+            .unwrap()
+            .query(&clipstore::Query::default(), None, 10)
+            .unwrap();
+        assert_eq!(
+            kept,
+            [id + 1],
+            "a suppressed password must not consume an ordinary-history id"
+        );
+        assert!(
+            matches!(store.answer("select\t@secrets:host\t1"), Reply::Select(ref c) if c.iter().any(|c| c.mime == recorder::SECRET_HINT && c.data == b"secret"))
+        );
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

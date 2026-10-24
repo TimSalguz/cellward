@@ -41,6 +41,7 @@ use std::io::Read;
 mod appearance;
 mod checklist;
 mod clip;
+mod clip_type;
 mod clipd;
 mod days;
 #[path = "../../shared/i18n.rs"]
@@ -50,6 +51,8 @@ mod metro;
 mod panel;
 mod pattern;
 mod thumb;
+#[path = "../../shared/type_input.rs"]
+mod type_input;
 
 use i18n::{text as tr, Key as UiKey, Language};
 use iced::keyboard::{self, key, Key};

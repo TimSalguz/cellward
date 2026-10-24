@@ -573,6 +573,8 @@ impl History {
 
     /// Record a copy. The same contents copied before (and not deleted)
     /// get a copy event instead of a new entry.
+    ///
+    /// See `contains_contents` for a lookup which records no copy event.
     pub fn append(&mut self, e: NewEntry) -> Result<Appended> {
         let size: usize = e.contents.iter().map(|c| c.mime.len() + c.data.len()).sum();
         if size > MAX_ENTRY {
@@ -636,6 +638,28 @@ impl History {
         self.next_id += 1;
         self.maybe_seal()?;
         Ok(Appended::New(id))
+    }
+
+    /// Whether these exact contents are present without changing copy counts
+    /// or allocating an id. Used to omit already-marked passwords from the
+    /// ordinary recorder without exposing a match to the copying program.
+    pub fn contains_contents(&self, contents: &[Content]) -> Result<bool> {
+        let wanted = canonical(contents);
+        let hash = self.keys.dedup(&wanted);
+        let mut ids = self.active.dedup.get(&hash).cloned().unwrap_or_default();
+        for segment in &self.segments {
+            segment.dedup_ids(hash, &mut ids);
+        }
+        for id in ids {
+            if !self.is_deleted(id) {
+                if let Some(old) = self.contents(id)? {
+                    if canonical(&old) == wanted {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Append an entry of another history (a move between containers: `get`

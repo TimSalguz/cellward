@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- The clipboard manager has a separate per-buffer Passwords tab. Marking a
+  text clip moves it out of ordinary history into encrypted storage with an
+  optional label. Preview text is hidden; explicit paste from a launch or
+  confirmed copy from the host manager still uses the clipboard. Recopying
+  the same password is omitted from ordinary history without changing the
+  current selection or recording a copy event.
+- The clipboard manager can select a point in an updated Cellward window
+  through a white overlay, then type a chosen text or password directly into
+  that launch's Wayland connection. Unicode and physical US keycode modes,
+  initial/character/key-hold delays and cancellation are available. Typing
+  leaves the clipboard selection unchanged and restores the original keymap.
 - A remembered network for a program in the built-in main home now stays a
   per-program choice; it no longer creates `main-<network>` containers.
   Existing named main-home containers are preserved. The built-in host network

@@ -221,6 +221,7 @@ use wl_proxy::protocols::wp_primary_selection_unstable_v1::zwp_primary_selection
 use wl_proxy::protocols::wayland::wl_keyboard::{
     WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState, WlKeyboardKeymapFormat,
 };
+pub(crate) mod typing;
 use wl_proxy::protocols::wayland::wl_output::{WlOutput, WlOutputTransform};
 use wl_proxy::protocols::wayland::wl_pointer::{
     WlPointer, WlPointerAxis, WlPointerAxisRelativeDirection, WlPointerAxisSource,
@@ -1653,6 +1654,8 @@ enum Part {
     Menu,
     /// A question's panel ([`Panel`]).
     Prompt,
+    /// Host-selected coordinate for character input.
+    TypeTarget,
 }
 
 impl Part {
@@ -2789,7 +2792,7 @@ impl Window {
         let pieces: &[Rect] = self.outer_laid.as_ref().map_or(&[], |p| &p[..]);
         match part {
             Part::Buttons => self.look.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
-            Part::Corner | Part::Menu | Part::Prompt => Hit::Nothing,
+            Part::Corner | Part::Menu | Part::Prompt | Part::TypeTarget => Hit::Nothing,
             Part::Title | Part::Text => Hit::Title,
             _ if self.next_fullscreen => Hit::Nothing,
             Part::Border(side, ring) => {
@@ -4046,6 +4049,7 @@ impl XdgPopupHandler for PromptPopup {
 /// ([`Frames::first`]).
 struct Keyboard {
     f: Rc<Frames>,
+    typing: Rc<RefCell<typing::KeyboardState>>,
     menu: bool,
     /// The keys down on the program's surface, and its locked modifiers and
     /// group: what a held-back leave lets go of (3d).
@@ -4137,7 +4141,9 @@ impl WlKeyboardHandler for Keyboard {
         fd: &Rc<OwnedFd>,
         size: u32,
     ) {
+        typing::keyboard_changed(slf);
         if format == WlKeyboardKeymapFormat::XKB_V1 {
+            self.typing.borrow_mut().keymap = Some((fd.clone(), size));
             if let Some(text) = crate::clip::read_keymap(fd, size) {
                 self.paste = crate::clip::paste_keys(&text);
             }
@@ -4154,6 +4160,13 @@ impl WlKeyboardHandler for Keyboard {
         surface: &Rc<WlSurface>,
         keys: &[u8],
     ) {
+        {
+            let mut state = self.typing.borrow_mut();
+            state.surface = Rc::downgrade(surface);
+            state.on = programs(surface);
+            state.serial = serial;
+        }
+        let typed = typing::keyboard_changed(slf);
         self.menu = !programs(surface);
         let on = !self.menu;
         self.set_focus(|f| {
@@ -4171,11 +4184,17 @@ impl WlKeyboardHandler for Keyboard {
                 .map(|k| u32::from_ne_bytes(*k))
                 .take(32)
                 .collect();
-            slf.send_enter(serial, surface, keys);
+            if !typed {
+                slf.send_enter(serial, surface, keys);
+            }
         }
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlKeyboard>, serial: u32, surface: &Rc<WlSurface>) {
+        self.typing.borrow_mut().on = false;
+        if typing::keyboard_changed(slf) {
+            return;
+        }
         if programs(surface) {
             if self.f.always_focused {
                 // It keeps the focus (3d): what is down is let go of, the
@@ -4201,6 +4220,9 @@ impl WlKeyboardHandler for Keyboard {
         key: u32,
         state: WlKeyboardKeyState,
     ) {
+        if typing::key(slf, key, state == WlKeyboardKeyState::PRESSED) {
+            return;
+        }
         if !self.menu {
             if state == WlKeyboardKeyState::PRESSED {
                 self.f.questions.touch();
@@ -4236,6 +4258,14 @@ impl WlKeyboardHandler for Keyboard {
         mods_locked: u32,
         group: u32,
     ) {
+        {
+            let mut state = self.typing.borrow_mut();
+            state.serial = serial;
+            state.mods = (mods_depressed, mods_latched, mods_locked, group);
+        }
+        if typing::suppress_modifiers(slf) {
+            return;
+        }
         self.depressed = mods_depressed;
         if !self.menu {
             self.locked = (mods_locked, group);
@@ -5299,6 +5329,7 @@ impl WlSeatHandler for Seat {
         });
         id.set_handler(Keyboard {
             f: self.f.clone(),
+            typing: typing::register_keyboard(id, &self.f, slf),
             menu: false,
             down: Vec::new(),
             locked: (0, 0),
@@ -5327,6 +5358,7 @@ impl WlSeatHandler for Seat {
 /// `wl_pointer`, which would have it, are not made.)
 struct Pointer {
     f: Rc<Frames>,
+    typing: Rc<RefCell<typing::PointerState>>,
     /// The seat the program made it of: what a move or a resize names.
     seat: Weak<WlSeat>,
     away: bool,
@@ -5387,6 +5419,7 @@ fn spot(surface: &Rc<WlSurface>) -> Option<(Rc<RefCell<Window>>, Spot)> {
             // The dropdown hangs from the title: a hover strip stays out
             // while the pointer is on it.
             Part::Title | Part::Text | Part::Buttons | Part::Menu | Part::Prompt => Spot::Top,
+            Part::TypeTarget => Spot::Side,
             // Never entered (no input region): as a side, it changes
             // nothing of a hover strip.
             Part::Corner => Spot::Side,
@@ -5410,6 +5443,7 @@ impl Pointer {
     fn new(f: Rc<Frames>, seat: &Rc<WlSeat>) -> Self {
         Self {
             f,
+            typing: Rc::new(RefCell::new(typing::PointerState::default())),
             seat: Rc::downgrade(seat),
             away: false,
             sent: false,
@@ -5586,6 +5620,7 @@ impl Pointer {
     /// one on the row of buttons only ([`Window::right_click`]).
     fn frame_button(
         &mut self,
+        slf: &Rc<WlPointer>,
         (serial, time): (u32, u32),
         button: u32,
         state: WlPointerButtonState,
@@ -5603,6 +5638,24 @@ impl Pointer {
             return;
         }
         let (part, x, y) = (over.part, over.x, over.y);
+        if part == Part::TypeTarget {
+            if button == BTN_LEFT {
+                if let Some(seat) = self.seat.upgrade() {
+                    typing::choose(
+                        &window,
+                        &self.f,
+                        &seat,
+                        slf,
+                        &self.typing,
+                        x,
+                        y,
+                        serial,
+                        state == WlPointerButtonState::PRESSED,
+                    );
+                }
+            }
+            return;
+        }
         if button == BTN_RIGHT {
             if part == Part::Buttons && state == WlPointerButtonState::RELEASED {
                 if let Ok(mut window) = window.try_borrow_mut() {
@@ -5684,6 +5737,14 @@ impl WlPointerHandler for Pointer {
         surface_x: Fixed,
         surface_y: Fixed,
     ) {
+        {
+            let mut state = self.typing.borrow_mut();
+            state.surface = Rc::downgrade(surface);
+            state.on = programs(surface);
+            state.serial = serial;
+            state.x = surface_x.to_f64();
+            state.y = surface_y.to_f64();
+        }
         self.hover_enter(surface, surface_y);
         // Back on the program: the leave held back goes first (3d).
         if programs(surface) {
@@ -5709,6 +5770,7 @@ impl WlPointerHandler for Pointer {
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlPointer>, serial: u32, surface: &Rc<WlSurface>) {
+        self.typing.borrow_mut().on = false;
         self.hover_leave(slf, surface);
         self.off_frame();
         if programs(surface) {
@@ -5737,6 +5799,11 @@ impl WlPointerHandler for Pointer {
         surface_x: Fixed,
         surface_y: Fixed,
     ) {
+        {
+            let mut state = self.typing.borrow_mut();
+            state.x = surface_x.to_f64();
+            state.y = surface_y.to_f64();
+        }
         self.hover_motion(surface_y);
         if let (Some((weak, serial, start_x, start_y)), Some(over)) =
             (&self.fullscreen_drag, &self.over)
@@ -5773,7 +5840,7 @@ impl WlPointerHandler for Pointer {
         button: u32,
         state: WlPointerButtonState,
     ) {
-        self.frame_button((serial, time), button, state);
+        self.frame_button(slf, (serial, time), button, state);
         if !self.away {
             if state == WlPointerButtonState::PRESSED {
                 self.f.questions.touch();

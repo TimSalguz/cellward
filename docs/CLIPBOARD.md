@@ -42,12 +42,23 @@ The frame-opened window stays scoped to its own launch and offers paste only
 there. The tray opens one window at a time; closing it does not stop the
 recorder, and the next click reopens it. Empty containers with no history yet
 do not appear until they copy something.
-Each buffer has **History** and **Favourites** tabs. "☆ Add to favourites"
+Each buffer has **History**, **Favourites**, and **Passwords** tabs. "☆ Add to favourites"
 stores an encrypted copy below that buffer's hidden `.favorites` directory;
 deleting the original history entry does not delete the favourite. Removing
 the favourite leaves the original alone. From a launch's frame, a favourite
 can be pasted into that launch by the same explicit action as a history
 entry. Opening either tab never sets a Wayland selection.
+Marking a text clip as a password confirms its removal from ordinary history
+and saves it encrypted under that buffer's `.secrets` directory with a label.
+The list hides its contents. Explicit paste from a launch, or confirmed copy
+from the host manager, still uses the ordinary selection; it is not yet a
+protected typing channel. Text search and ordinary cross-buffer moves of
+passwords are disabled.
+Copying an already-marked password in the same buffer is omitted from normal
+history even when its text MIME representations change. Neither the current
+selection nor counts or entry ids are changed by this match. An explicit
+clipboard copy also offers `x-kde-passwordManagerHint` for other managers
+which respect it.
 
 The host is not a security boundary. An unproxied host program can read the
 compositor's current selection, including one a container just copied;
@@ -104,26 +115,40 @@ container only when the person moves it there in the window.
   Ctrl+V quotes the next key in a terminal); «Скопировать в…» copies an entry
   to another container's history after an explicit target choice.
 
-### Planned: typing and secrets
+## Character input
+
+In the tray manager or a frame's history window, enable **Character input**
+and choose **Select input point**. The manager closes its window temporarily;
+Cellward windows become white. Click the intended field. The manager returns
+with its previous tab; select a text or password and choose **Type**. A frame
+window restricts targets to its launch; the host manager can explicitly pick
+another container's window.
+
+The proxy retains the target window and local coordinates, sends a left
+click, then key presses and releases only into that launch's connection.
+Changing compositor focus cannot redirect the events to another application.
+No clipboard selection is set. The original keymap and modifiers are restored
+on completion or cancellation. The Stop button or Escape in the manager
+cancels input; Escape during target selection removes the white overlay.
+Closing or resizing the window invalidates the target. A point can be reused
+for other entries for five minutes; choosing another replaces it.
+
+**Unicode** uses a temporary keymap on this connection for non-Latin text and
+emoji. **Physical keys (US)** sends ordinary evdev codes and needs a US layout
+in the target. Newlines become Return and tabs become Tab. Initial delay,
+inter-character delay and key-hold time are configurable in milliseconds and
+saved in `$XDG_CONFIG_HOME/cellward/typing.conf` (normally
+`~/.config/cellward/typing.conf`).
+
+Only updated launches using the Cellward Wayland proxy can be selected;
+restart existing applications after upgrading. Unproxied host windows are not
+targets. Each operation allows 32 KiB / 8192 characters and, in Unicode mode,
+232 distinct characters. Other control characters are refused.
+
+### Further work
 
 - **stillconf.** Add a separate clipboard page with a control for
   `programs.cellward.clipboard.history = true`; keep the default unchanged.
-- **Typing.** For fields that refuse a paste: the proxy types the entry into
-  the program's connection with a delay set in ms — not a compositor's
-  virtual keyboard, so nothing typed reaches another program whatever the
-  focus does. The target is chosen on the window itself: it dims under the
-  proxy's overlay, the person clicks the field, the proxy passes that click
-  to the program and keeps its keyboard focus until the typing ends.
-  Characters missing from the keymap: a keymap of that connection for the
-  typing.
-- **Secrets.** An entry marked a secret leaves the history for its
-  container's secrets: hidden preview, typing only, never in the
-  selection. A later copy of the same contents (keyed hash) is not kept and
-  leaves no trace — no count, no gap in numbers — so copying guesses does not
-  tell which one is a secret. Nor does it change anything a program sees:
-  the selection is left as it is, never cleared or replaced on a match — a
-  program copying guesses and pasting them back would see which one
-  vanished. The selection is cleared only when the person marks an entry, of
-  contents the program had anyway. Nothing in a container reaches the
-  daemon's socket. Moving a
-  secret to another container: from its menu, confirmed.
+- Editing stored passwords and a separate policy for cross-buffer password
+  transfers. Marking an existing history entry does not currently remove
+  copies already saved separately in favourites.

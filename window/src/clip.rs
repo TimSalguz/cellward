@@ -33,9 +33,11 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Font, Length, Size, Subscription, Task};
 
+use crate::clip_type;
 use crate::clipd::{self, Entry, Filter, PAGE};
 use crate::days;
 use crate::pattern::{self, Alphabet, Builder, Kind, Tag, Times, Tried};
+use crate::type_input::{Mode as TypeMode, Timing};
 
 const FEED: &str = "clip-feed";
 const SEARCH: &str = "clip-search";
@@ -51,6 +53,7 @@ const IMAGE_LINES: u32 = 3;
 const LINE: f32 = 20.0;
 /// An image larger than this is named, not fetched for a thumbnail.
 const MAX_THUMB_SOURCE: u64 = 32 << 20;
+const TYPE_MODES: [TypeMode; 2] = [TypeMode::Unicode, TypeMode::Keycodes];
 
 /// Which moments a date filter is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +174,7 @@ pub enum Press {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
+    Opened(iced::window::Id),
     Loaded {
         gen: u64,
         older: bool,
@@ -190,9 +194,28 @@ pub enum Msg {
     Tabs(Result<Vec<String>, String>),
     Switch(String),
     Shelf(bool),
+    Secrets,
     Refresh,
     Favorite(u64),
     Favorited(String, Result<String, String>),
+    SecretAsk(u64),
+    SecretLabel(String),
+    SecretYes(u64),
+    Secreted(String, u64, Result<String, String>),
+    CopySecretAsk(u64),
+    CopySecretYes(u64),
+    CopiedSecret(Result<String, String>),
+    Typing(bool),
+    TypeMode(TypeMode),
+    TypeDelay(&'static str, String),
+    TypePick,
+    TypePickWindow(Option<iced::window::Id>),
+    TypeChosen(iced::window::Id, Result<clip_type::Target, String>),
+    TypeSend(u64),
+    TypeSendWindow(Option<iced::window::Id>, u64),
+    Typed(iced::window::Id, Result<(), String>),
+    TypeCancel,
+    TypeCanceled(Result<(), String>),
     MoveTo(u64, String),
     Moved(Result<String, String>),
     DeleteAsk(u64),
@@ -237,6 +260,7 @@ pub struct Clip {
     manager: bool,
     tabs: Vec<String>,
     favorites: bool,
+    secrets: bool,
     /// A text's lines shown before «показать целиком», and an image's
     /// thumbnail's height in lines.
     lines: usize,
@@ -270,6 +294,18 @@ pub struct Clip {
     /// Moving an entry: the histories to move it to, once known.
     moving: Option<(u64, Option<Vec<String>>)>,
     deleting: Option<u64>,
+    secreting: Option<u64>,
+    secret_label: String,
+    copying_secret: Option<u64>,
+    launch: Option<u32>,
+    type_enabled: bool,
+    type_busy: bool,
+    type_target: Option<clip_type::Target>,
+    type_active: Option<clip_type::Target>,
+    type_mode: TypeMode,
+    type_start: String,
+    type_between: String,
+    type_hold: String,
     error: Option<String>,
     notice: Option<String>,
     /// The feed's offset from its bottom, and its height.
@@ -430,19 +466,66 @@ fn mono<'a>(t: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
 
 impl Clip {
     fn active_history(&self) -> String {
-        if self.favorites {
+        if self.secrets {
+            format!("@secrets:{}", self.history)
+        } else if self.favorites {
             format!("@favorites:{}", self.history)
         } else {
             self.history.clone()
         }
     }
 
+    fn switch_shelf(&mut self) -> Task<Msg> {
+        self.entries.clear();
+        self.selected = None;
+        self.whole.clear();
+        self.thumbs.clear();
+        self.moving = None;
+        self.deleting = None;
+        self.secreting = None;
+        self.copying_secret = None;
+        self.error = None;
+        self.notice = None;
+        self.typed += 1;
+        self.search()
+    }
+
+    fn type_timing(&self) -> Result<Timing, String> {
+        let timing = Timing {
+            start_ms: self
+                .type_start
+                .parse()
+                .map_err(|_| "Начальная задержка: 0–5000 мс")?,
+            between_ms: self
+                .type_between
+                .parse()
+                .map_err(|_| "Между символами: 1–5000 мс")?,
+            hold_ms: self
+                .type_hold
+                .parse()
+                .map_err(|_| "Удержание клавиши: 1–1000 мс")?,
+        };
+        timing.valid().then_some(timing).ok_or_else(|| {
+            "Задержки: начало 0–5000, между символами 1–5000, удержание 1–1000 мс".into()
+        })
+    }
+
+    fn type_save(&mut self) {
+        if let Ok(timing) = self.type_timing() {
+            if let Err(why) = clip_type::save(timing, self.type_mode) {
+                self.error = Some(why);
+            }
+        }
+    }
+
     pub fn new(history: String, can_paste: bool, socket: PathBuf) -> Self {
+        let (timing, type_mode) = clip_type::load();
         Self {
             history,
             manager: false,
             tabs: Vec::new(),
             favorites: false,
+            secrets: false,
             lines: PREVIEW_LINES,
             image_lines: IMAGE_LINES,
             thumbs: HashMap::new(),
@@ -466,6 +549,18 @@ impl Clip {
             whole: HashMap::new(),
             moving: None,
             deleting: None,
+            secreting: None,
+            secret_label: String::new(),
+            copying_secret: None,
+            launch: None,
+            type_enabled: false,
+            type_busy: false,
+            type_target: None,
+            type_active: None,
+            type_mode,
+            type_start: timing.start_ms.to_string(),
+            type_between: timing.between_ms.to_string(),
+            type_hold: timing.hold_ms.to_string(),
             error: None,
             notice: None,
             view: (0.0, 0.0),
@@ -655,6 +750,14 @@ impl Clip {
 
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
+            Msg::Opened(window) => {
+                let focus = iced::window::gain_focus(window);
+                return if self.type_enabled {
+                    focus
+                } else {
+                    focus.chain(operation::focus(SEARCH))
+                };
+            }
             Msg::Loaded { gen, older, result } => {
                 if gen != self.gen {
                     return Task::none();
@@ -698,6 +801,9 @@ impl Clip {
                 }
             }
             Msg::Words(w) => {
+                if self.secrets {
+                    return Task::none();
+                }
                 self.words = w;
                 self.typed += 1;
                 return later(DEBOUNCE_MS, Msg::Rested(self.typed));
@@ -712,10 +818,19 @@ impl Clip {
                     self.selected = Some(i);
                     self.moving = None;
                     self.deleting = None;
+                    self.secreting = None;
                 }
             }
-            Msg::Paste(id) => self.paste(id),
+            Msg::Paste(id) => {
+                if self.type_enabled {
+                    return self.update(Msg::TypeSend(id));
+                }
+                self.paste(id);
+            }
             Msg::Whole(id) => {
+                if self.secrets {
+                    return Task::none();
+                }
                 let Some(mime) = self
                     .entry(id)
                     .and_then(|e| e.text_type())
@@ -760,6 +875,9 @@ impl Clip {
                 self.whole.remove(&id);
             }
             Msg::MoveAsk(id) => {
+                if self.secrets {
+                    return Task::none();
+                }
                 self.deleting = None;
                 self.moving = Some((id, None));
                 let socket = self.socket.clone();
@@ -801,39 +919,39 @@ impl Clip {
                 Err(why) => self.error = Some(why),
             },
             Msg::Switch(history) => {
+                if self.type_busy {
+                    return Task::none();
+                }
                 if !self.manager || !self.tabs.contains(&history) || self.history == history {
                     return Task::none();
                 }
                 self.history = history;
                 self.favorites = false;
-                self.entries.clear();
-                self.selected = None;
-                self.whole.clear();
-                self.thumbs.clear();
-                self.moving = None;
-                self.deleting = None;
-                self.error = None;
-                self.notice = None;
-                return self.search();
+                self.secrets = false;
+                return self.switch_shelf();
             }
             Msg::Shelf(favorites) => {
-                if self.favorites == favorites {
+                if !self.secrets && self.favorites == favorites {
                     return Task::none();
                 }
                 self.favorites = favorites;
-                self.entries.clear();
-                self.selected = None;
-                self.whole.clear();
-                self.thumbs.clear();
-                self.moving = None;
-                self.deleting = None;
-                self.error = None;
-                self.notice = None;
-                return self.search();
+                self.secrets = false;
+                return self.switch_shelf();
+            }
+            Msg::Secrets => {
+                if self.secrets {
+                    return Task::none();
+                }
+                self.secrets = true;
+                self.favorites = false;
+                self.words.clear();
+                self.re = None;
+                self.builder_open = false;
+                return self.switch_shelf();
             }
             Msg::Refresh => return Task::batch([self.search(), self.load_tabs()]),
             Msg::Favorite(id) => {
-                if self.favorites || self.entry(id).is_none() {
+                if self.favorites || self.secrets || self.entry(id).is_none() {
                     return Task::none();
                 }
                 let history = self.history.clone();
@@ -846,6 +964,206 @@ impl Clip {
                 Err(why) => self.error = Some(why),
             },
             Msg::Favorited(_, _) => {}
+            Msg::SecretAsk(id) => {
+                if !self.favorites && !self.secrets && self.entry(id).is_some() {
+                    self.secreting = Some(id);
+                    self.secret_label.clear();
+                }
+            }
+            Msg::SecretLabel(label) => self.secret_label = label,
+            Msg::SecretYes(id) => {
+                if self.secreting != Some(id) || self.favorites || self.secrets {
+                    return Task::none();
+                }
+                let history = self.history.clone();
+                return self.ok(
+                    clipd::secret_request(&history, id, &self.secret_label),
+                    move |r| Msg::Secreted(history.clone(), id, r),
+                );
+            }
+            Msg::Secreted(history, id, result)
+                if history == self.history && !self.favorites && !self.secrets =>
+            {
+                self.secreting = None;
+                match result {
+                    Ok(_) => {
+                        self.entries.retain(|e| e.id != id);
+                        self.whole.remove(&id);
+                        self.thumbs.remove(&id);
+                        self.selected = None;
+                        self.notice = Some("Перемещено в пароли этого буфера".to_owned());
+                    }
+                    Err(why) => self.error = Some(why),
+                }
+            }
+            Msg::Secreted(_, _, _) => {}
+            Msg::CopySecretAsk(id) => {
+                if self.secrets && self.entry(id).is_some() && !self.can_paste {
+                    self.copying_secret = Some(id);
+                }
+            }
+            Msg::CopySecretYes(id) => {
+                if self.copying_secret != Some(id) || !self.secrets || self.can_paste {
+                    return Task::none();
+                }
+                return self.ok(
+                    clipd::select_request(&self.active_history(), id),
+                    Msg::CopiedSecret,
+                );
+            }
+            Msg::CopiedSecret(result) => {
+                self.copying_secret = None;
+                match result {
+                    Ok(_) => self.notice = Some("Пароль помещён в текущий буфер обмена".to_owned()),
+                    Err(why) => self.error = Some(why),
+                }
+            }
+            Msg::Typing(enabled) => {
+                if !self.type_busy {
+                    self.type_enabled = enabled;
+                }
+            }
+            Msg::TypeMode(mode) => {
+                self.type_mode = mode;
+                self.type_save();
+            }
+            Msg::TypeDelay(which, text) => {
+                if text.len() <= 5 && text.chars().all(|c| c.is_ascii_digit()) {
+                    match which {
+                        "start" => self.type_start = text,
+                        "between" => self.type_between = text,
+                        "hold" => self.type_hold = text,
+                        _ => {}
+                    }
+                    self.type_save();
+                }
+            }
+            Msg::TypePick => {
+                if self.type_busy {
+                    return Task::none();
+                }
+                self.type_busy = true;
+                self.error = None;
+                self.type_target = None;
+                return iced::window::latest().map(Msg::TypePickWindow);
+            }
+            Msg::TypePickWindow(window) => {
+                let Some(window) = window else {
+                    self.type_busy = false;
+                    return Task::none();
+                };
+                let launch = self.launch;
+                let work = Task::perform(
+                    clipd::off_thread(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        clip_type::choose(launch)
+                    }),
+                    move |r| {
+                        Msg::TypeChosen(
+                            window,
+                            r.unwrap_or_else(|| Err("Выбор окна прерван".into())),
+                        )
+                    },
+                );
+                // Wayland cannot hide an existing winit surface. Close just
+                // this window; the daemon keeps its state and opens it again
+                // once the point has been selected.
+                return iced::window::close(window).chain(work);
+            }
+            Msg::TypeChosen(_window, result) => {
+                self.type_busy = false;
+                match result {
+                    Ok(target) => {
+                        self.type_target = Some(target);
+                        self.notice =
+                            Some("Точка выбрана. Выберите запись и нажмите «Напечатать»".into());
+                    }
+                    Err(why) => self.error = Some(why),
+                }
+                let (_, open) = iced::window::open(clip_window_settings());
+                return open.map(Msg::Opened);
+            }
+            Msg::TypeSend(id) => {
+                if self.type_busy {
+                    return Task::none();
+                }
+                if self.type_target.is_none() {
+                    self.error = Some("Сначала выберите точку ввода в окне".into());
+                    return Task::none();
+                }
+                if let Err(why) = self.type_timing() {
+                    self.error = Some(why);
+                    return Task::none();
+                }
+                if self.entry(id).and_then(Entry::text_type).is_none() {
+                    self.error = Some("Посимвольный ввод доступен только для текста".into());
+                    return Task::none();
+                }
+                self.type_busy = true;
+                self.error = None;
+                self.notice = None;
+                return iced::window::latest().map(move |window| Msg::TypeSendWindow(window, id));
+            }
+            Msg::TypeSendWindow(window, id) => {
+                let Some(window) = window else {
+                    self.type_busy = false;
+                    return Task::none();
+                };
+                let Some(target) = self.type_target else {
+                    self.type_busy = false;
+                    return Task::none();
+                };
+                let Some(mime) = self.entry(id).and_then(Entry::text_type).map(str::to_owned)
+                else {
+                    self.type_busy = false;
+                    return Task::none();
+                };
+                let Ok(timing) = self.type_timing() else {
+                    self.type_busy = false;
+                    return Task::none();
+                };
+                let (socket, history, mode) =
+                    (self.socket.clone(), self.active_history(), self.type_mode);
+                self.type_active = Some(target);
+                let work = Task::perform(
+                    clipd::off_thread(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                        clip_type::type_entry(target, &socket, &history, id, &mime, timing, mode)
+                    }),
+                    move |r| Msg::Typed(window, r.unwrap_or_else(|| Err("Ввод прерван".into()))),
+                );
+                return work;
+            }
+            Msg::Typed(window, result) => {
+                self.type_busy = false;
+                self.type_active = None;
+                match result {
+                    Ok(()) => self.notice = Some("Запись напечатана в выбранном окне".into()),
+                    Err(why) => {
+                        self.error = Some(why);
+                        self.type_target = None;
+                    }
+                }
+                return iced::window::set_mode(window, iced::window::Mode::Windowed)
+                    .chain(iced::window::gain_focus(window));
+            }
+            Msg::TypeCancel => {
+                if let Some(target) = self.type_active {
+                    return Task::perform(
+                        clipd::off_thread(move || clip_type::cancel(target)),
+                        |r| {
+                            Msg::TypeCanceled(
+                                r.unwrap_or_else(|| Err("Не удалось остановить ввод".into())),
+                            )
+                        },
+                    );
+                }
+            }
+            Msg::TypeCanceled(result) => {
+                if let Err(why) = result {
+                    self.error = Some(why);
+                }
+            }
             Msg::MoveTo(id, to) => {
                 let request = clipd::move_request(&self.active_history(), id, &to);
                 return self.ok(request, move |r| {
@@ -891,6 +1209,8 @@ impl Clip {
             Msg::Cancel => {
                 self.moving = None;
                 self.deleting = None;
+                self.secreting = None;
+                self.copying_secret = None;
             }
             Msg::Key(press) => return self.key(press),
             Msg::Dismiss => {
@@ -1037,9 +1357,18 @@ impl Clip {
     pub fn key(&mut self, press: Press) -> Task<Msg> {
         match press {
             Press::Escape => {
-                if self.deleting.is_some() || self.moving.is_some() {
+                if self.type_busy {
+                    return self.update(Msg::TypeCancel);
+                }
+                if self.deleting.is_some()
+                    || self.moving.is_some()
+                    || self.secreting.is_some()
+                    || self.copying_secret.is_some()
+                {
                     self.deleting = None;
                     self.moving = None;
+                    self.secreting = None;
+                    self.copying_secret = None;
                 } else if self.builder_open {
                     self.builder_open = false;
                 } else if self.dates_open {
@@ -1067,6 +1396,8 @@ impl Clip {
                 if self.selected != Some(next) {
                     self.moving = None;
                     self.deleting = None;
+                    self.secreting = None;
+                    self.copying_secret = None;
                 }
                 self.selected = Some(next);
                 let reveal = self.reveal();
@@ -1077,9 +1408,13 @@ impl Clip {
                 return reveal;
             }
             Press::Enter => {
-                if self.deleting.is_none() && self.moving.is_none() {
+                if self.deleting.is_none()
+                    && self.moving.is_none()
+                    && self.secreting.is_none()
+                    && self.copying_secret.is_none()
+                {
                     if let Some(e) = self.selected.and_then(|i| self.entries.get(i)) {
-                        self.paste(e.id);
+                        return self.update(Msg::Paste(e.id));
                     }
                 }
             }
@@ -1121,7 +1456,7 @@ impl Clip {
         page = page.push(
             row![
                 button(text("История").size(13))
-                    .style(if self.favorites {
+                    .style(if self.favorites || self.secrets {
                         button::secondary
                     } else {
                         button::primary
@@ -1134,9 +1469,24 @@ impl Clip {
                         button::secondary
                     })
                     .on_press(Msg::Shelf(true)),
+                button(text("Пароли").size(13))
+                    .style(if self.secrets {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press(Msg::Secrets),
             ]
             .spacing(6),
         );
+        page = page.push(
+            checkbox(self.type_enabled)
+                .label("Ввод по символам")
+                .on_toggle(Msg::Typing),
+        );
+        if self.type_enabled {
+            page = page.push(self.view_typing());
+        }
         if let Some(why) = &self.error {
             page = page.push(
                 row![
@@ -1172,6 +1522,17 @@ impl Clip {
         if let Some(line) = self.filters_line() {
             page = page.push(line);
         }
+        if self.secrets {
+            page = page.push(
+                text(if self.type_enabled {
+                    "Пароли скрыты. Посимвольный ввод отправляет запись прямо в выбранное окно."
+                } else {
+                    "Пароли скрыты. Обычная вставка и копирование используют текущий буфер обмена."
+                })
+                .size(12),
+            );
+            return page.into();
+        }
         page = page.push(
             row![
                 button(text("📅").size(16))
@@ -1200,6 +1561,63 @@ impl Clip {
             .align_y(Alignment::Center),
         );
         page.into()
+    }
+
+    fn view_typing(&self) -> Element<'_, Msg> {
+        let field = |title: &'static str, value: &str, tag: &'static str| {
+            column![
+                text(title).size(12),
+                text_input("мс", value)
+                    .size(13)
+                    .padding(5)
+                    .on_input(move |s| Msg::TypeDelay(tag, s)),
+            ]
+            .spacing(3)
+            .width(Length::Fixed(160.0))
+        };
+        let mut controls = column![
+            row![
+                button(
+                    text(if self.type_target.is_some() {
+                        "Выбрать другую точку…"
+                    } else {
+                        "Выбрать точку ввода…"
+                    })
+                    .size(13)
+                )
+                .on_press_maybe((!self.type_busy).then_some(Msg::TypePick)),
+                pick_list(TYPE_MODES.as_slice(), Some(self.type_mode), Msg::TypeMode).text_size(13),
+            ]
+            .spacing(8),
+            text(if self.type_active.is_some() {
+                "Идёт ввод в выбранное окно. Кнопка остановки и Esc прерывают его."
+            } else if self.type_target.is_some() {
+                "Точка выбрана. Выберите текст или пароль и нажмите «Напечатать»."
+            } else {
+                "Менеджер скроется. Нажмите на нужное поле в белом окне; Esc — отмена."
+            })
+            .size(12),
+            row![
+                field("Перед началом, мс", &self.type_start, "start"),
+                field("Между символами, мс", &self.type_between, "between"),
+                field("Удержание, мс", &self.type_hold, "hold"),
+            ]
+            .spacing(8),
+        ]
+        .spacing(6);
+        if self.type_active.is_some() {
+            controls = controls.push(
+                button(text("Остановить ввод · Esc").size(13))
+                    .style(button::danger)
+                    .on_press(Msg::TypeCancel),
+            );
+        }
+        if self.type_mode == TypeMode::Keycodes {
+            controls = controls.push(
+                text("Физические клавиши рассчитаны на раскладку US в целевом окне.").size(12),
+            );
+        }
+        controls.into()
     }
 
     /// What the feed is filtered by, with the way back.
@@ -1284,7 +1702,9 @@ impl Clip {
             } else if self.filtered() {
                 "Ничего не найдено"
             } else {
-                if self.favorites {
+                if self.secrets {
+                    "Паролей нет: отметьте текстовую запись в истории"
+                } else if self.favorites {
                     "Избранное пусто: отметьте важную запись в истории"
                 } else {
                     "История пуста: здесь появится всё, что копируют в этом контейнере"
@@ -1308,7 +1728,9 @@ impl Clip {
     fn bubble<'a>(&'a self, i: usize, e: &'a Entry) -> Element<'a, Msg> {
         let chosen = self.selected == Some(i);
         let mut body = column![].spacing(6);
-        if let Some((mime, size)) = e.image() {
+        if self.secrets {
+            body = body.push(text(format!("●●●●●●●● · {}", e.preview)).size(15));
+        } else if let Some((mime, size)) = e.image() {
             // A PNG as its thumbnail (`thumb`); any other image, or one not
             // made yet, said.
             let kind = mime.strip_prefix("image/").unwrap_or(mime);
@@ -1357,16 +1779,53 @@ impl Clip {
     }
 
     fn actions<'a>(&'a self, e: &'a Entry) -> Element<'a, Msg> {
+        if self.copying_secret == Some(e.id) {
+            return row![
+                text(
+                    "Пароль станет доступен приложениям с доступом к текущему буферу. Копировать?"
+                )
+                .size(13),
+                button(text("Копировать пароль").size(13))
+                    .style(button::danger)
+                    .on_press(Msg::CopySecretYes(e.id)),
+                button(text("Отмена").size(13)).on_press(Msg::Cancel),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into();
+        }
+        if self.secreting == Some(e.id) {
+            return column![
+                text("Убрать запись из истории и сохранить как пароль этого буфера?").size(13),
+                text_input(
+                    "Метка, например «Почта» (не сам пароль)",
+                    &self.secret_label
+                )
+                .on_input(Msg::SecretLabel)
+                .size(13),
+                row![
+                    button(text("Сохранить как пароль").size(13))
+                        .style(button::danger)
+                        .on_press(Msg::SecretYes(e.id)),
+                    button(text("Отмена").size(13)).on_press(Msg::Cancel),
+                ]
+                .spacing(8),
+            ]
+            .spacing(6)
+            .into();
+        }
         if self.deleting == Some(e.id) {
             return row![
-                text(if self.favorites {
+                text(if self.secrets {
+                    "Удалить пароль?"
+                } else if self.favorites {
                     "Убрать из избранного?"
                 } else {
                     "Удалить эту запись из истории?"
                 })
                 .size(13),
                 button(
-                    text(if self.favorites {
+                    text(if self.secrets || self.favorites {
                         "Убрать"
                     } else {
                         "Удалить"
@@ -1412,26 +1871,52 @@ impl Clip {
             }
         }
         let mut line = row![].spacing(8).align_y(Alignment::Center);
-        if self.can_paste {
+        if self.can_paste || self.type_enabled {
             line = line.push(
-                button(text("Вставить  ⏎").size(13))
-                    .style(button::primary)
-                    .on_press(Msg::Paste(e.id)),
+                button(
+                    text(if self.type_enabled {
+                        "Напечатать  ⏎"
+                    } else {
+                        "Вставить  ⏎"
+                    })
+                    .size(13),
+                )
+                .style(button::primary)
+                .on_press_maybe(
+                    (!self.type_busy && (!self.type_enabled || e.text_type().is_some()))
+                        .then_some(Msg::Paste(e.id)),
+                ),
             );
         }
-        if !self.favorites {
+        if self.secrets && !self.can_paste {
+            line = line.push(
+                button(text("Копировать пароль…").size(13))
+                    .style(button::secondary)
+                    .on_press(Msg::CopySecretAsk(e.id)),
+            );
+        }
+        if !self.favorites && !self.secrets {
             line = line.push(
                 button(text("☆ В избранное").size(13))
                     .style(button::secondary)
                     .on_press(Msg::Favorite(e.id)),
             );
+            if e.text_type().is_some() {
+                line = line.push(
+                    button(text("🔒 В пароли…").size(13))
+                        .style(button::secondary)
+                        .on_press(Msg::SecretAsk(e.id)),
+                );
+            }
+        }
+        if !self.secrets {
+            line = line.push(
+                button(text("Скопировать в…").size(13))
+                    .style(button::secondary)
+                    .on_press(Msg::MoveAsk(e.id)),
+            );
         }
         line.push(
-            button(text("Скопировать в…").size(13))
-                .style(button::secondary)
-                .on_press(Msg::MoveAsk(e.id)),
-        )
-        .push(
             button(
                 text(if self.favorites {
                     "Убрать"
@@ -1443,6 +1928,7 @@ impl Clip {
             .style(button::secondary)
             .on_press(Msg::DeleteAsk(e.id)),
         )
+        .wrap()
         .into()
     }
 
@@ -1852,6 +2338,25 @@ impl Clip {
 }
 
 /// `clip …`: the window, until an entry is pasted or it is closed.
+fn clip_window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: Size::new(640.0, 760.0),
+        position: iced::window::Position::Centered,
+        resizable: false,
+        exit_on_close_request: false,
+        #[cfg(target_os = "linux")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: "vpn-zone-window".to_owned(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn clip_view(clip: &Clip, _window: iced::window::Id) -> Element<'_, Msg> {
+    clip.view()
+}
+
 pub fn run(args: &[String]) -> iced::Result {
     let mut history = None;
     let mut manager = false;
@@ -1900,9 +2405,10 @@ pub fn run(args: &[String]) -> iced::Result {
         }
     });
     let can_paste = launch.is_some() && !manager;
-    iced::application(
+    iced::daemon(
         move || {
             let mut clip = Clip::new(history.clone(), can_paste, clipd::socket_path());
+            clip.launch = launch;
             clip.manager = manager;
             clip.lines = lines;
             clip.image_lines = image_lines;
@@ -1912,27 +2418,15 @@ pub fn run(args: &[String]) -> iced::Result {
             } else {
                 Task::none()
             };
-            (clip, Task::batch([first, tabs, operation::focus(SEARCH)]))
+            let (_, open) = iced::window::open(clip_window_settings());
+            (clip, Task::batch([first, tabs, open.map(Msg::Opened)]))
         },
         Clip::update,
-        Clip::view,
+        clip_view,
     )
-    .title(move |_: &Clip| title.clone())
-    .theme(|_: &Clip| None::<iced::Theme>)
+    .title(move |_: &Clip, _window| title.clone())
+    .theme(|_: &Clip, _window| None::<iced::Theme>)
     .subscription(Clip::subscription)
-    .exit_on_close_request(false)
-    .window(iced::window::Settings {
-        size: Size::new(640.0, 760.0),
-        position: iced::window::Position::Centered,
-        // A fixed size: floated by the compositor itself, as a dialog.
-        resizable: false,
-        #[cfg(target_os = "linux")]
-        platform_specific: iced::window::settings::PlatformSpecific {
-            application_id: "vpn-zone-window".to_owned(),
-            ..Default::default()
-        },
-        ..iced::window::Settings::default()
-    })
     .run()?;
     // Closed without a paste.
     std::process::exit(1)
@@ -1994,6 +2488,25 @@ mod tests {
             Ok("ordinary history".to_owned()),
         ));
         assert!(c.whole.is_empty());
+    }
+
+    #[test]
+    fn passwords_hide_contents_and_do_not_keep_a_pending_text_search() {
+        let mut c = clip();
+        c.words = "a secret query".into();
+        c.re = Some("secret".into());
+        c.builder_open = true;
+        c.whole.insert(1, "revealed history text".into());
+        let _ = c.update(Msg::Secrets);
+        assert_eq!(c.active_history(), "@secrets:main");
+        assert!(c.whole.is_empty() && c.words.is_empty() && c.re.is_none());
+        assert!(!c.builder_open);
+        c.entries.push(entry(1, 10));
+        let _ = c.update(Msg::Whole(1));
+        let _ = c.update(Msg::MoveAsk(1));
+        assert!(c.whole.is_empty() && c.moving.is_none());
+        let _ = c.update(Msg::Shelf(false));
+        assert_eq!(c.active_history(), "main");
     }
 
     #[test]

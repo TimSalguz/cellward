@@ -241,6 +241,15 @@ pub fn favorite_request(history: &str, id: u64) -> String {
     format!("favorite\t{}\t{id}", encode(history))
 }
 
+/// Move a text entry into the same buffer's separately encrypted password shelf.
+pub fn secret_request(history: &str, id: u64, label: &str) -> String {
+    format!("secret\t{}\t{id}\t{}", encode(history), encode(label))
+}
+
+pub fn select_request(history: &str, id: u64) -> String {
+    format!("select\t{}\t{id}", encode(history))
+}
+
 /// Why an answer did not come.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {

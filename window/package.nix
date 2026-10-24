@@ -59,6 +59,7 @@ rustPlatform.buildRustPackage {
       # iced's renderer with its text damage fixed (vendor/README.md).
       ./vendor
       ../shared/i18n.rs
+      ../shared/type_input.rs
     ];
   };
   sourceRoot = "source/window";

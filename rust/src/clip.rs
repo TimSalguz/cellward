@@ -398,7 +398,10 @@ pub fn valid_history(name: &str) -> bool {
 /// A history an explicit host-side entry selection may name. The reserved
 /// favourites scope is never a launch's recording destination.
 pub fn valid_entry_history(name: &str) -> bool {
-    let real = name.strip_prefix("@favorites:").unwrap_or(name);
+    let real = name
+        .strip_prefix("@favorites:")
+        .or_else(|| name.strip_prefix("@secrets:"))
+        .unwrap_or(name);
     valid_history(real) && real != NO_HISTORY
 }
 
@@ -472,6 +475,7 @@ mod tests {
     #[test]
     fn favourites_can_be_selected_but_not_used_as_a_recording_history() {
         assert!(valid_entry_history("@favorites:app-helium"));
+        assert!(valid_entry_history("@secrets:app-helium"));
         assert!(!valid_history("@favorites:app-helium"));
         assert!(!valid_entry_history("@favorites:../host"));
         assert!(!valid_entry_history("@favorites:-"));

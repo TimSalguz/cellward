@@ -109,6 +109,8 @@ pub mod camera;
 pub mod chain;
 pub mod cli;
 pub mod clip;
+#[path = "../../shared/type_input.rs"]
+pub mod type_input;
 pub mod completion;
 pub mod config;
 pub mod connect;

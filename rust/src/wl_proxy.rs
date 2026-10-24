@@ -393,6 +393,8 @@ const FRAME: u8 = b'l';
 /// Supervisor → proxy: paste for the person what the clipboard history just
 /// made the selection (`crate::clip::want_paste`, [`PASTE_ASK`]). No answer.
 const PASTE: u8 = b'v';
+/// Host-only coordinate selection or typing; the payload is type_input's.
+const TYPE_CONTROL: u8 = b'G';
 /// Proxy → supervisor: the clipboard history's window for this launch —
 /// a row of the ≡'s dropdown (`cellward clip-window --pid`). No answer.
 const CLIP: u8 = b'h';
@@ -686,6 +688,8 @@ impl Asking {
         let _ = fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
         listener.set_nonblocking(true)?;
+        // A manager may offer typing only for supervisors with this protocol.
+        fs::write(path.with_extension("typing"), b"1")?;
         Ok(Self {
             listener: Some(listener),
             path: Some(path),
@@ -711,6 +715,7 @@ impl Asking {
     fn close(&mut self) {
         self.listener = None;
         if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path.with_extension("typing"));
             let _ = fs::remove_file(path);
         }
         self.close_questions();
@@ -745,7 +750,16 @@ fn read_question(stream: &UnixStream, buf: &mut Vec<u8>) -> bool {
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
                 let whole = asked_of(buf).map(<[u8]>::len).map(|l| l + 2);
-                if buf.len() > 2 + MAX_QUESTION || whole.is_some_and(|w| buf.len() > w) {
+                if buf.len() > 2 + crate::type_input::MAX_REQUEST
+                    || whole.is_some_and(|w| buf.len() > w)
+                {
+                    return false;
+                }
+                if buf.len() > 2 + MAX_QUESTION
+                    && !buf
+                        .get(2..)
+                        .is_some_and(|p| p.starts_with(crate::type_input::PREFIX))
+                {
                     return false;
                 }
             }
@@ -1388,6 +1402,23 @@ impl Proxy {
     fn pastes(&mut self) {
         let waiting = std::mem::take(&mut self.asking.waiting);
         for (stream, buf) in waiting {
+            if let Some(payload) = asked_of(&buf) {
+                if matches!(
+                    crate::type_input::Request::parse(payload),
+                    Some(crate::type_input::Request::Cancel { .. })
+                ) {
+                    let len = (payload.len() as u16).to_le_bytes();
+                    let mut message = vec![TYPE_CONTROL, 0, len[0], len[1]];
+                    message.extend_from_slice(payload);
+                    let sent = !of_this_launch(stream.as_raw_fd())
+                        && self.channel.as_ref().is_some_and(|c| {
+                            sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_ok()
+                        });
+                    self.asking
+                        .say(&stream, if sent { ASK_YES } else { ASK_NOWHERE });
+                    continue;
+                }
+            }
             if asked_of(&buf) != Some(PASTE_ASK) {
                 self.asking.waiting.push_back((stream, buf));
                 continue;
@@ -1426,9 +1457,49 @@ impl Proxy {
         self.asking.seq = self.asking.seq.wrapping_add(1);
         let seq = self.asking.seq;
         let len = u16::try_from(payload.len()).unwrap_or(0).to_le_bytes();
-        let mut message = vec![QUESTION, seq, len[0], len[1]];
+        let control = crate::type_input::Request::parse(payload);
+        let mut descriptor = None;
+        let kind = if let Some(request) = &control {
+            // Even the camera helper's permission-question exception never
+            // grants a launch access to host-generated typing commands.
+            if of_this_launch(stream.as_raw_fd()) {
+                self.asking.say(&stream, ASK_NO);
+                return;
+            }
+            descriptor = match request {
+                crate::type_input::Request::Select { .. } => {
+                    sealed_memfd(c"cw-type-overlay", &[255; 4], 4).ok()
+                }
+                crate::type_input::Request::Cancel { .. } => None,
+                crate::type_input::Request::Type { text, mode, .. } => {
+                    let Ok(plan) = crate::type_input::Plan::new(text, *mode) else {
+                        self.asking.say(&stream, ASK_NO);
+                        return;
+                    };
+                    match plan.keymap {
+                        Some(map) => match sealed_memfd(c"cw-type-keymap", &map, map.len()) {
+                            Ok(fd) => Some(fd),
+                            Err(_) => {
+                                self.asking.say(&stream, ASK_NOWHERE);
+                                return;
+                            }
+                        },
+                        None => None,
+                    }
+                }
+            };
+            TYPE_CONTROL
+        } else {
+            if payload.first() == Some(&0) || payload.len() > MAX_QUESTION {
+                self.asking.say(&stream, ASK_NO);
+                return;
+            }
+            QUESTION
+        };
+        let mut message = vec![kind, seq, len[0], len[1]];
         message.extend_from_slice(payload);
-        if sys::send_with_fds(channel.as_raw_fd(), &message, &[]).is_ok() {
+        let descriptors: Vec<_> = descriptor.iter().map(AsRawFd::as_raw_fd).collect();
+        if sys::send_with_fds(channel.as_raw_fd(), &message, &descriptors).is_ok() {
             self.asking.asked = Some((stream, seq));
         } else {
             self.asking.say(&stream, ASK_NOWHERE);
@@ -2496,6 +2567,7 @@ fn serve(
         let wake = conns
             .iter()
             .filter_map(|c| c.frames.as_ref().and_then(|f| f.wake_at()))
+            .chain(crate::wl_frame::typing::wake_at())
             .min();
         for until in [paused, wake].into_iter().flatten() {
             let left = until.saturating_duration_since(now).as_millis();
@@ -2514,6 +2586,7 @@ fn serve(
         }
         if wake.is_some() {
             let woke = Instant::now();
+            crate::wl_frame::typing::tick(woke);
             for conn in &conns {
                 if let Some(f) = &conn.frames {
                     f.tick(woke);
@@ -2555,8 +2628,33 @@ fn serve(
                         waiting.pop_front();
                     }
                     Answer::Question(question) => questions.ask(question),
-                    Answer::Retract(seq) => questions.retract(seq),
+                    Answer::Retract(seq) => {
+                        questions.retract(seq);
+                        crate::wl_frame::typing::retract(seq);
+                    }
                     Answer::Paste => crate::wl_frame::paste_now(),
+                    Answer::TypeControl(seq, request, fd) => match request {
+                        crate::type_input::Request::Cancel { token } => {
+                            crate::wl_frame::typing::cancel_token(token)
+                        }
+                        crate::type_input::Request::Select { token } => {
+                            let frames: Vec<_> =
+                                conns.iter().filter_map(|c| c.frames.clone()).collect();
+                            if let Some(fd) = fd {
+                                crate::wl_frame::typing::select(seq, token, fd, &frames);
+                            } else {
+                                crate::wl_frame::typing::unavailable(seq);
+                            }
+                        }
+                        crate::type_input::Request::Type {
+                            token,
+                            timing,
+                            mode,
+                            text,
+                        } => {
+                            crate::wl_frame::typing::start(seq, token, timing, mode, &text, fd);
+                        }
+                    },
                     // The frame changed on the fly: every connection's
                     // windows laid anew, and the next connection's too.
                     Answer::Frame(frame, pixel, title) => {
@@ -2596,6 +2694,7 @@ fn serve(
                 conn.dispatch();
             }
         }
+        crate::wl_frame::typing::tick(Instant::now());
         // The clicks of this round on the frames' ≡ and ⇄, to the
         // supervisor: a byte each on the channel (`sendmsg`, as a request
         // for an upstream). The program gone, the launch's menu is too: they
@@ -2607,7 +2706,11 @@ fn serve(
         }
         // What came of the supervisor's questions: a question whose window
         // went this round goes to another first.
-        for reply in questions.take() {
+        for reply in questions
+            .take()
+            .into_iter()
+            .chain(crate::wl_frame::typing::take())
+        {
             let bytes = match reply {
                 Reply::Chose(seq, button) => vec![ANSWERED, seq, button],
                 Reply::Nowhere(seq) => vec![NOWHERE, seq],
@@ -2663,6 +2766,7 @@ enum Answer {
     Question(Question),
     Retract(u8),
     Paste,
+    TypeControl(u8, crate::type_input::Request, Option<OwnedFd>),
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
     Frame(Frame, Option<OwnedFd>, Option<String>),
@@ -2681,6 +2785,23 @@ fn answer(channel: &UnixStream) -> Answer {
         },
         Ok((1, _, _)) if byte[0] == REFUSED => Answer::Refused,
         Ok((1, _, _)) if byte[0] == PASTE => Answer::Paste,
+        Ok((1, mut fds, _)) if byte[0] == TYPE_CONTROL => {
+            let mut head = [0u8; 3];
+            if !recv_exact(channel.as_raw_fd(), &mut head) {
+                return Answer::Closed;
+            }
+            let len = usize::from(u16::from_le_bytes([head[1], head[2]]));
+            if len > crate::type_input::MAX_REQUEST {
+                return Answer::Closed;
+            }
+            let mut payload = vec![0u8; len];
+            if !recv_exact(channel.as_raw_fd(), &mut payload) {
+                return Answer::Closed;
+            }
+            crate::type_input::Request::parse(&payload).map_or(Answer::Nothing, |request| {
+                Answer::TypeControl(head[0], request, fds.pop())
+            })
+        }
         // The rest of it is there: the supervisor sends a message whole.
         Ok((1, _, _)) if byte[0] == QUESTION => {
             let mut head = [0u8; 3];

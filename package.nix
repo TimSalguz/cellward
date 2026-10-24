@@ -28,6 +28,7 @@ rustPlatform.buildRustPackage {
       ./rust/src
       ./rust/tests
       ./shared/i18n.rs
+      ./shared/type_input.rs
     ];
   };
   sourceRoot = "source/rust";
