@@ -311,6 +311,9 @@ fn width_file(text: Option<String>) -> Option<i32> {
 
 /// The border's width in logical pixels and where it comes from.
 pub fn width(config: &Path) -> (i32, Source) {
+    if let Some(w) = width_file(crate::frame_preview::read(config, WIDTH_SETTING)) {
+        return (w, Source::Local);
+    }
     if let Some(w) = width_file(read_setting(&override_path(config, WIDTH_SETTING))) {
         return (w, Source::Local);
     }
@@ -498,6 +501,12 @@ fn word_setting<T>(
     parse: impl Fn(&str) -> Option<T>,
     default: T,
 ) -> (T, Source) {
+    if let Some(value) = crate::frame_preview::read(config, name)
+        .as_deref()
+        .and_then(&parse)
+    {
+        return (value, Source::Local);
+    }
     if let Some(value) = read_setting(&override_path(config, name))
         .as_deref()
         .and_then(&parse)

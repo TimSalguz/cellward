@@ -7032,6 +7032,18 @@ mod tests {
         let (frame, _, _) = live.changed().expect("a live preview over Nix");
         assert_eq!(frame.width, 5);
         assert_eq!(frame_message(live.setup.frame, None)[0], FRAME);
+        let mut preview = crate::frame_preview::Session::new(&config).unwrap();
+        preview.set(WIDTH_SETTING, "1").unwrap();
+        assert_eq!(live.changed().expect("slider movement").0.width, 1);
+        preview.set(OUTER_RADIUS_SETTING, "16").unwrap();
+        assert_eq!(
+            live.changed().expect("radius movement").0.outer,
+            crate::frame::Radius::Px(16)
+        );
+        drop(preview);
+        let (frame, _, _) = live.changed().expect("Cancel restores both values");
+        assert_eq!(frame.width, 5);
+        assert_eq!(frame.outer, crate::frame::Radius::Px(12));
         let _ = fs::remove_dir_all(&root);
     }
 

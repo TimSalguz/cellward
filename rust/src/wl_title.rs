@@ -810,9 +810,10 @@ pub struct Outer {
 /// The radii of the window's corners inside `frame`, the top's and the
 /// bottom's: its setting's number, both; niri's (`crate::frame::Radius::
 /// Niri`) less the border, and at the top less the title strip too where it
-/// takes room (mode `always`) — niri rounds the window's geometry, which is
-/// the frame's outer edge, and the curve inside is then concentric with
-/// its. Below 0 is square.
+/// takes room (mode `always`). The uniform border's offset shares the
+/// outer arc's centre. Subtracting the title height is only an approximation
+/// for the non-uniform top inset, not a generally concentric construction.
+/// Below 0 is square.
 pub fn inner_radii(frame: &Frame) -> (i32, i32) {
     match frame.radius {
         Radius::Px(r) => (r, r),

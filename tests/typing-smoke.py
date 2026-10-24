@@ -96,6 +96,7 @@ def main():
     parser.add_argument("--window", help="also exercise the actual clipboard manager UI")
     parser.add_argument("--gui-only", action="store_true")
     parser.add_argument("--frame-history", action="store_true", help="exercise the launch-bound history window instead of the tray manager")
+    parser.add_argument("--frame-editor", action="store_true", help="also render the live frame sliders")
     parser.add_argument("--fonts", help="small font directory to avoid scanning the host font collection")
     args = parser.parse_args()
     if args.gui_only and not args.window:
@@ -104,6 +105,9 @@ def main():
     print(f"Artifacts: {root}", flush=True)
     runtime = root / "runtime"
     runtime.mkdir(mode=0o700)
+    palette = root / "config/cellward/palette.json"
+    palette.parent.mkdir(parents=True)
+    palette.write_text('{"background":"#1e1e2e","text":"#cdd6f4","accent":"#cba6f7","success":"#a6e3a1","danger":"#f38ba8","warning":"#f9e2af"}')
     processes = []
     files = []
     env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), WLR_BACKENDS="headless",
@@ -119,11 +123,14 @@ def main():
     config = root / "sway.conf"
     config.write_text('output * mode 1200x900\noutput * bg #202020 solid_color\nseat seat0 fallback true\ndefault_border none\nfocus_follows_mouse no\nfor_window [app_id="other-.*"] floating enable\nfor_window [app_id="vpn-zone-window"] floating enable\n')
 
-    def start(command, name):
+    def start(command, name, input=None):
         log = open(root / f"{name}.log", "wb")
         files.append(log)
-        process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(command, env=env, stdin=subprocess.PIPE if input else None, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         processes.append(process)
+        if input:
+            process.stdin.write(input.encode())
+            process.stdin.close()
         return process
 
     def msg(*words):
@@ -292,6 +299,11 @@ def main():
             rect = dict(manager_window["rect"])
             rect["x"] += (rect["width"] - manager_window["window_rect"]["width"]) // 2
             rect["y"] += rect["height"] - manager_window["window_rect"]["height"] - 1
+            def background():
+                raw = subprocess.check_output([args.grim, "-t", "ppm", "-g", f"{rect['x'] + 600},{rect['y'] + 650} 1x1", "-"], env=env)
+                return raw[-3:]
+            if args.grim:
+                wait_for(lambda: background() == bytes((30, 30, 46)), timeout=6)
             tab_offset = -36 if args.frame_history else 0
             click(rect["x"] + 25, rect["y"] + 95 + tab_offset)
             screenshot("manager-typing-controls")
@@ -303,6 +315,8 @@ def main():
             wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
             time.sleep(0.2)
             screenshot("manager-point-chosen")
+            if args.grim:
+                assert background() == bytes((30, 30, 46)), "palette lost when manager reopened"
             click(rect["x"] + 225, rect["y"] + 63 + tab_offset)
             screenshot("manager-password-selected")
             for key in [103, 28]:
@@ -315,10 +329,47 @@ def main():
             assert not any(line.startswith("select\t") for line in requests), "typing changed the clipboard selection"
             time.sleep(0.2)
             screenshot("manager-typed")
+            if args.grim:
+                assert background() == bytes((30, 30, 46)), "palette lost after typing"
+                palette.write_text('{"background":"#eff1f5","text":"#4c4f69","accent":"#8839ef"}')
+                wait_for(lambda: background() == bytes((239, 241, 245)), timeout=6)
+                screenshot("manager-system-palette-updated")
+                palette.write_text('{"background":"#1e1e2e","text":"#cdd6f4","accent":"#cba6f7"}')
+                wait_for(lambda: background() == bytes((30, 30, 46)), timeout=6)
             stop.set()
             server.join(timeout=2)
             daemon.close()
             print("manager UI: point selected, window reopened, entry typed without clipboard mutation", flush=True)
+            if args.frame_editor:
+                os.killpg(manager.pid, signal.SIGTERM)
+                manager.wait(timeout=5)
+                wait_for(lambda: not any(w["app_id"] == "vpn-zone-window" for w in windows()))
+                request = "mode\tperms\ntitle\tLive frame preview\nblock\tFrame\nframe-preview\t1\nguard\t0\n"
+                request += "perm\twidth\tWidth\t0:0;4:4;default:Nix\nperm\tradius\tInner radius\t0:0;8:8;niri:Niri\nperm\touter-radius\tOuter radius\t0:0;8:8;niri:Niri\n"
+                request += "permof\tthis\tChanges are previewed until Save\twidth=4,radius=8,outer-radius=8\nslider\twidth\t32\t4\nslider\tradius\t16\t8\nslider\touter-radius\t32\t8\n"
+                editor = start([str(Path(args.window).resolve())], "frame-editor", request)
+                wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
+                time.sleep(1.5)
+                screenshot("frame-editor")
+                frame = next(w for w in windows() if w["app_id"] == "vpn-zone-window")
+                (root / "frame-editor-tree.json").write_text(json.dumps(frame, indent=2))
+                r = frame["rect"]
+                msg(f"[con_id={frame['id']}]", "focus")
+                pointer.write(f"move {r['x'] + 334} {r['y'] + 140}\npress\n")
+                time.sleep(0.1)
+                pointer.write(f"move {r['x'] + 520} {r['y'] + 140}\n")
+                live = root / "frame-editor.log"
+                wait_for(lambda: b"preview\twidth\t" in live.read_bytes())
+                assert b"perm\t" not in live.read_bytes(), "preview was committed before Save"
+                assert editor.poll() is None, "drag closed the editor"
+                pointer.write("release\n")
+                screenshot("frame-editor-dragged")
+                for down in [1, 0]:
+                    packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, 1, down))
+                    time.sleep(0.05)
+                assert editor.wait(timeout=5) != 0, "Escape did not cancel preview"
+                assert b"perm\t" not in live.read_bytes(), "Cancel emitted persistent changes"
+                print("frame editor: dragging emits live preview before Save; Escape cancels", flush=True)
         vk.close()
         print("typing smoke passed", flush=True)
     finally:

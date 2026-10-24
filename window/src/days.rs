@@ -129,7 +129,7 @@ pub fn parse_date(text: &str, now: i64, with_time: bool) -> Option<i64> {
         return None;
     }
     let parts: Vec<&str> = date.split(['.', '/']).collect();
-    let (day, month, year) = match parts.as_slice() {
+    let (day, month, year): (u32, u32, i32) = match parts.as_slice() {
         [d, m] => (d.parse().ok()?, m.parse().ok()?, local(now).year),
         [d, m, y] => {
             let y: i32 = y.parse().ok()?;

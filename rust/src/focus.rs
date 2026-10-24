@@ -1476,11 +1476,9 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
                 .as_deref()
                 .filter(|r| *r != crate::container::OPEN_RECORD);
             let zone = launch.as_ref().map(|l| l.zone.as_str());
-            let request = crate::frame_window::request(tools, zone, record);
-            let Some(changes) = crate::window::ask_perms(&tools.window, &request) else {
+            let Some(said) = crate::frame_window::edit(tools, zone, record) else {
                 return 0;
             };
-            let said = crate::frame_window::apply(tools, zone, record, &changes);
             if !said.is_empty() {
                 notify(&label, &said.join("\n"));
             }

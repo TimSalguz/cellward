@@ -11,16 +11,22 @@ The panel can choose System, Light, Dark, or one of the built-in iced palettes
 (including Catppuccin, Nord, Gruvbox, Solarized and Tokyo Night). The choice is
 stored as `theme=<key>` in `$XDG_CONFIG_HOME/cellward/appearance.conf` (or
 `~/.config/cellward/appearance.conf`). Both the panel and subsequent launch
-windows use it. System continues to use iced's system light/dark detection.
-The panel switches immediately; a launch window already open keeps its current
-appearance until it is opened again. Zone and warning colours remain semantic
-and need explicit contrast checks against every palette.
+windows and the clipboard manager use it. System reads actual colours from
+`$XDG_CONFIG_HOME/cellward/palette.json`, KDE `kdeglobals`, or GTK 4/3 named
+colours (GNOME prefers GTK). Missing or invalid palettes fall back to iced's
+system light/dark detection. The bounded reader is adapted from stillconf,
+without reading stillconf's private state or preferences.
 
-The stillconf-style *system palette*, not merely system light/dark, is not yet
-implemented. Implement it through a bounded palette reader (KDE, GTK and an
-explicit Cellward palette file), plus a notification or cheap revision check,
-without reading stillconf's private state or its window preferences. Test
-contrast and missing/malformed files before enabling it.
+The optional JSON palette requires `background` and `text`; optional keys are
+`accent`, `success`, `danger`, and `warning`, with hex colour values. File changes
+are checked every two seconds, waking open windows only when something changes.
+The manager keeps the selected theme after hiding for point selection. Zone
+colours remain separate; desktop-specific contrast checks remain on the roadmap.
+
+The frame editor previews thickness and inner/outer radius changes as the
+sliders move. Save commits local cosmetic overrides, Cancel drops the preview
+and restores the previous effective values. Other controls still apply on Save.
+This mechanism never previews or overrides isolation permissions.
 
 ## Languages
 

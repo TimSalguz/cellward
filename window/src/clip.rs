@@ -174,6 +174,7 @@ pub enum Press {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
+    Appearance,
     Opened(iced::window::Id),
     Loaded {
         gen: u64,
@@ -774,6 +775,7 @@ impl Clip {
 
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
+            Msg::Appearance => {}
             Msg::Opened(window) => {
                 let focus = iced::window::gain_focus(window);
                 return if self.type_enabled {
@@ -2503,27 +2505,30 @@ impl Clip {
     }
 
     fn subscription(&self) -> Subscription<Msg> {
-        iced::event::listen_with(|event, status, _window| match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                let free = status == iced::event::Status::Ignored;
-                match key.as_ref() {
-                    Key::Named(key::Named::Escape) => Some(Msg::Key(Press::Escape)),
-                    Key::Named(key::Named::ArrowUp) => Some(Msg::Key(Press::Up)),
-                    Key::Named(key::Named::ArrowDown) => Some(Msg::Key(Press::Down)),
-                    // A field that took Enter (the builder's text) keeps it.
-                    Key::Named(key::Named::Enter) if free => Some(Msg::Key(Press::Enter)),
-                    Key::Character("f" | "а") if modifiers.command() => {
-                        Some(Msg::Key(Press::Search))
+        Subscription::batch([
+            iced::event::listen_with(|event, status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                    let free = status == iced::event::Status::Ignored;
+                    match key.as_ref() {
+                        Key::Named(key::Named::Escape) => Some(Msg::Key(Press::Escape)),
+                        Key::Named(key::Named::ArrowUp) => Some(Msg::Key(Press::Up)),
+                        Key::Named(key::Named::ArrowDown) => Some(Msg::Key(Press::Down)),
+                        // A field that took Enter (the builder's text) keeps it.
+                        Key::Named(key::Named::Enter) if free => Some(Msg::Key(Press::Enter)),
+                        Key::Character("f" | "а") if modifiers.command() => {
+                            Some(Msg::Key(Press::Search))
+                        }
+                        Key::Character("/") if free => Some(Msg::Key(Press::Search)),
+                        _ => None,
                     }
-                    Key::Character("/") if free => Some(Msg::Key(Press::Search)),
-                    _ => None,
                 }
-            }
-            iced::Event::Window(iced::window::Event::CloseRequested) => {
-                Some(Msg::Key(Press::Escape))
-            }
-            _ => None,
-        })
+                iced::Event::Window(iced::window::Event::CloseRequested) => {
+                    Some(Msg::Key(Press::Escape))
+                }
+                _ => None,
+            }),
+            crate::appearance::watch().map(|_| Msg::Appearance),
+        ])
     }
 }
 

@@ -5348,6 +5348,29 @@ impl WlSeatHandler for Seat {
     }
 }
 
+/// Remember dismissing presses so their releases cannot reach the program.
+#[derive(Default)]
+struct MenuButtons {
+    swallowed: Vec<u32>,
+}
+
+impl MenuButtons {
+    fn consume(&mut self, button: u32, pressed: bool, outside_menu: bool) -> bool {
+        if !pressed {
+            if let Some(at) = self.swallowed.iter().position(|b| *b == button) {
+                self.swallowed.swap_remove(at);
+                return true;
+            }
+        } else if outside_menu {
+            if !self.swallowed.contains(&button) && self.swallowed.len() < 32 {
+                self.swallowed.push(button);
+            }
+            return true;
+        }
+        false
+    }
+}
+
 /// The program's pointer. While the pointer is over a strip (`away`), every
 /// event of it is dropped; a `frame` is passed only when something of its
 /// group was — leaving the program's surface for a strip is a `leave` and a
@@ -5390,6 +5413,7 @@ struct Pointer {
     /// The buttons down on the program's surfaces: let go of before a leave
     /// is held back, or they would stay down.
     down: Vec<u32>,
+    menu_buttons: MenuButtons,
     /// A fullscreen title press: only a real drag ends fullscreen and asks
     /// the compositor to move it; an ordinary first click stays fullscreen
     /// so a double click can end it without accidentally maximizing.
@@ -5462,6 +5486,7 @@ impl Pointer {
             cursor: None,
             held: None,
             down: Vec::new(),
+            menu_buttons: MenuButtons::default(),
             fullscreen_drag: None,
         }
     }
@@ -5847,6 +5872,28 @@ impl WlPointerHandler for Pointer {
         button: u32,
         state: WlPointerButtonState,
     ) {
+        // A compositor should dismiss a grabbed popup itself. If it sends
+        // the outside click to a frame/program surface instead, close the
+        // menu and swallow BOTH halves: never activate the app underneath.
+        let menu = self
+            .f
+            .menu_on
+            .borrow()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .filter(|w| w.try_borrow().is_ok_and(|w| w.menu.is_some()));
+        let outside = menu.is_some() && !self.over.as_ref().is_some_and(|o| o.part == Part::Menu);
+        if self
+            .menu_buttons
+            .consume(button, state == WlPointerButtonState::PRESSED, outside)
+        {
+            if let Some(window) = menu {
+                if let Ok(mut window) = window.try_borrow_mut() {
+                    window.close_menu();
+                }
+            }
+            return;
+        }
         self.frame_button(slf, (serial, time), button, state);
         if !self.away {
             if state == WlPointerButtonState::PRESSED {
@@ -6468,6 +6515,29 @@ impl ZwpPrimarySelectionOfferV1Handler for PrimaryOffer {
 mod tests {
     use super::*;
     use crate::wl_title::LOOK;
+
+    #[test]
+    fn dismissing_a_menu_consumes_the_whole_click_not_the_next_one() {
+        let mut buttons = MenuButtons::default();
+        assert!(!buttons.consume(BTN_LEFT, true, false), "inside the menu");
+        assert!(!buttons.consume(BTN_LEFT, false, false));
+        assert!(
+            buttons.consume(BTN_LEFT, true, true),
+            "outside press closes it"
+        );
+        assert!(
+            buttons.consume(BTN_LEFT, false, false),
+            "release must not reach the app after closure"
+        );
+        assert!(
+            !buttons.consume(BTN_LEFT, true, false),
+            "the next ordinary click works"
+        );
+        assert!(!buttons.consume(BTN_LEFT, false, false));
+        assert!(buttons.consume(BTN_RIGHT, true, true));
+        assert!(buttons.consume(BTN_RIGHT, false, false));
+        assert!(buttons.swallowed.is_empty());
+    }
 
     const R: Rect = Rect {
         x: 26,

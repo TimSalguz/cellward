@@ -109,8 +109,6 @@ pub mod camera;
 pub mod chain;
 pub mod cli;
 pub mod clip;
-#[path = "../../shared/type_input.rs"]
-pub mod type_input;
 pub mod completion;
 pub mod config;
 pub mod connect;
@@ -133,6 +131,7 @@ pub mod explain;
 pub mod flows;
 pub mod focus;
 pub mod frame;
+pub(crate) mod frame_preview;
 pub mod frame_window;
 pub mod fs_sandbox;
 pub mod grants;
@@ -190,6 +189,8 @@ pub mod tools;
 pub mod traffic;
 pub mod tray;
 pub mod trust;
+#[path = "../../shared/type_input.rs"]
+pub mod type_input;
 pub mod verdicts;
 pub mod watch;
 pub mod window;

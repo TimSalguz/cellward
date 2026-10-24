@@ -117,10 +117,11 @@ impl ThemeChoice {
             .unwrap_or_default()
     }
 
-    /// `None` retains iced's live system light/dark detection.
+    /// Prefer actual desktop palette files; fall back to iced's live system
+    /// light/dark detection when no semantic palette is available.
     pub fn theme(self) -> Option<Theme> {
         Some(match self {
-            Self::System => return None,
+            Self::System => return system_theme(),
             Self::Light => Theme::Light,
             Self::Dark => Theme::Dark,
             Self::CatppuccinLatte => Theme::CatppuccinLatte,
@@ -179,6 +180,94 @@ pub fn save(choice: ThemeChoice) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+fn color(c: crate::syscolors::Rgb) -> iced::Color {
+    iced::Color::from_rgb8(c.0, c.1, c.2)
+}
+
+fn palette_theme(s: crate::syscolors::SystemColors) -> Theme {
+    use iced::theme::Palette;
+    let base = if s.background.is_dark() {
+        Palette::DARK
+    } else {
+        Palette::LIGHT
+    };
+    Theme::custom(
+        format!("System ({})", s.source.path().display()),
+        Palette {
+            background: color(s.background),
+            text: color(s.text),
+            primary: s.accent.map(color).unwrap_or(base.primary),
+            success: s.success.map(color).unwrap_or(base.success),
+            danger: s.danger.map(color).unwrap_or(base.danger),
+            warning: s
+                .warning
+                .filter(|c| Some(*c) != s.success)
+                .map(color)
+                .unwrap_or(base.warning),
+        },
+    )
+}
+
+fn theme_cache() -> &'static std::sync::Mutex<Option<(std::time::Instant, Option<Theme>)>> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Option<(Instant, Option<Theme>)>>> = OnceLock::new();
+    use std::time::Instant;
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn system_theme() -> Option<Theme> {
+    use std::time::{Duration, Instant};
+    let mut cache = theme_cache().lock().ok()?;
+    if let Some((at, theme)) = &*cache {
+        if at.elapsed() < Duration::from_secs(1) {
+            return theme.clone();
+        }
+    }
+    let theme = crate::syscolors::config_home().and_then(|home| {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        crate::syscolors::read(&home, &desktop, None).map(palette_theme)
+    });
+    *cache = Some((Instant::now(), theme.clone()));
+    theme
+}
+
+fn signature() -> Vec<(PathBuf, crate::syscolors::Mark)> {
+    let mut paths = path().into_iter().collect::<Vec<_>>();
+    if load() == ThemeChoice::System {
+        if let Some(home) = crate::syscolors::config_home() {
+            paths.extend(crate::syscolors::watched_files(&home));
+        }
+    }
+    let marks = crate::syscolors::signature(&paths);
+    paths.into_iter().zip(marks).collect()
+}
+
+/// Only a changed file wakes the UI, not a periodic redraw. The worker
+/// stops when the last subscriber (including a closed window) goes away.
+pub fn watch() -> iced::Subscription<()> {
+    fn events() -> impl iced::futures::Stream<Item = ()> {
+        let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+        std::thread::spawn(move || {
+            let mut previous = signature();
+            while !sender.is_closed() {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let current = signature();
+                if current != previous {
+                    previous = current;
+                    if let Ok(mut cache) = theme_cache().lock() {
+                        *cache = None;
+                    }
+                    if sender.unbounded_send(()).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        receiver
+    }
+    iced::Subscription::run(events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +280,26 @@ mod tests {
             assert_eq!(ThemeChoice::from_key(choice.key()), choice);
         }
         assert_eq!(ThemeChoice::from_key("unknown"), ThemeChoice::System);
-        assert!(ThemeChoice::System.theme().is_none());
+        assert_eq!(ThemeChoice::System.key(), "system");
+    }
+
+    #[test]
+    fn the_system_theme_uses_real_colors_not_a_named_light_or_dark_palette() {
+        let source = std::path::Path::new("/fixture/palette.json");
+        let colors = crate::syscolors::parse_palette_file(
+            r##"{ "background": "#1e1e2e", "text": "#cdd6f4", "accent": "#cba6f7" }"##,
+            source,
+        )
+        .unwrap();
+        let theme = palette_theme(colors);
+        assert_eq!(
+            theme.palette().background,
+            iced::Color::from_rgb8(30, 30, 46)
+        );
+        assert_eq!(theme.palette().text, iced::Color::from_rgb8(205, 214, 244));
+        assert_eq!(
+            theme.palette().primary,
+            iced::Color::from_rgb8(203, 166, 247)
+        );
     }
 }

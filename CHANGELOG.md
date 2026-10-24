@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Frame thickness and inner/outer radii now have live sliders: dragging previews
+  the change on open frames, Save commits the local override, and Cancel restores
+  the previous settings, including Nix declarations. Permission editors do not
+  participate in cosmetic previews.
+- The System theme reads actual KDE/GTK colours or an explicit
+  `cellward/palette.json`, using the same bounded-reader approach as stillconf.
+  Open windows, including the clipboard manager, follow palette changes.
 - Stored passwords can be relabelled or replaced without revealing their
   current text, and transferred to another buffer's encrypted password shelf
   with explicit confirmation. Copy/paste timestamps survive edits and moves.

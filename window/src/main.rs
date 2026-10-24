@@ -50,6 +50,7 @@ mod login;
 mod metro;
 mod panel;
 mod pattern;
+mod syscolors;
 mod thumb;
 #[path = "../../shared/type_input.rs"]
 mod type_input;
@@ -117,6 +118,8 @@ struct Request {
     /// The permissions block's heading (`block`): «Разрешения» unless said
     /// — the frame's settings are shown as the same rows.
     block: Option<String>,
+    frame_preview: bool,
+    frame_sliders: std::collections::HashMap<String, (u32, u32)>,
 }
 
 /// A permission's row: its key, its name, its choices `(value, text)`.
@@ -199,6 +202,15 @@ fn parse_request(text: &str) -> Request {
         match fields[0] {
             "lang" => req.language = Language::from_wire_tag(fields.get(1).copied().unwrap_or("")),
             "mode" => req.mode = fields.get(1).unwrap_or(&"").to_string(),
+            "frame-preview" => req.frame_preview = fields.get(1) == Some(&"1"),
+            "slider" if fields.len() == 4 => {
+                if let (Ok(max), Ok(now)) = (fields[2].parse::<u32>(), fields[3].parse::<u32>()) {
+                    if max > 0 && max <= 64 {
+                        req.frame_sliders
+                            .insert(fields[1].to_owned(), (max, now.min(max)));
+                    }
+                }
+            }
             "action" if fields.len() >= 3 => req.actions.push((
                 fields[1].to_owned(),
                 fields[2].to_owned(),
@@ -249,6 +261,7 @@ enum Pane {
 
 #[derive(Debug, Clone)]
 enum Msg {
+    Appearance,
     /// A menu entry, by its index.
     Action(usize),
     Net(usize),
@@ -261,6 +274,7 @@ enum Msg {
     ShowOffers(bool),
     /// A permission's choice for the container chosen: the row, the choice.
     Perm(usize, usize),
+    FrameNumber(usize, u32),
     Name(String),
     Launch,
     Cancel,
@@ -587,6 +601,7 @@ impl Window {
                 | Msg::Offer(_, _)
                 | Msg::ShowOffers(_)
                 | Msg::Perm(_, _)
+                | Msg::FrameNumber(_, _)
                 | Msg::Name(_)
                 | Msg::Launch
                 | Msg::Action(_)
@@ -598,6 +613,7 @@ impl Window {
             }
         }
         match msg {
+            Msg::Appearance => {}
             Msg::Action(i) => {
                 if let Some((tag, _, _)) = self.req.actions.get(i).filter(|_| !self.heading(i)) {
                     println!("action\t{tag}");
@@ -651,8 +667,31 @@ impl Window {
                 };
                 if !self.perm_value(&perm.key).1 {
                     let tag = self.container_tag().to_owned();
-                    self.changed.insert((tag, perm.key.clone()), value.clone());
+                    let (key, value) = (perm.key.clone(), value.clone());
+                    self.changed.insert((tag, key.clone()), value.clone());
+                    self.preview_number(&key, &value);
                 }
+            }
+            Msg::FrameNumber(row, number) => {
+                if !self.req.frame_preview || !self.perms_only() {
+                    return Task::none();
+                }
+                let Some(perm) = self.req.perms.get(row) else {
+                    return Task::none();
+                };
+                let key = perm.key.clone();
+                let Some((max, _)) = self.req.frame_sliders.get(&key) else {
+                    return Task::none();
+                };
+                if number > *max || self.perm_value(&key).1 {
+                    return Task::none();
+                }
+                let value = number.to_string();
+                self.changed.insert(
+                    (self.container_tag().to_owned(), key.clone()),
+                    value.clone(),
+                );
+                self.preview_number(&key, &value);
             }
             // Armed by the last guard started, and only with the focus.
             Msg::Armed(holds) => self.armed |= holds == self.holds && self.focused,
@@ -1136,6 +1175,17 @@ impl Window {
     /// container — the window keeps the height it opened at —, those that
     /// cannot be changed here not pressable. Above them, whom a change is
     /// for: every program of the container, or this launch alone.
+    fn preview_number(&self, key: &str, value: &str) {
+        if self.req.frame_preview
+            && self.perms_only()
+            && matches!(key, "width" | "radius" | "outer-radius")
+        {
+            use std::io::Write;
+            println!("preview\t{key}\t{value}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
     fn perms_view(&self) -> Element<'_, Msg> {
         let scope = self
             .perm_of()
@@ -1186,6 +1236,24 @@ impl Window {
                 .spacing(8)
                 .align_y(Alignment::Center),
             );
+            if self.req.frame_preview {
+                if let Some(&(max, initial)) = self.req.frame_sliders.get(&perm.key) {
+                    let number = now.parse::<u32>().unwrap_or(initial).min(max);
+                    block = block.push(
+                        row![
+                            container(text("")).width(Length::Fixed(230.0)),
+                            iced::widget::slider(0..=max, number, move |n| Msg::FrameNumber(
+                                row_at, n
+                            ))
+                            .step(1u32)
+                            .on_release(Msg::Press),
+                            text(number.to_string()).size(12).width(Length::Fixed(30.0)),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+                }
+            }
         }
         container(block)
             .padding(8)
@@ -1228,15 +1296,18 @@ impl Window {
     }
 
     fn subscription(&self) -> Subscription<Msg> {
-        iced::event::listen_with(|event, status, _window| match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => Some(
-                Msg::Key(key, modifiers, status == iced::event::Status::Captured),
-            ),
-            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Msg::Press),
-            iced::Event::Window(iced::window::Event::Focused) => Some(Msg::Focus(true)),
-            iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::Focus(false)),
-            _ => None,
-        })
+        Subscription::batch([
+            iced::event::listen_with(|event, status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => Some(
+                    Msg::Key(key, modifiers, status == iced::event::Status::Captured),
+                ),
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Msg::Press),
+                iced::Event::Window(iced::window::Event::Focused) => Some(Msg::Focus(true)),
+                iced::Event::Window(iced::window::Event::Unfocused) => Some(Msg::Focus(false)),
+                _ => None,
+            }),
+            appearance::watch().map(|_| Msg::Appearance),
+        ])
     }
 }
 
@@ -1709,6 +1780,23 @@ mod tests {
         assert_eq!(w.perm_value("x11"), ("default".to_owned(), true));
         let _ = w.update(Msg::Perm(0, 2));
         assert!(!w.answer().contains("perm"), "{}", w.answer());
+    }
+
+    #[test]
+    fn frame_sliders_change_numeric_values_but_never_permission_rows() {
+        let request = "mode\tperms\nframe-preview\t1\nslider\twidth\t32\t4\nperm\twidth\tWidth\t0:0;4:4;default:Nix\npermof\tthis\tFrame\twidth=4\n";
+        let mut w = Window::new(parse_request(request));
+        assert_eq!(w.req.frame_sliders.get("width"), Some(&(32, 4)));
+        let _ = w.update(Msg::FrameNumber(0, 7));
+        assert_eq!(w.perms_answer(), "perm\twidth\t7\n");
+        let _ = w.update(Msg::FrameNumber(0, 33));
+        assert_eq!(w.perms_answer(), "perm\twidth\t7\n");
+        let _ = w.update(Msg::Perm(0, 2));
+        assert_eq!(w.perms_answer(), "perm\twidth\tdefault\n");
+        let mut permissions =
+            Window::new(parse_request(&request.replace("frame-preview\t1\n", "")));
+        let _ = permissions.update(Msg::FrameNumber(0, 7));
+        assert!(permissions.perms_answer().is_empty());
     }
 
     /// A menu's headings are lines, not choices: the highlight starts on the

@@ -277,12 +277,91 @@ pub fn request(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Strin
     let (perms, values) = rows(tools, zone, record);
     let of = PermOf {
         tag: "this".to_owned(),
-        scope: "Вид и скругления — для всех окон; цвет сети — для всех её окон, цвет контейнера — только для него. Изменение поверх Nix действует сразу; «вернуть как в Nix» снимает его. Закрепление в Nix — отдельно в stillconf."
+        scope: "Вид и скругления — для всех окон; цвет сети — для всех её окон, цвет контейнера — только для него. Толщина и радиусы меняются при движении ползунков; отмена возвращает прежние значения, «Сохранить» закрепляет изменения поверх Nix. Закрепление в Nix — отдельно в stillconf."
             .to_owned(),
         values,
     };
     let request = crate::window::render_perms("Рамка окон", &[], &perms, &of);
-    format!("block\tРамка\n{request}")
+    format!("block\tРамка\n{request}frame-preview\t1\nguard\t0\nslider\twidth\t{}\t{}\nslider\tradius\t{}\t{}\nslider\touter-radius\t{}\t{}\n",
+        crate::frame::MAX_WIDTH, crate::frame::width(&tools.config).0,
+        crate::frame::MAX_RADIUS, crate::frame::radius(&tools.config).0.px().min(crate::frame::MAX_RADIUS),
+        crate::frame::MAX_OUTER_RADIUS, crate::frame::outer_radius(&tools.config).0.px())
+}
+
+fn preview_value(tools: &Tools, key: &str, value: &str) -> Option<(&'static str, String)> {
+    use crate::frame as f;
+    let (name, default) = match key {
+        "width" => (f::WIDTH_SETTING, f::DEFAULT_WIDTH.to_string()),
+        "radius" => (f::RADIUS_SETTING, f::DEFAULT_RADIUS.word()),
+        "outer-radius" => (f::OUTER_RADIUS_SETTING, f::DEFAULT_OUTER_RADIUS.word()),
+        _ => return None,
+    };
+    let value = if value == "default" {
+        crate::declared::setting(&tools.config.join(crate::cli::DECLARED_DIR).join(name))
+            .unwrap_or(default)
+    } else {
+        value.to_owned()
+    };
+    let valid = match key {
+        "width" => value.parse::<u32>().is_ok_and(|n| n <= f::MAX_WIDTH as u32),
+        "radius" => f::parse_radius(&value).is_some(),
+        _ => f::parse_outer_radius(&value).is_some(),
+    };
+    valid.then_some((name, value))
+}
+
+/// Stream only cosmetic previews while the window is open. Permission
+/// editors still use the ordinary, save-only ask_perms contract.
+pub fn edit(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Option<Vec<String>> {
+    use std::io::{BufRead, Read, Write};
+    use std::process::{Command, Stdio};
+    let mut preview = match crate::frame_preview::Session::new(&tools.config) {
+        Ok(session) => session,
+        Err(e) => return Some(vec![format!("Предпросмотр рамки не открыт: {e}")]),
+    };
+    let mut child = Command::new(&tools.window)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let request = request(tools, zone, record);
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(request.as_bytes());
+        });
+    }
+    let mut output = std::io::BufReader::new(child.stdout.take()?);
+    let mut changes = Vec::new();
+    loop {
+        let mut line = String::new();
+        let read = (&mut output).take(4097).read_line(&mut line);
+        if read.as_ref().is_err() || line.len() > 4096 {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        if matches!(read, Ok(0)) {
+            break;
+        }
+        let fields: Vec<_> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
+        match fields.as_slice() {
+            ["preview", key, value] => {
+                if let Some((name, value)) = preview_value(tools, key, value) {
+                    if let Err(e) = preview.set(name, &value) {
+                        eprintln!("frame preview: {e}");
+                    }
+                }
+            }
+            ["perm", key, value] => changes.push(((*key).to_owned(), (*value).to_owned())),
+            _ => {}
+        }
+    }
+    if !child.wait().ok()?.success() {
+        return None;
+    }
+    // Commit before the preview lease goes away: no flash of the old value.
+    Some(apply(tools, zone, record, &changes))
 }
 
 /// The changes the window answered, made: what was done or why not, a line
@@ -340,6 +419,80 @@ pub fn apply(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_streamed_preview_is_live_before_save_and_cancel_restores_nix() {
+        use std::os::unix::fs::PermissionsExt;
+        for save in [false, true] {
+            let base = std::env::temp_dir().join(format!(
+                "cw-frame-edit-{}-{}-{save}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(base.join("config/declared")).unwrap();
+            let mut tools = tools_in(&base);
+            crate::declared::declare(
+                &tools
+                    .config
+                    .join("declared")
+                    .join(crate::frame::WIDTH_SETTING),
+                "6",
+            );
+            tools.window = base.join("editor");
+            let script = r#"#!/bin/sh
+cat >/dev/null
+printf 'preview\twidth\t1\n'
+dir=${0%/*}
+n=0
+while [ ! -f "$dir/continue" ]; do
+  sleep 0.01
+  n=$((n+1))
+  [ "$n" -lt 500 ] || exit 2
+done
+printf 'perm\twidth\t2\n'
+exit TEST_EXIT
+"#
+            .replace("TEST_EXIT", if save { "0" } else { "1" });
+            std::fs::write(&tools.window, script).unwrap();
+            std::fs::set_permissions(&tools.window, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let other = tools.clone();
+            let editor = std::thread::spawn(move || edit(&other, None, None));
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(4);
+            while crate::frame::width(&tools.config).0 != 1 && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                crate::frame::width(&tools.config).0,
+                1,
+                "visible before Save"
+            );
+            assert!(
+                !crate::frame::override_path(&tools.config, crate::frame::WIDTH_SETTING).exists()
+            );
+            std::fs::write(base.join("continue"), "").unwrap();
+            let result = editor.join().unwrap();
+            assert_eq!(result.is_some(), save);
+            assert_eq!(
+                crate::frame::width(&tools.config).0,
+                if save { 2 } else { 6 }
+            );
+            assert_eq!(
+                std::fs::read_to_string(
+                    tools
+                        .config
+                        .join("declared")
+                        .join(crate::frame::WIDTH_SETTING)
+                )
+                .unwrap(),
+                "6"
+            );
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
 
     fn tools_in(base: &Path) -> Tools {
         let entries: std::collections::BTreeMap<String, String> = Tools::keys()
