@@ -236,6 +236,11 @@ pub fn delete_request(history: &str, id: u64) -> String {
     format!("delete\t{}\t{id}", encode(history))
 }
 
+/// Save a copy in this history's encrypted favourites, leaving the original.
+pub fn favorite_request(history: &str, id: u64) -> String {
+    format!("favorite\t{}\t{id}", encode(history))
+}
+
 /// Why an answer did not come.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Failure {

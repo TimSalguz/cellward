@@ -42,6 +42,12 @@ The frame-opened window stays scoped to its own launch and offers paste only
 there. The tray opens one window at a time; closing it does not stop the
 recorder, and the next click reopens it. Empty containers with no history yet
 do not appear until they copy something.
+Each buffer has **History** and **Favourites** tabs. "☆ Add to favourites"
+stores an encrypted copy below that buffer's hidden `.favorites` directory;
+deleting the original history entry does not delete the favourite. Removing
+the favourite leaves the original alone. From a launch's frame, a favourite
+can be pasted into that launch by the same explicit action as a history
+entry. Opening either tab never sets a Wayland selection.
 
 The host is not a security boundary. An unproxied host program can read the
 compositor's current selection, including one a container just copied;
@@ -98,16 +104,10 @@ container only when the person moves it there in the window.
   Ctrl+V quotes the next key in a terminal); «Скопировать в…» copies an entry
   to another container's history after an explicit target choice.
 
-### Planned: favourites, typing and secrets
+### Planned: typing and secrets
 
-- **Favourites.** Separate per-history saved entries, not a copy into the
-  host history. A saved entry must remain under the same encryption key and
-  must not become the current selection just by opening its tab.
-- **Secrets.** A separately marked collection in each history, not a normal
-  favourite: hidden preview, never served through clipboard selection. The
-  existing password-manager hint continues to suppress recording entirely.
-  The mark and any move between containers need a deliberate confirmation.
-
+- **stillconf.** Add a separate clipboard page with a control for
+  `programs.cellward.clipboard.history = true`; keep the default unchanged.
 - **Typing.** For fields that refuse a paste: the proxy types the entry into
   the program's connection with a delay set in ms — not a compositor's
   virtual keyboard, so nothing typed reaches another program whatever the

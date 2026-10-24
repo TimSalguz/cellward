@@ -823,9 +823,7 @@ fn parse_clip_args(args: &[OsString]) -> Result<(i32, Option<(String, String)>),
     match &words[2..] {
         [] => Ok((pid, None)),
         ["--entry", history, id]
-            if crate::clip::valid_history(history)
-                && *history != crate::clip::NO_HISTORY
-                && id.parse::<u64>().is_ok() =>
+            if crate::clip::valid_entry_history(history) && id.parse::<u64>().is_ok() =>
         {
             Ok((pid, Some(((*history).to_owned(), (*id).to_owned()))))
         }
@@ -872,9 +870,7 @@ fn paste_from_history(tools: &Tools, pid: i32, label: &str, history: &str) -> u8
         let mut words = l.split('\t');
         match (words.next(), words.next(), words.next(), words.next()) {
             (Some("paste"), Some(h), Some(id), None)
-                if crate::clip::valid_history(h)
-                    && h != crate::clip::NO_HISTORY
-                    && id.parse::<u64>().is_ok() =>
+                if crate::clip::valid_entry_history(h) && id.parse::<u64>().is_ok() =>
             {
                 Some((h.to_owned(), id.to_owned()))
             }

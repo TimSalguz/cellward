@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Each clipboard buffer now has a Favourites tab. Saving a clip copies it to
+  encrypted per-buffer storage without changing the Wayland selection; the
+  original and saved copy can be removed independently.
 - The clipboard recorder has a host tray item that opens one manager window
   with tabs for the host and existing container histories. Moving between
   histories is an explicit copy and never changes the current selection.

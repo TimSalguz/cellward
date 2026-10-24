@@ -395,6 +395,13 @@ pub fn valid_history(name: &str) -> bool {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')))
 }
 
+/// A history an explicit host-side entry selection may name. The reserved
+/// favourites scope is never a launch's recording destination.
+pub fn valid_entry_history(name: &str) -> bool {
+    let real = name.strip_prefix("@favorites:").unwrap_or(name);
+    valid_history(real) && real != NO_HISTORY
+}
+
 /// The secret of the instance whose restricted sockets are `key`
 /// (`wl_sandbox`'s zone), with the history its copies go to: read, or made
 /// at its first launch — sixteen random bytes as hex, then the history on a
@@ -461,6 +468,14 @@ pub fn token_for(runtime: &Path, key: &str, history: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn favourites_can_be_selected_but_not_used_as_a_recording_history() {
+        assert!(valid_entry_history("@favorites:app-helium"));
+        assert!(!valid_history("@favorites:app-helium"));
+        assert!(!valid_entry_history("@favorites:../host"));
+        assert!(!valid_entry_history("@favorites:-"));
+    }
 
     /// A foreign selection is read only within a paste or a drag; the own
     /// one always; a mark never.

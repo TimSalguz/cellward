@@ -159,12 +159,16 @@ struct Store {
 
 impl Store {
     fn history(&mut self, name: &str) -> Result<&mut History, String> {
-        if !recorder::valid_history(name) || name == recorder::NO_HISTORY {
+        let (dir, real) = match name.strip_prefix("@favorites:") {
+            Some(real) => (self.dir.join(".favorites"), real),
+            None => (self.dir.clone(), name),
+        };
+        if !recorder::valid_history(real) || real == recorder::NO_HISTORY {
             return Err(format!("«{name}» — не имя истории"));
         }
         if !self.open.contains_key(name) {
-            let h = History::open(&self.dir.join(name), &self.key)
-                .map_err(|e| format!("{name}: {e}"))?;
+            let h =
+                History::open(&dir.join(real), &self.key).map_err(|e| format!("{name}: {e}"))?;
             self.open.insert(name.to_owned(), h);
         }
         Ok(self.open.get_mut(name).expect("just opened"))
@@ -249,6 +253,26 @@ impl Store {
                     Err(e) => return error(&e),
                 };
                 match self.history(to).map(|h| h.import(&entry)) {
+                    Ok(Ok(added)) => Reply::Text(format!("ok\t{}\n", added.id())),
+                    Ok(Err(e)) => error(&e),
+                    Err(e) => error(&e),
+                }
+            }
+            ["favorite", name, id] => {
+                let Ok(id) = id.parse::<u64>() else {
+                    return error(&"не номер");
+                };
+                if name.starts_with("@favorites:") {
+                    return error(&"запись уже из избранного");
+                }
+                let entry = match self.history(name).map(|h| h.get(id)) {
+                    Ok(Ok(Some(entry))) => entry,
+                    Ok(Ok(None)) => return error(&"записи нет"),
+                    Ok(Err(e)) => return error(&e),
+                    Err(e) => return error(&e),
+                };
+                let favorites = format!("@favorites:{name}");
+                match self.history(&favorites).map(|h| h.import(&entry)) {
                     Ok(Ok(added)) => Reply::Text(format!("ok\t{}\n", added.id())),
                     Ok(Err(e)) => error(&e),
                     Err(e) => error(&e),
@@ -852,5 +876,60 @@ fn daemon(dir: &Path) -> ExitCode {
                 preview,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_favourite_is_encrypted_separate_and_survives_deleting_its_source() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("cw-clip-favourite-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = Key::load_or_create(&dir.join("key")).unwrap();
+        let mut store = Store {
+            dir: dir.clone(),
+            key,
+            open: HashMap::new(),
+        };
+        let id = store
+            .history("host")
+            .unwrap()
+            .append(NewEntry {
+                copied_at: 100,
+                contents: vec![Content {
+                    mime: "text/plain".into(),
+                    data: b"private note".to_vec(),
+                }],
+                preview: None,
+            })
+            .unwrap()
+            .id();
+        let reply = store.answer(&format!("favorite\thost\t{id}"));
+        assert!(matches!(reply, Reply::Text(ref s) if s.starts_with("ok\t")));
+        assert_eq!(store.names(), ["host"]);
+        assert!(store.history("host").unwrap().delete(id).unwrap());
+        let ids = store
+            .history("@favorites:host")
+            .unwrap()
+            .query(&clipstore::Query::default(), None, 10)
+            .unwrap();
+        assert_eq!(ids.len(), 1);
+        let saved = store
+            .history("@favorites:host")
+            .unwrap()
+            .get(ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.contents[0].data, b"private note");
+        assert!(store.history("@favorites:../host").is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

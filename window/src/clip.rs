@@ -189,7 +189,10 @@ pub enum Msg {
     Histories(Result<Vec<String>, String>),
     Tabs(Result<Vec<String>, String>),
     Switch(String),
+    Shelf(bool),
     Refresh,
+    Favorite(u64),
+    Favorited(String, Result<String, String>),
     MoveTo(u64, String),
     Moved(Result<String, String>),
     DeleteAsk(u64),
@@ -233,6 +236,7 @@ pub struct Clip {
     /// scoped to its launch and cannot silently browse another container.
     manager: bool,
     tabs: Vec<String>,
+    favorites: bool,
     /// A text's lines shown before «показать целиком», and an image's
     /// thumbnail's height in lines.
     lines: usize,
@@ -425,11 +429,20 @@ fn mono<'a>(t: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
 }
 
 impl Clip {
+    fn active_history(&self) -> String {
+        if self.favorites {
+            format!("@favorites:{}", self.history)
+        } else {
+            self.history.clone()
+        }
+    }
+
     pub fn new(history: String, can_paste: bool, socket: PathBuf) -> Self {
         Self {
             history,
             manager: false,
             tabs: Vec::new(),
+            favorites: false,
             lines: PREVIEW_LINES,
             image_lines: IMAGE_LINES,
             thumbs: HashMap::new(),
@@ -504,7 +517,7 @@ impl Clip {
         };
         self.now = now;
         self.loading = true;
-        let request = clipd::search_request(&self.history, &filter, before, PAGE);
+        let request = clipd::search_request(&self.active_history(), &filter, before, PAGE);
         let socket = self.socket.clone();
         let gen = self.gen;
         Task::perform(
@@ -571,8 +584,8 @@ impl Clip {
             }
             // Asked once: an answer that is an error is kept as one.
             self.thumbs.insert(e.id, Err(String::new()));
-            let (id, socket, history) = (e.id, self.socket.clone(), self.history.clone());
-            let request = clipd::get_request(&self.history, id, mime);
+            let (id, socket, history) = (e.id, self.socket.clone(), self.active_history());
+            let request = clipd::get_request(&history, id, mime);
             tasks.push(Task::perform(
                 clipd::off_thread(move || {
                     clipd::ask(&socket, &request)
@@ -635,7 +648,7 @@ impl Clip {
 
     fn paste(&self, id: u64) {
         if self.can_paste && self.entry(id).is_some() {
-            print!("{}", paste_line(&self.history, id));
+            print!("{}", paste_line(&self.active_history(), id));
             std::process::exit(0);
         }
     }
@@ -710,9 +723,9 @@ impl Clip {
                 else {
                     return Task::none();
                 };
-                let request = clipd::get_request(&self.history, id, &mime);
+                let history = self.active_history();
+                let request = clipd::get_request(&history, id, &mime);
                 let socket = self.socket.clone();
-                let history = self.history.clone();
                 return Task::perform(
                     clipd::off_thread(move || {
                         clipd::ask(&socket, &request)
@@ -729,14 +742,14 @@ impl Clip {
                     },
                 );
             }
-            Msg::Got(history, id, result) if history == self.history => match result {
+            Msg::Got(history, id, result) if history == self.active_history() => match result {
                 Ok(t) => {
                     self.whole.insert(id, t);
                 }
                 Err(why) => self.error = Some(why),
             },
             Msg::Got(_, _, _) => {}
-            Msg::Thumb(history, id, made) if history == self.history => {
+            Msg::Thumb(history, id, made) if history == self.active_history() => {
                 self.thumbs.insert(
                     id,
                     made.map(|t| iced::widget::image::Handle::from_rgba(t.width, t.height, t.rgba)),
@@ -765,7 +778,9 @@ impl Clip {
             }
             Msg::Histories(result) => match result {
                 Ok(mut names) => {
-                    names.retain(|n| *n != self.history);
+                    if !self.favorites {
+                        names.retain(|n| *n != self.history);
+                    }
                     if let Some((_, list)) = &mut self.moving {
                         *list = Some(names);
                     }
@@ -790,6 +805,22 @@ impl Clip {
                     return Task::none();
                 }
                 self.history = history;
+                self.favorites = false;
+                self.entries.clear();
+                self.selected = None;
+                self.whole.clear();
+                self.thumbs.clear();
+                self.moving = None;
+                self.deleting = None;
+                self.error = None;
+                self.notice = None;
+                return self.search();
+            }
+            Msg::Shelf(favorites) => {
+                if self.favorites == favorites {
+                    return Task::none();
+                }
+                self.favorites = favorites;
                 self.entries.clear();
                 self.selected = None;
                 self.whole.clear();
@@ -801,8 +832,22 @@ impl Clip {
                 return self.search();
             }
             Msg::Refresh => return Task::batch([self.search(), self.load_tabs()]),
+            Msg::Favorite(id) => {
+                if self.favorites || self.entry(id).is_none() {
+                    return Task::none();
+                }
+                let history = self.history.clone();
+                return self.ok(clipd::favorite_request(&history, id), move |r| {
+                    Msg::Favorited(history.clone(), r)
+                });
+            }
+            Msg::Favorited(history, result) if history == self.history => match result {
+                Ok(_) => self.notice = Some("Добавлено в избранное этого буфера".to_owned()),
+                Err(why) => self.error = Some(why),
+            },
+            Msg::Favorited(_, _) => {}
             Msg::MoveTo(id, to) => {
-                let request = clipd::move_request(&self.history, id, &to);
+                let request = clipd::move_request(&self.active_history(), id, &to);
                 return self.ok(request, move |r| {
                     Msg::Moved(r.map(|_| format!("Скопировано в историю «{to}»")))
                 });
@@ -819,12 +864,12 @@ impl Clip {
                 self.deleting = Some(id);
             }
             Msg::DeleteYes(id) => {
-                let history = self.history.clone();
-                return self.ok(clipd::delete_request(&self.history, id), move |r| {
+                let history = self.active_history();
+                return self.ok(clipd::delete_request(&history, id), move |r| {
                     Msg::Deleted(history.clone(), id, r)
                 });
             }
-            Msg::Deleted(history, id, result) if history == self.history => {
+            Msg::Deleted(history, id, result) if history == self.active_history() => {
                 self.deleting = None;
                 match result {
                     Ok(_) => {
@@ -1073,6 +1118,25 @@ impl Clip {
                     .height(Length::Shrink),
             );
         }
+        page = page.push(
+            row![
+                button(text("История").size(13))
+                    .style(if self.favorites {
+                        button::secondary
+                    } else {
+                        button::primary
+                    })
+                    .on_press(Msg::Shelf(false)),
+                button(text("Избранное").size(13))
+                    .style(if self.favorites {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press(Msg::Shelf(true)),
+            ]
+            .spacing(6),
+        );
         if let Some(why) = &self.error {
             page = page.push(
                 row![
@@ -1220,7 +1284,11 @@ impl Clip {
             } else if self.filtered() {
                 "Ничего не найдено"
             } else {
-                "История пуста: здесь появится всё, что копируют в этом контейнере"
+                if self.favorites {
+                    "Избранное пусто: отметьте важную запись в истории"
+                } else {
+                    "История пуста: здесь появится всё, что копируют в этом контейнере"
+                }
             };
             feed = feed.push(
                 container(text(said).size(14).style(dim))
@@ -1291,10 +1359,22 @@ impl Clip {
     fn actions<'a>(&'a self, e: &'a Entry) -> Element<'a, Msg> {
         if self.deleting == Some(e.id) {
             return row![
-                text("Удалить эту запись из истории?").size(13),
-                button(text("Удалить").size(13))
-                    .style(button::danger)
-                    .on_press(Msg::DeleteYes(e.id)),
+                text(if self.favorites {
+                    "Убрать из избранного?"
+                } else {
+                    "Удалить эту запись из истории?"
+                })
+                .size(13),
+                button(
+                    text(if self.favorites {
+                        "Убрать"
+                    } else {
+                        "Удалить"
+                    })
+                    .size(13)
+                )
+                .style(button::danger)
+                .on_press(Msg::DeleteYes(e.id)),
                 button(text("Отмена").size(13))
                     .style(button::secondary)
                     .on_press(Msg::Cancel),
@@ -1339,15 +1419,29 @@ impl Clip {
                     .on_press(Msg::Paste(e.id)),
             );
         }
+        if !self.favorites {
+            line = line.push(
+                button(text("☆ В избранное").size(13))
+                    .style(button::secondary)
+                    .on_press(Msg::Favorite(e.id)),
+            );
+        }
         line.push(
             button(text("Скопировать в…").size(13))
                 .style(button::secondary)
                 .on_press(Msg::MoveAsk(e.id)),
         )
         .push(
-            button(text("Удалить").size(13))
-                .style(button::secondary)
-                .on_press(Msg::DeleteAsk(e.id)),
+            button(
+                text(if self.favorites {
+                    "Убрать"
+                } else {
+                    "Удалить"
+                })
+                .size(13),
+            )
+            .style(button::secondary)
+            .on_press(Msg::DeleteAsk(e.id)),
         )
         .into()
     }
@@ -1891,6 +1985,15 @@ mod tests {
         assert!(c.whole.is_empty());
         assert!(c.thumbs.is_empty());
         assert_eq!(c.entries.len(), 1);
+        let _ = c.update(Msg::Shelf(true));
+        assert_eq!(c.active_history(), "@favorites:app-helium");
+        assert!(c.entries.is_empty());
+        let _ = c.update(Msg::Got(
+            "app-helium".to_owned(),
+            1,
+            Ok("ordinary history".to_owned()),
+        ));
+        assert!(c.whole.is_empty());
     }
 
     #[test]

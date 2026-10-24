@@ -8,6 +8,10 @@
 //! search⇥<history>⇥<key=value>…              an entry a line (below)
 //! get⇥<history>⇥<id>⇥<type>                   ok⇥<length>, then the bytes
 //! move⇥<from>⇥<id>⇥<to>                       ok⇥<new id>
+//! favorite⇥<history>⇥<id>                    ok⇥<favorite id>
+//! search/get/delete/select with `@favorites:<history>` address that
+//! history's encrypted favourites, kept under `.favorites/` and never
+//! listed as a container history.
 //! delete⇥<history>⇥<id>                       ok
 //! select⇥<history>⇥<id>                       ok: it is the selection now
 //! ```
