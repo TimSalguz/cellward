@@ -92,12 +92,12 @@ pub fn text(language: Language, key: Key) -> &'static str {
         (Language::Russian, NoContainer) => {
             "Контейнер не используется. Чтобы выбрать сеть и контейнер, нажмите сеть слева."
         }
-        (Language::English, PresetOffer) => "Optional access for the selected container:",
+        (Language::English, PresetOffer) => "Files and resources suggested by the app preset (optional; only checked items are added):",
         (Language::Russian, PresetOffer) => {
-            "Дополнительный доступ для выбранного контейнера (необязательно):"
+            "Файлы и ресурсы из шаблона программы (необязательно; добавляется только отмеченное):"
         }
-        (Language::English, OptionalAccess) => "Optional access…",
-        (Language::Russian, OptionalAccess) => "Дополнительный доступ…",
+        (Language::English, OptionalAccess) => "Files and other resources…",
+        (Language::Russian, OptionalAccess) => "Файлы и другие ресурсы…",
         (Language::English, Back) => "← Back",
         (Language::Russian, Back) => "← Назад",
         (Language::English, Wait) => "One moment…",

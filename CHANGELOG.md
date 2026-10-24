@@ -83,6 +83,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- Launch permissions have one authoritative control each: camera, microphone,
+  screen capture and home access no longer reappear as later-applied preset
+  checkboxes. The supplementary page is labelled Files and other resources;
+  existing grants are preserved, and replies cannot add unoffered preset grants.
 - Rounded title bars reserve only the space required by the arc, rather than
   shifting buttons inward by the whole radius. The title and its buttons stay
   above the corner pieces and share consistent drawing and input bounds.

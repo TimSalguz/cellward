@@ -25,8 +25,15 @@ colours remain separate; desktop-specific contrast checks remain on the roadmap.
 
 The frame editor previews thickness and inner/outer radius changes as the
 sliders move. Save commits local cosmetic overrides, Cancel drops the preview
-and restores the previous effective values. Other controls still apply on Save.
+and restores the previous effective values. Hover-trigger depth and resize-corner
+span preview when selected too; other controls still apply on Save.
 This mechanism never previews or overrides isolation permissions.
+
+The launch screen's permission rows are authoritative. Camera, microphone,
+screen capture and X11 do not reappear as preset resource checkboxes; the home
+choice is not duplicated either. Files and other resources contains only the
+remaining optional preset grants. Hidden or stale offers are removed from the
+window's answer before applying it; existing container permissions are not reset.
 
 ## Languages
 

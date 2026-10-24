@@ -250,6 +250,13 @@ fn parse_request(text: &str) -> Request {
         req.pin_net = false;
         req.pin_container = false;
     }
+    // Compatibility with older cores: an optional preset checkbox must
+    // not become a second control for an existing permission or home row.
+    req.offers.retain(|(line, _)| {
+        !line.split_once('=').is_some_and(|(key, _)| {
+            req.perms.iter().any(|p| p.key == key) || (key == "home" && !req.containers.is_empty())
+        })
+    });
     req
 }
 
@@ -1743,6 +1750,28 @@ mod tests {
             w.answer()
         );
         assert!(!w.answer().contains("camera"));
+    }
+
+    #[test]
+    fn optional_resources_do_not_repeat_the_launch_permission_rows() {
+        let request = "title\tt\nnet\thost\tHost\tselected\ncontainer\twork\tWork\tselected\n\
+            perm\tcamera\tCamera\tno:No;yes:Yes\n\
+            perm\tmicrophone\tMicrophone\tno:No;yes:Yes\n\
+            offer\tcamera=on\tCamera\noffer\tmicrophone=yes\tMicrophone\n\
+            offer\thome=main\tReal home\noffer\tfolder=~/Downloads\tDownloads\n";
+        let req = parse_request(request);
+        assert_eq!(req.perms.len(), 2);
+        assert_eq!(
+            req.offers,
+            [("folder=~/Downloads".into(), "Downloads".into())]
+        );
+        let mut window = Window::new(req);
+        let _ = window.update(Msg::Offer(0, true));
+        assert!(window.answer().contains("offer\tfolder=~/Downloads\n"));
+        assert!(!window.answer().contains("offer\tcamera"));
+        let only_camera =
+            parse_request("perm\tcamera\tCamera\tno:No;yes:Yes\noffer\tcamera=on\tCamera\n");
+        assert!(only_camera.offers.is_empty(), "no empty extra-access page");
     }
 
     /// The permissions: each container's own shown, a change answered only

@@ -1644,7 +1644,7 @@ fn window_request(
         // `docs/PERMISSIONS.md` §11.15): a checkbox each, unticked.
         offers: crate::presets::for_key(&tools.config, key)
             .map(|preset| {
-                crate::presets::offered(&preset)
+                crate::presets::launch_offered(&preset)
                     .iter()
                     .map(|item| (item.line(), item.text()))
                     .collect()
@@ -1761,6 +1761,14 @@ fn perm_scope<'a>(
 /// Show the launch window. `None`: it would not start. `Some(None)`: closed,
 /// or an answer that is none — the launch is over. Only what was offered
 /// comes back: an answer from outside the lists starts nothing.
+fn restrict_reply_offers(req: &window::Request, reply: &mut window::Reply) {
+    // A stale/foreign window must not add a preset grant which was not
+    // actually shown, particularly one superseded by a permission row.
+    reply
+        .offers
+        .retain(|line| req.offers.iter().any(|(allowed, _)| allowed == line));
+}
+
 fn show_window(tools: &Tools, req: &window::Request) -> Option<Option<window::Reply>> {
     let mut child = Command::new(&tools.window)
         .stdin(Stdio::piped())
@@ -1779,7 +1787,7 @@ fn show_window(tools: &Tools, req: &window::Request) -> Option<Option<window::Re
     if !out.status.success() {
         return Some(None);
     }
-    let Some(reply) = window::parse_reply(&String::from_utf8_lossy(&out.stdout)) else {
+    let Some(mut reply) = window::parse_reply(&String::from_utf8_lossy(&out.stdout)) else {
         return Some(None);
     };
     // Only what was offered: an answer from outside the list starts nothing.
@@ -1789,6 +1797,7 @@ fn show_window(tools: &Tools, req: &window::Request) -> Option<Option<window::Re
         eprintln!("vpn-zone-pick: окно запуска ответило тем, чего не предлагали — не запускаю");
         return Some(None);
     }
+    restrict_reply_offers(req, &mut reply);
     Some(Some(reply))
 }
 
@@ -3526,6 +3535,28 @@ fn launch_argv(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn hidden_preset_grants_cannot_override_the_main_permission_answer() {
+        let req = window::Request {
+            offers: vec![("folder=~/Downloads".into(), "Downloads".into())],
+            ..window::Request::default()
+        };
+        let mut reply = window::Reply {
+            offers: vec![
+                "camera=on".into(),
+                "folder=~/Downloads".into(),
+                "session=on".into(),
+            ],
+            perms: vec![("camera".into(), "no".into())],
+            ..window::Reply::default()
+        };
+        restrict_reply_offers(&req, &mut reply);
+        assert_eq!(reply.offers, ["folder=~/Downloads"]);
+        assert_eq!(reply.perms, [("camera".into(), "no".into())]);
+        restrict_reply_offers(&window::Request::default(), &mut reply);
+        assert!(reply.offers.is_empty());
+    }
 
     /// The networks a program went out to from the real home, the latest
     /// last, each once.

@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--gui-only", action="store_true")
     parser.add_argument("--frame-history", action="store_true", help="exercise the launch-bound history window instead of the tray manager")
     parser.add_argument("--frame-editor", action="store_true", help="also render the live frame sliders")
+    parser.add_argument("--launch-permissions", action="store_true", help="also inspect deduplicated optional launch resources")
     parser.add_argument("--fonts", help="small font directory to avoid scanning the host font collection")
     args = parser.parse_args()
     if args.gui_only and not args.window:
@@ -370,6 +371,33 @@ def main():
                 assert editor.wait(timeout=5) != 0, "Escape did not cancel preview"
                 assert b"perm\t" not in live.read_bytes(), "Cancel emitted persistent changes"
                 print("frame editor: dragging emits live preview before Save; Escape cancels", flush=True)
+            if args.launch_permissions:
+                if manager.poll() is None:
+                    os.killpg(manager.pid, signal.SIGTERM)
+                    manager.wait(timeout=5)
+                wait_for(lambda: not any(w["app_id"] == "vpn-zone-window" for w in windows()))
+                request = "title\tLaunch permissions\nguard\t0\nnet\thost\tHost network\tselected\ncontainer\twork\tWork container\tselected\n"
+                request += "perm\tx11\tOwn X server\toff:Off;on:On\nperm\tcamera\tCamera\tno:No;yes:Yes\nperm\tmicrophone\tMicrophone\task:Ask;yes:Yes;no:No\nperm\tscreencast\tScreen capture\task:Ask;yes:Yes;no:No\nperm\tnetwork\tPrograms without a network rule\task:Ask;yes:Yes;no:No\nperm\tfocus\tWindows taking focus\tinput:After input;notify:Notify\n"
+                request += "permof\twork\tPermissions for this container\tx11=off,camera=no,microphone=ask,screencast=ask,network=ask,focus=input\noffer\tcamera=on\tCamera\noffer\tfolder=~/Downloads\tDownloads folder\n"
+                launcher = start([str(Path(args.window).resolve())], "launch-permissions", request)
+                wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
+                time.sleep(1.5)
+                screenshot("launch-permissions")
+                frame = next(w for w in windows() if w["app_id"] == "vpn-zone-window")
+                (root / "launch-tree.json").write_text(json.dumps(frame, indent=2))
+                r = frame["rect"]
+                click(r["x"] + 100, r["y"] + r["height"] - 70)
+                time.sleep(0.3)
+                screenshot("launch-resources")
+                for down in [1, 0]:
+                    packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, 1, down))
+                    time.sleep(0.05)
+                if launcher.poll() is None:
+                    for down in [1, 0]:
+                        packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, 1, down))
+                        time.sleep(0.05)
+                assert launcher.wait(timeout=5) != 0, "Cancel unexpectedly launched the program"
+                print("launch permissions and resources pages rendered; canceled without grants", flush=True)
         vk.close()
         print("typing smoke passed", flush=True)
     finally:

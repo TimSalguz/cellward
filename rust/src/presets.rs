@@ -15,8 +15,9 @@
 //!   "ask" yet), the microphone or the screen without asking, a folder of
 //!   the real home, a device with a network of its own or every device, the
 //!   host's session, the Nix daemon, the places the host runs, the raw
-//!   PipeWire, a home that sees the real one. The launch window shows them
-//!   unticked, with the preset's reason ([`offered`]).
+//!   PipeWire, a home that sees the real one ([`offered`]). The launch
+//!   window uses [`launch_offered`]: existing permission rows and the home
+//!   choice are authoritative, not repeated as late-applied checkboxes.
 //!
 //! **Whose word.** The person's first: a program declared in Nix
 //! (`programs.cellward.programs.<id>`, `declared/programs/<id>.conf`)
@@ -401,6 +402,25 @@ pub fn offered(preset: &Preset) -> Vec<Item> {
     preset.items.iter().filter(|i| !i.safe()).cloned().collect()
 }
 
+/// The launch screen already has authoritative permission rows and a home
+/// choice. Never offer another, later-applied control for those same rights.
+/// This does not revoke existing grants or change non-launch preset APIs.
+pub fn launch_offered(preset: &Preset) -> Vec<Item> {
+    offered(preset)
+        .into_iter()
+        .filter(|item| {
+            !matches!(
+                item,
+                Item::Camera
+                    | Item::Microphone(_)
+                    | Item::Screencast(_)
+                    | Item::X11
+                    | Item::Home(_)
+            )
+        })
+        .collect()
+}
+
 /// A new container of `key`'s own (`picker::own_name`) takes the safe items
 /// of the preset in force — each where it has no word of its own. What was
 /// written, as lines.
@@ -579,6 +599,33 @@ pub fn run(tools: &Tools, args: &[std::ffi::OsString]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_resources_do_not_duplicate_permission_or_home_controls() {
+        let preset = Preset {
+            items: vec![
+                Cam,
+                Mic(Setting::Yes),
+                Cast(Setting::Yes),
+                X11,
+                Item::Home(crate::container::Home::Main),
+                dir("~/Downloads"),
+                Nix,
+            ],
+            why: "test".into(),
+            source: Source::Default,
+        };
+        assert_eq!(launch_offered(&preset), vec![dir("~/Downloads"), Nix]);
+        assert!(
+            offered(&preset).contains(&Cam),
+            "non-launch preset API is unchanged"
+        );
+        assert!(launch_offered(&Preset {
+            items: vec![Cam],
+            ..preset
+        })
+        .is_empty());
+    }
 
     /// Asking is safe, giving is not; gamepads and keys are, a device with a
     /// network of its own is not; a folder, the host's session, a home that
