@@ -376,7 +376,8 @@ const ATTENTION: u8 = b'f';
 /// of the ≡'s dropdown (`crate::wl_frame`, step 3c). No answer.
 const RESTART: u8 = b'x';
 /// Supervisor → proxy: a question to show on the launch's window — its
-/// number, the length of the rest (two bytes, little-endian) and the rest:
+/// number (eight bytes, little-endian), the length of the rest (two bytes,
+/// little-endian) and the rest:
 /// [`ask_request`]'s. No answer but [`ANSWERED`] or [`NOWHERE`] later.
 const QUESTION: u8 = b'q';
 /// Supervisor → proxy: the question of this number is taken back.
@@ -644,8 +645,11 @@ struct Asking {
     /// or there is no window left to show it on (the owner, 2026-10-15:
     /// the launch window asks only where there is no panel — never
     /// because a panel has been up a while).
-    asked: Option<(UnixStream, u8)>,
-    seq: u8,
+    asked: Option<(UnixStream, u64)>,
+    seq: u64,
+    /// A fragmented stream reply is retained, never mistaken for the next
+    /// control opcode. At most 10 bytes (kind, generation, button).
+    reply: Vec<u8>,
     /// The launch's compositor, named in every answer: where the launch
     /// window asks, whatever the instance's own environment says.
     display: Option<OsString>,
@@ -656,6 +660,12 @@ struct Asking {
 }
 
 impl Asking {
+    /// Nonreused within the supervisor/proxy channel's lifetime.
+    fn next_sequence(&mut self) -> Option<u64> {
+        self.seq = self.seq.checked_add(1)?;
+        Some(self.seq)
+    }
+
     /// Whether `client` is the launch's camera server, alive: the one of
     /// the launch's own processes that asks.
     fn is_camera(&self, client: RawFd) -> bool {
@@ -1249,11 +1259,13 @@ impl Proxy {
     /// One request of the proxy. False when the channel is gone.
     fn answer(&mut self) -> bool {
         if let Some(fd) = self.channel.as_ref().map(AsRawFd::as_raw_fd) {
+            if !self.asking.reply.is_empty() {
+                return self.replied(fd);
+            }
             let mut byte = [0u8; 1];
             if let Ok(1) = recv_peek(fd, &mut byte) {
                 if byte[0] == ANSWERED || byte[0] == NOWHERE {
-                    self.replied(fd);
-                    return true;
+                    return self.replied(fd);
                 }
             }
         }
@@ -1312,28 +1324,21 @@ impl Proxy {
     /// told — the first answer is "no", the second "yes", any other "ask in
     /// the launch window" —, and the next question asked.
     /// A word of another number (taken back meanwhile) is nothing.
-    fn replied(&mut self, fd: RawFd) {
-        let mut word = [0u8; 3];
-        if recv_now(fd, &mut word[..1]) != 1 {
-            return;
-        }
-        let rest = if word[0] == ANSWERED { 2 } else { 1 };
-        if recv_now(fd, &mut word[1..=rest]) != rest {
-            return;
-        }
-        let answer = match word {
-            [NOWHERE, ..] => ASK_NOWHERE,
-            [_, _, 0] => ASK_NO,
-            [_, _, 1] => ASK_YES,
-            _ => ASK_WINDOW,
+    fn replied(&mut self, fd: RawFd) -> bool {
+        let Some((seq, answer)) = (match read_panel_reply(fd, &mut self.asking.reply) {
+            Ok(reply) => reply,
+            Err(_) => return false,
+        }) else {
+            return true;
         };
-        if !matches!(&self.asking.asked, Some((_, seq)) if *seq == word[1]) {
-            return;
+        if !matches!(&self.asking.asked, Some((_, active)) if *active == seq) {
+            return true;
         }
         if let Some((stream, _)) = self.asking.asked.take() {
             self.asking.say(&stream, answer);
         }
         self.next_question();
+        true
     }
 
     /// The instances' connections that woke (among `fds`, by descriptor:
@@ -1362,7 +1367,11 @@ impl Proxy {
                     let seq = *seq;
                     self.asking.asked = None;
                     if let Some(c) = &self.channel {
-                        let _ = sys::send_with_fds(c.as_raw_fd(), &[RETRACT, seq], &[]);
+                        let _ = sys::send_with_fds(
+                            c.as_raw_fd(),
+                            &panel_message(RETRACT, seq, None),
+                            &[],
+                        );
                     }
                 }
             }
@@ -1407,9 +1416,7 @@ impl Proxy {
                     crate::type_input::Request::parse(payload),
                     Some(crate::type_input::Request::Cancel { .. })
                 ) {
-                    let len = (payload.len() as u16).to_le_bytes();
-                    let mut message = vec![TYPE_CONTROL, 0, len[0], len[1]];
-                    message.extend_from_slice(payload);
+                    let message = panel_request(TYPE_CONTROL, 0, payload);
                     let sent = !of_this_launch(stream.as_raw_fd())
                         && self.channel.as_ref().is_some_and(|c| {
                             sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_ok()
@@ -1454,9 +1461,11 @@ impl Proxy {
             return;
         };
         let payload = asked_of(&buf).unwrap_or_default();
-        self.asking.seq = self.asking.seq.wrapping_add(1);
-        let seq = self.asking.seq;
-        let len = u16::try_from(payload.len()).unwrap_or(0).to_le_bytes();
+        let Some(seq) = self.asking.next_sequence() else {
+            // Never reuse a generation on a live channel, even at u64::MAX.
+            self.asking.say(&stream, ASK_NO);
+            return;
+        };
         let control = crate::type_input::Request::parse(payload);
         let mut descriptor = None;
         let kind = if let Some(request) = &control {
@@ -1497,8 +1506,7 @@ impl Proxy {
             }
             QUESTION
         };
-        let mut message = vec![kind, seq, len[0], len[1]];
-        message.extend_from_slice(payload);
+        let message = panel_request(kind, seq, payload);
         let descriptors: Vec<_> = descriptor.iter().map(AsRawFd::as_raw_fd).collect();
         if sys::send_with_fds(channel.as_raw_fd(), &message, &descriptors).is_ok() {
             self.asking.asked = Some((stream, seq));
@@ -2713,8 +2721,8 @@ fn serve(
             .chain(crate::wl_frame::typing::take())
         {
             let bytes = match reply {
-                Reply::Chose(seq, button) => vec![ANSWERED, seq, button],
-                Reply::Nowhere(seq) => vec![NOWHERE, seq],
+                Reply::Chose(seq, button) => panel_message(ANSWERED, seq, Some(button)),
+                Reply::Nowhere(seq) => panel_message(NOWHERE, seq, None),
             };
             if let Some(c) = &channel {
                 let _ = sys::send_with_fds(c.as_raw_fd(), &bytes, &[]);
@@ -2765,9 +2773,9 @@ enum Answer {
     Upstream(OwnedFd, bool),
     Refused,
     Question(Question),
-    Retract(u8),
+    Retract(u64),
     Paste,
-    TypeControl(u8, crate::type_input::Request, Option<OwnedFd>),
+    TypeControl(u64, crate::type_input::Request, Option<OwnedFd>),
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
     Frame(Frame, Option<OwnedFd>, Option<String>),
@@ -2787,11 +2795,12 @@ fn answer(channel: &UnixStream) -> Answer {
         Ok((1, _, _)) if byte[0] == REFUSED => Answer::Refused,
         Ok((1, _, _)) if byte[0] == PASTE => Answer::Paste,
         Ok((1, mut fds, _)) if byte[0] == TYPE_CONTROL => {
-            let mut head = [0u8; 3];
+            let mut head = [0u8; 10];
             if !recv_exact(channel.as_raw_fd(), &mut head) {
                 return Answer::Closed;
             }
-            let len = usize::from(u16::from_le_bytes([head[1], head[2]]));
+            let seq = u64::from_le_bytes(head[..8].try_into().unwrap());
+            let len = usize::from(u16::from_le_bytes([head[8], head[9]]));
             if len > crate::type_input::MAX_REQUEST {
                 return Answer::Closed;
             }
@@ -2800,21 +2809,22 @@ fn answer(channel: &UnixStream) -> Answer {
                 return Answer::Closed;
             }
             crate::type_input::Request::parse(&payload).map_or(Answer::Nothing, |request| {
-                Answer::TypeControl(head[0], request, fds.pop())
+                Answer::TypeControl(seq, request, fds.pop())
             })
         }
         // The rest of it is there: the supervisor sends a message whole.
         Ok((1, _, _)) if byte[0] == QUESTION => {
-            let mut head = [0u8; 3];
+            let mut head = [0u8; 10];
             if !recv_exact(channel.as_raw_fd(), &mut head) {
                 return Answer::Closed;
             }
-            let len = usize::from(u16::from_le_bytes([head[1], head[2]]));
+            let seq = u64::from_le_bytes(head[..8].try_into().unwrap());
+            let len = usize::from(u16::from_le_bytes([head[8], head[9]]));
             let mut payload = vec![0u8; len.min(MAX_QUESTION)];
             if len > MAX_QUESTION || !recv_exact(channel.as_raw_fd(), &mut payload) {
                 return Answer::Closed;
             }
-            Answer::Question(question_of(head[0], &payload))
+            Answer::Question(question_of(seq, &payload))
         }
         Ok((1, mut fds, _)) if byte[0] == FRAME => {
             let pixel = fds.pop();
@@ -2842,11 +2852,11 @@ fn answer(channel: &UnixStream) -> Answer {
                 })
         }
         Ok((1, _, _)) if byte[0] == RETRACT => {
-            let mut seq = [0u8; 1];
+            let mut seq = [0u8; 8];
             if !recv_exact(channel.as_raw_fd(), &mut seq) {
                 return Answer::Closed;
             }
-            Answer::Retract(seq[0])
+            Answer::Retract(u64::from_le_bytes(seq))
         }
         Ok((0, _, _)) => Answer::Closed,
         Err(e) if e.kind() == io::ErrorKind::Interrupted => Answer::Nothing,
@@ -2857,7 +2867,88 @@ fn answer(channel: &UnixStream) -> Answer {
 
 /// A question of number `seq` from [`ask_request`]'s bytes after their
 /// length: its words, then its answers' labels.
-fn question_of(seq: u8, payload: &[u8]) -> Question {
+fn panel_message(kind: u8, seq: u64, button: Option<u8>) -> Vec<u8> {
+    let mut message = vec![kind];
+    message.extend_from_slice(&seq.to_le_bytes());
+    message.extend(button);
+    message
+}
+
+fn panel_request(kind: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
+    let mut message = panel_message(kind, seq, None);
+    message.extend_from_slice(
+        &u16::try_from(payload.len())
+            .expect("bounded panel request")
+            .to_le_bytes(),
+    );
+    message.extend_from_slice(payload);
+    message
+}
+
+/// Nonblocking bounded framing. A short stream read is not a whole answer,
+/// and the following CONNECT/control byte must not be consumed as its tail.
+fn read_panel_reply(fd: RawFd, partial: &mut Vec<u8>) -> io::Result<Option<(u64, u8)>> {
+    loop {
+        let size = match partial.first() {
+            None => 1,
+            Some(&ANSWERED) => 10,
+            Some(&NOWHERE) => 9,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid panel reply",
+                ))
+            }
+        };
+        if partial.len() > size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "oversized panel reply",
+            ));
+        }
+        if size > 1 && partial.len() == size {
+            let seq = u64::from_le_bytes(partial[1..9].try_into().unwrap());
+            let answer = if partial[0] == NOWHERE {
+                ASK_NOWHERE
+            } else {
+                match partial[9] {
+                    0 => ASK_NO,
+                    1 => ASK_YES,
+                    _ => ASK_WINDOW,
+                }
+            };
+            partial.clear();
+            return Ok(Some((seq, answer)));
+        }
+        let mut data = [0u8; 10];
+        // SAFETY: live bounded buffer, retained fd, never block the keeper.
+        let n = unsafe {
+            libc::recv(
+                fd,
+                data.as_mut_ptr().cast(),
+                size - partial.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if n > 0 {
+            partial.extend_from_slice(&data[..n as usize]);
+        } else if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "panel channel closed",
+            ));
+        } else {
+            let error = io::Error::last_os_error();
+            match error.kind() {
+                io::ErrorKind::WouldBlock => return Ok(None),
+                io::ErrorKind::Interrupted => continue,
+                _ => return Err(error),
+            }
+        }
+    }
+}
+
+fn question_of(seq: u64, payload: &[u8]) -> Question {
     let mut parts = payload.split(|b| *b == 0);
     let text = String::from_utf8_lossy(parts.next().unwrap_or_default()).into_owned();
     let labels = parts
@@ -3228,31 +3319,6 @@ fn poll(fds: &mut [libc::pollfd], timeout_ms: libc::c_int) -> io::Result<usize> 
     Ok(n as usize)
 }
 
-/// What of `buf`'s length is there to read now, read (`MSG_DONTWAIT`): the
-/// supervisor never waits on the proxy.
-fn recv_now(fd: RawFd, buf: &mut [u8]) -> usize {
-    let mut at = 0;
-    while at < buf.len() {
-        // SAFETY: recv into the rest of a buffer of that length.
-        let n = unsafe {
-            libc::recv(
-                fd,
-                buf[at..].as_mut_ptr().cast(),
-                buf.len() - at,
-                libc::MSG_DONTWAIT,
-            )
-        };
-        if n > 0 {
-            at += n.unsigned_abs();
-        } else if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
-        } else {
-            break;
-        }
-    }
-    at
-}
-
 /// The next byte on the channel, left there (`MSG_PEEK`).
 fn recv_peek(fd: RawFd, buf: &mut [u8; 1]) -> io::Result<usize> {
     // SAFETY: recv into a buffer of one byte.
@@ -3310,6 +3376,86 @@ fn outq(fd: RawFd) -> libc::c_int {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panel_generations_do_not_alias_after_256_requests_or_wrap_at_u64() {
+        let mut asking = super::Asking::default();
+        for wanted in 1..=1024 {
+            assert_eq!(asking.next_sequence(), Some(wanted));
+        }
+        asking.seq = u64::MAX - 1;
+        assert_eq!(asking.next_sequence(), Some(u64::MAX));
+        assert_eq!(asking.next_sequence(), None);
+        assert_eq!(asking.next_sequence(), None);
+        assert_eq!(asking.seq, u64::MAX);
+    }
+
+    #[test]
+    fn fragmented_panel_reply_keeps_its_full_generation_and_next_opcode() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        let (ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let seq = 0x1122_3344_5566_7788;
+        let bytes = super::panel_message(super::ANSWERED, seq, Some(1));
+        let mut partial = Vec::new();
+        for (at, byte) in bytes.iter().enumerate() {
+            theirs.write_all(&[*byte]).unwrap();
+            let got = super::read_panel_reply(ours.as_raw_fd(), &mut partial).unwrap();
+            if at + 1 == bytes.len() {
+                assert_eq!(got, Some((seq, super::ASK_YES)));
+            } else {
+                assert_eq!(got, None);
+                assert_eq!(partial.len(), at + 1);
+            }
+        }
+        let mut following = super::panel_message(super::NOWHERE, seq + 256, None);
+        following.push(super::CONNECT);
+        theirs.write_all(&following).unwrap();
+        assert_eq!(
+            super::read_panel_reply(ours.as_raw_fd(), &mut partial).unwrap(),
+            Some((seq + 256, super::ASK_NOWHERE))
+        );
+        let mut next = [0];
+        (&ours).read_exact(&mut next).unwrap();
+        assert_eq!(next, [super::CONNECT]);
+        assert!(partial.is_empty());
+    }
+
+    #[test]
+    fn truncated_panel_reply_is_not_an_answer_and_unknown_opcode_is_refused() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let (ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs.write_all(&[super::ANSWERED, 1]).unwrap();
+        drop(theirs);
+        assert!(super::read_panel_reply(ours.as_raw_fd(), &mut Vec::new()).is_err());
+        let (ours, mut theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        theirs.write_all(&[super::CONNECT]).unwrap();
+        assert!(super::read_panel_reply(ours.as_raw_fd(), &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn panel_request_and_retraction_keep_high_generation_bits() {
+        use std::os::fd::AsRawFd;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let seq = 0x1122_3344_5566_7788;
+        let request = super::ask_request("?", &["no", "yes"]).unwrap();
+        let bytes = super::panel_request(super::QUESTION, seq, &request[2..]);
+        crate::sys::send_with_fds(ours.as_raw_fd(), &bytes, &[]).unwrap();
+        match super::answer(&theirs) {
+            super::Answer::Question(q) => assert_eq!(q.seq, seq),
+            _ => panic!("lost question generation"),
+        }
+        crate::sys::send_with_fds(
+            ours.as_raw_fd(),
+            &super::panel_message(super::RETRACT, seq, None),
+            &[],
+        )
+        .unwrap();
+        match super::answer(&theirs) {
+            super::Answer::Retract(got) => assert_eq!(got, seq),
+            _ => panic!("lost cancellation generation"),
+        }
+    }
     use super::*;
     use crate::frame::{ButtonStyle, Radius, Rgb, Style};
     use std::io::{Read, Write};
@@ -6638,15 +6784,15 @@ mod tests {
     fn a_question_without_a_frame_is_nowhere() {
         let rig = Rig::new("nowhere");
         let channel = rig.channel.as_ref().unwrap();
-        let mut message = vec![QUESTION, 5];
+        let mut message = panel_message(QUESTION, 5, None);
         message.extend_from_slice(&ask_request("?", &["no", "more"]).unwrap());
         sys::send_with_fds(channel.as_raw_fd(), &message, &[]).unwrap();
         channel
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        let mut reply = [0u8; 2];
+        let mut reply = [0u8; 9];
         (&*channel).read_exact(&mut reply).unwrap();
-        assert_eq!(reply, [NOWHERE, 5]);
+        assert_eq!(reply.as_slice(), panel_message(NOWHERE, 5, None));
         assert_eq!(rig.finish(), 0);
     }
 
@@ -6687,7 +6833,7 @@ mod tests {
         let text = "«curl» (контейнер «work») хочет в сеть: example.org:443.";
         let labels = ["Запретить", "Разрешить…"];
         let channel = rig.channel.as_ref().unwrap();
-        let mut message = vec![QUESTION, 7];
+        let mut message = panel_message(QUESTION, 7, None);
         message.extend_from_slice(&ask_request(text, &labels).unwrap());
         sys::send_with_fds(channel.as_raw_fd(), &message, &[]).unwrap();
         let got = log_until(&log, |m| m.iface == "xdg_surface" && m.opcode == 2);
@@ -6730,9 +6876,13 @@ mod tests {
         channel
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
-        let mut reply = [0u8; 3];
+        let mut reply = [0u8; 10];
         (&*channel).read_exact(&mut reply).unwrap();
-        assert_eq!(reply, [ANSWERED, 7, 0], "the hasty click was taken");
+        assert_eq!(
+            reply.as_slice(),
+            panel_message(ANSWERED, 7, Some(0)),
+            "the hasty click was taken"
+        );
         // The program heard nothing of it: on its own surface it hears the
         // pointer come.
         send(

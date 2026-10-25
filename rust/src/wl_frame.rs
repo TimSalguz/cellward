@@ -3565,7 +3565,7 @@ impl XdgPopupHandler for MenuPopup {
 /// number, its words and its answers' labels, the safe one first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Question {
-    pub(crate) seq: u8,
+    pub(crate) seq: u64,
     pub(crate) text: String,
     pub(crate) labels: Vec<String>,
 }
@@ -3574,8 +3574,8 @@ pub(crate) struct Question {
 /// place among the labels), or no window to ask it on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reply {
-    Chose(u8, u8),
-    Nowhere(u8),
+    Chose(u64, u8),
+    Nowhere(u64),
 }
 
 /// Windows remembered for a question at most, the last focused kept.
@@ -3622,7 +3622,7 @@ impl Questions {
     }
 
     /// The supervisor takes its question `seq` back: its panel goes.
-    pub(crate) fn retract(&self, seq: u8) {
+    pub(crate) fn retract(&self, seq: u64) {
         if self.asked.borrow().as_ref().is_some_and(|q| q.seq == seq) {
             self.close();
             *self.asked.borrow_mut() = None;
@@ -3809,7 +3809,7 @@ struct Panel {
     xdg: Rc<XdgSurface>,
     popup: Rc<XdgPopup>,
     pool: Rc<WlShmPool>,
-    seq: u8,
+    seq: u64,
     prompt: Prompt,
     /// Every image of it, held while it is up.
     drawn: Drawn,

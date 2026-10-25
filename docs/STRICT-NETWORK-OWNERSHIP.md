@@ -99,6 +99,10 @@ information is display/logging data, not the identity.
   uses CLOEXEC pipes, not a polling timer that expires unanswered permissions.
   Panel connections with a recorded generation validate kernel-pinned peer PID
   and start time before sending the question. A reused numeric PID is refused.
+  Inner supervisor/proxy panels and typing requests use a nonwrapping 64-bit
+  sequence (not the previous wrapping 8-bit value). Fragmented replies are
+  buffered up to their bounded frame length and cannot consume the next control
+  opcode. High generation bits survive question, reply and cancellation.
   The existing legacy relay uses `Asker<flows::Key>` and is not silently promoted
   to strict mode by this change.
 
@@ -176,10 +180,8 @@ Compile and run sequentially beneath `tests/run-memory-guard.py`.
    the live supervisor and its typed UI adapter. Packet/request quotas and
    cancellation are implemented; the integrating supervisor must cancel UI
    requests before policy/epoch changes and consume only current tickets.
-   Before treating panels as strict answers, replace/audit the inner proxy's
-   existing wrapping 8-bit question sequence: a cancelled answer must never
-   alias a later request after sequence reuse. The ticket adapter does not
-   itself repair that separate transport. Queue
+   Inner panel sequences no longer wrap, but this does not replace registering
+   launches before exec or draining kernel-held packets on transitions. Queue
    configuration currently copies metadata only: destination display needs
    separately designed bounded header/conntrack metadata, not guessed tuple
    ownership or indiscriminate payload archiving. Tie approvals to token/session

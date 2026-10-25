@@ -37,7 +37,7 @@ struct Typer {
 }
 
 struct Selection {
-    seq: u8,
+    seq: u64,
     token: u64,
     overlays: Vec<Overlay>,
     until: Instant,
@@ -77,7 +77,7 @@ struct Target {
 }
 
 struct Run {
-    seq: u8,
+    seq: u64,
     target: Target,
     plan: Plan,
     keymap: Option<Rc<OwnedFd>>,
@@ -164,7 +164,7 @@ fn overlay(window: &Rc<RefCell<Window>>, f: &Rc<Frames>, white: &Rc<OwnedFd>) ->
     })
 }
 
-pub(crate) fn select(seq: u8, token: u64, white: OwnedFd, frames: &[Rc<Frames>]) {
+pub(crate) fn select(seq: u64, token: u64, white: OwnedFd, frames: &[Rc<Frames>]) {
     TYPER.with_borrow_mut(|t| {
         t.cancel();
         t.target = None;
@@ -269,7 +269,7 @@ pub(super) fn choose(
 }
 
 pub(crate) fn start(
-    seq: u8,
+    seq: u64,
     token: u64,
     timing: Timing,
     mode: Mode,
@@ -422,7 +422,7 @@ impl Typer {
     }
 }
 
-pub(crate) fn retract(seq: u8) {
+pub(crate) fn retract(seq: u64) {
     TYPER.with_borrow_mut(|t| {
         if t.selection.as_ref().is_some_and(|s| s.seq == seq)
             || t.run.as_ref().is_some_and(|r| r.seq == seq)
@@ -557,6 +557,6 @@ pub(crate) fn take() -> Vec<Reply> {
     TYPER.with_borrow_mut(|t| t.replies.drain(..).collect())
 }
 
-pub(crate) fn unavailable(seq: u8) {
+pub(crate) fn unavailable(seq: u64) {
     TYPER.with_borrow_mut(|t| t.replies.push_back(Reply::Nowhere(seq)));
 }
