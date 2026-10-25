@@ -7,6 +7,33 @@ use std::time::{Duration, Instant};
 
 use crate::type_input::{Mode, Plan, Request, Timing};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineBreaks {
+    #[default]
+    Reject,
+    Spaces,
+    Enter,
+}
+
+impl std::fmt::Display for LineBreaks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Reject => "Переносы: остановить ввод",
+            Self::Spaces => "Переносы: заменить пробелами",
+            Self::Enter => "Переносы: Enter (может отправить сообщение)",
+        })
+    }
+}
+
+fn typing_text(text: &str, policy: LineBreaks) -> Result<String, String> {
+    let text = text.replace("\r\n", "\n");
+    match policy {
+        LineBreaks::Reject if text.contains('\n') => Err("В записи есть переносы строк. Выберите их обработку: Enter может отправить сообщение или выполнить команду. Обычная вставка безопаснее посимвольного ввода.".into()),
+        LineBreaks::Spaces => Ok(text.replace('\n', " ")),
+        _ => Ok(text),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Target {
     pub pid: u32,
@@ -134,6 +161,7 @@ pub fn type_entry(
     mime: &str,
     timing: Timing,
     mode: Mode,
+    lines: LineBreaks,
 ) -> Result<(), String> {
     if !timing.valid() {
         return Err("Проверьте задержки ввода".into());
@@ -142,6 +170,7 @@ pub fn type_entry(
         .map_err(|e| e.text())?;
     let bytes = crate::clipd::read_got(data.as_slice())?;
     let text = String::from_utf8(bytes).map_err(|_| "Выбранный текст не в UTF-8")?;
+    let text = typing_text(&text, lines)?;
     let plan = Plan::new(&text, mode).map_err(str::to_owned)?;
     let timeout_ms = u64::from(timing.start_ms)
         + (timing.between_ms as u64 + timing.hold_ms as u64) * plan.keys.len() as u64
@@ -198,9 +227,10 @@ fn settings_path() -> Option<PathBuf> {
     Some(dir.join("cellward/typing.conf"))
 }
 
-pub fn load() -> (Timing, Mode) {
+pub fn load() -> (Timing, Mode, LineBreaks) {
     let mut timing = Timing::default();
     let mut mode = Mode::default();
+    let mut lines = LineBreaks::default();
     if let Some(text) = settings_path().and_then(|p| std::fs::read_to_string(p).ok()) {
         for (name, value) in text.lines().filter_map(|l| l.split_once('=')) {
             match name {
@@ -220,6 +250,8 @@ pub fn load() -> (Timing, Mode) {
                     }
                 }
                 "mode" if value == "keycodes" => mode = Mode::Keycodes,
+                "newlines" if value == "enter" => lines = LineBreaks::Enter,
+                "newlines" if value == "spaces" => lines = LineBreaks::Spaces,
                 _ => {}
             }
         }
@@ -227,10 +259,10 @@ pub fn load() -> (Timing, Mode) {
     if !timing.valid() {
         timing = Timing::default();
     }
-    (timing, mode)
+    (timing, mode, lines)
 }
 
-pub fn save(timing: Timing, mode: Mode) -> Result<(), String> {
+pub fn save(timing: Timing, mode: Mode, lines: LineBreaks) -> Result<(), String> {
     if !timing.valid() {
         return Err("Некорректные задержки ввода".into());
     }
@@ -241,7 +273,7 @@ pub fn save(timing: Timing, mode: Mode) -> Result<(), String> {
     std::fs::write(
         &tmp,
         format!(
-            "start={}\nbetween={}\nhold={}\nmode={}\n",
+            "start={}\nbetween={}\nhold={}\nmode={}\nnewlines={}\n",
             timing.start_ms,
             timing.between_ms,
             timing.hold_ms,
@@ -249,9 +281,38 @@ pub fn save(timing: Timing, mode: Mode) -> Result<(), String> {
                 "unicode"
             } else {
                 "keycodes"
+            },
+            match lines {
+                LineBreaks::Reject => "reject",
+                LineBreaks::Spaces => "spaces",
+                LineBreaks::Enter => "enter",
             }
         ),
     )
     .and_then(|()| std::fs::rename(&tmp, path))
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod newline_tests {
+    use super::*;
+    #[test]
+    fn multiline_typing_requires_an_explicit_policy() {
+        assert_eq!(LineBreaks::default(), LineBreaks::Reject);
+        assert!(typing_text("one\r\ntwo", LineBreaks::Reject).is_err());
+        assert_eq!(
+            typing_text("one\r\ntwo\n", LineBreaks::Spaces).unwrap(),
+            "one two "
+        );
+        assert_eq!(
+            typing_text("one\r\ntwo", LineBreaks::Enter).unwrap(),
+            "one\ntwo"
+        );
+        assert_eq!(typing_text("single", LineBreaks::Reject).unwrap(), "single");
+        assert!(Plan::new(
+            &typing_text("x\ry", LineBreaks::Spaces).unwrap(),
+            Mode::Unicode
+        )
+        .is_err());
+    }
 }

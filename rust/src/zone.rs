@@ -626,6 +626,7 @@ pub struct Tools {
     /// The launch window, for the sound filter's questions (guarded,
     /// `crate::window::question`); empty: kdialog.
     pub window: PathBuf,
+    pub notify_send: PathBuf,
     /// The command line's path in the profile (the manifest's `runner`): the
     /// `Exec` of the zone's entry for the portal (`desktop::render_zone_entry`),
     /// which GLib loads only when it finds the program it names.
@@ -648,6 +649,7 @@ impl Default for Tools {
             opener: PathBuf::from("xdg-open"),
             kdialog: PathBuf::from("kdialog"),
             window: PathBuf::new(),
+            notify_send: PathBuf::from("notify-send"),
             runner: PathBuf::from("cellward"),
         }
     }
@@ -721,6 +723,7 @@ impl Args {
                 "--opener" => &mut tools.opener,
                 "--kdialog" => &mut tools.kdialog,
                 "--window" => &mut tools.window,
+                "--notify-send" => &mut tools.notify_send,
                 "--runner" => &mut tools.runner,
                 _ => return Err(ArgError::UnknownFlag(flag)),
             };
@@ -1900,6 +1903,7 @@ fn tool_flags(tools: &Tools) -> Vec<OsString> {
         ("--opener", &tools.opener),
         ("--kdialog", &tools.kdialog),
         ("--window", &tools.window),
+        ("--notify-send", &tools.notify_send),
         ("--runner", &tools.runner),
     ] {
         if !path.as_os_str().is_empty() {
@@ -3215,6 +3219,7 @@ struct Transport {
     strict_requested: bool,
     strict: Option<crate::strict_network::Runtime>,
     strict_window: PathBuf,
+    strict_notify: PathBuf,
     strict_runtime: PathBuf,
 }
 
@@ -3358,6 +3363,7 @@ impl Transport {
                     &host_runtime_dir(zone),
                     record_of(&plan.id),
                 )
+                .map(|asker| asker.with_attention(&zone.tools.notify_send))
                 .map_err(|e| {
                     eprintln!(
                         "instance {}: nobody to ask about its programs' network ({e}) — \
@@ -3373,6 +3379,7 @@ impl Transport {
             strict_requested,
             strict: None,
             strict_window: zone.tools.window.clone(),
+            strict_notify: zone.tools.notify_send.clone(),
             strict_runtime: host_runtime_dir(zone),
         }
     }
@@ -3630,6 +3637,7 @@ impl Transport {
                 &self.strict_runtime,
                 record_of(&self.id),
             )
+            .map(|asker| asker.with_attention(&self.strict_notify))
             .map_err(|e| e.to_string())?;
             self.strict = Some(crate::strict_network::Runtime::start(
                 &core,
@@ -11021,6 +11029,7 @@ mod tests {
             opener: PathBuf::from("/t/opener"),
             kdialog: PathBuf::from("/t/kdialog"),
             window: PathBuf::from("/t/window"),
+            notify_send: PathBuf::from("/t/notify-send"),
             runner: PathBuf::from("/t/cellward"),
         }
     }

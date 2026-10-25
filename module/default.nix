@@ -2058,6 +2058,7 @@ in
         # принимается, пока человек не побыл с вопросом перед глазами),
         # kdialog — только если окна нет.
         + " --window ${vpn-zone-window}/bin/vpn-zone-window"
+        + " --notify-send ${notify}"
         # Exec ярлыка зоны для портала (~/.local/share/applications/
         # cellward.zone.<зона>.desktop, rust/src/desktop.rs): GLib берёт ярлык,
         # только если найдёт его программу, а PATH портала может её не знать.
@@ -2111,6 +2112,7 @@ in
         + " --opener ${vpn-zone-opener}"
         + " --kdialog ${kdialog}"
         + " --window ${vpn-zone-window}/bin/vpn-zone-window"
+        + " --notify-send ${notify}"
         + " --runner ${config.home.profileDirectory}/bin/cellward %I";
     };
   };

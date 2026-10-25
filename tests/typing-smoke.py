@@ -109,6 +109,9 @@ def main():
     palette = root / "config/cellward/palette.json"
     palette.parent.mkdir(parents=True)
     palette.write_text('{"background":"#1e1e2e","text":"#cdd6f4","accent":"#cba6f7","success":"#a6e3a1","danger":"#f38ba8","warning":"#f9e2af"}')
+    # This fixture intentionally sends a final Enter to the terminal reader.
+    # Production defaults reject line breaks unless explicitly configured.
+    (palette.parent / "typing.conf").write_text("newlines=enter\nstart=500\n")
     processes = []
     files = []
     env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), WLR_BACKENDS="headless",
@@ -324,7 +327,9 @@ def main():
                 for down in [1, 0]:
                     packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, key, down))
                     time.sleep(0.05)
+            wait_for(lambda: not any(w["app_id"] == "vpn-zone-window" for w in windows()), timeout=3)
             wait_for(lambda: output.exists() and output.stat().st_size)
+            wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
             assert output.read_bytes() == text.encode(), "manager typed wrong contents"
             assert any(line.startswith("get\t@secrets:host\t") for line in requests), "password tab was not used"
             assert not any(line.startswith("select\t") for line in requests), "typing changed the clipboard selection"

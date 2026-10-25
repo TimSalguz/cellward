@@ -2401,13 +2401,11 @@ fn again_running(tools: &Tools, label: &str, zone: &str, selector: &str) -> Agai
         ("same", "Ещё одно окно здесь", false),
         ("there", "Переключиться к открытой", false),
     ];
-    match crate::window::question(
+    match crate::window::navigation_question(
         &tools.window,
         "Программа уже открыта",
         &text,
-        None,
         &answers,
-        None,
     ) {
         crate::window::Asked::Chose(tag) if tag == "there" => Again::There,
         crate::window::Asked::Chose(tag) if tag == "same" => Again::Same,
@@ -2432,7 +2430,7 @@ fn again_in_throwaway(tools: &Tools, label: &str) -> Again {
         ("new", "Открыть в новом разовом", false),
         ("there", "Переключиться к открытой", false),
     ];
-    match crate::window::question(&tools.window, "Уже открыта", &text, None, &answers, None)
+    match crate::window::navigation_question(&tools.window, "Уже открыта", &text, &answers)
     {
         crate::window::Asked::Chose(tag) if tag == "there" => Again::There,
         crate::window::Asked::Chose(tag) if tag == "new" => Again::New,

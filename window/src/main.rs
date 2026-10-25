@@ -1626,6 +1626,8 @@ mod tests {
         );
         let mut w = Window::new(req);
         assert!(w.menu());
+        assert!(w.armed && !w.guarded());
+        let holds = w.holds;
         let _ = w.key(
             Key::Named(key::Named::ArrowDown),
             keyboard::Modifiers::default(),
@@ -1636,6 +1638,8 @@ mod tests {
             keyboard::Modifiers::default(),
         );
         assert_eq!(w.entry, 0, "round");
+        assert!(w.armed);
+        assert_eq!(w.holds, holds, "navigation must not restart a guard");
         let _ = w.key(Key::Character("2".into()), keyboard::Modifiers::default());
         assert_eq!(w.entry, 1);
     }

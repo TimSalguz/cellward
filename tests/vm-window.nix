@@ -12,6 +12,8 @@
 # (the same check is a subtest of tests/vm.nix).
 {
   system ? builtins.currentSystem,
+  # May point at the same already-fetched pins for an offline diagnostic run.
+  pins ? import ./pins.nix,
   # Fast visual regression run: stop after the launch window and panel shots.
   screenshotsOnly ? false,
   # Isolate the VPN login form without the preceding window/frame scenarios.
@@ -21,7 +23,6 @@
 }:
 
 let
-  pins = import ./pins.nix;
   pkgs = import pins.nixpkgs {
     inherit system;
     config = { };

@@ -273,6 +273,17 @@ pub fn question(
     question_on(window, None, title, text, command, answers, deadline)
 }
 
+/// Host-initiated navigation, not a permission grant. No anti-click-through
+/// delay: choosing a running window must remain ordinary keyboard navigation.
+pub fn navigation_question(
+    window: &Path,
+    title: &str,
+    text: &str,
+    answers: &[(&str, &str, bool)],
+) -> Asked {
+    question_controlled(window, None, title, text, None, answers, (None, None, 0))
+}
+
 /// [`question`] on the compositor `display` (`WAYLAND_DISPLAY`; none: the
 /// one this process has) — an instance's keeper asks on its launch's,
 /// whatever its unit's environment says (`crate::netask`).
@@ -311,6 +322,31 @@ pub(crate) fn question_on_cancellable(
     ),
 ) -> Asked {
     let (deadline, cancel) = control;
+    question_controlled(
+        window,
+        display,
+        title,
+        text,
+        command,
+        answers,
+        (deadline, cancel, crate::dialog::TOO_FAST.as_millis() as u64),
+    )
+}
+
+fn question_controlled(
+    window: &Path,
+    display: Option<&std::ffi::OsStr>,
+    title: &str,
+    text: &str,
+    command: Option<(&str, &[String])>,
+    answers: &[(&str, &str, bool)],
+    control: (
+        Option<std::time::Duration>,
+        Option<&crate::sys::CancelToken>,
+        u64,
+    ),
+) -> Asked {
+    let (deadline, cancel, guard_ms) = control;
     if cancel.is_some_and(|c| c.cancelled()) {
         return Asked::NoAnswer;
     }
@@ -325,7 +361,7 @@ pub(crate) fn question_on_cancellable(
             .iter()
             .map(|(tag, label, danger)| ((*tag).to_owned(), (*label).to_owned(), *danger))
             .collect(),
-        guard_ms: crate::dialog::TOO_FAST.as_millis() as u64,
+        guard_ms,
         command,
         program,
     };
@@ -653,6 +689,30 @@ pub fn parse_reply(text: &str) -> Option<Reply> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn navigation_has_no_guard_but_permission_questions_keep_it() {
+        let root = std::env::temp_dir().join(format!("cw-navigation-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let window = root.join("window");
+        let seen = root.join("request");
+        crate::dialog::test_program(
+            &window,
+            &format!(
+                "#!/bin/sh\ncat > '{}'\nprintf 'action\\tthere\\n'\n",
+                seen.display()
+            ),
+        );
+        let answers = [("there", "Open", false)];
+        assert_eq!(
+            super::navigation_question(&window, "Already open", "Choose", &answers),
+            super::Asked::Chose("there".into())
+        );
+        assert!(!std::fs::read_to_string(&seen).unwrap().contains("guard\t"));
+        let _ = super::question(&window, "Permission", "Allow?", None, &answers, None);
+        assert!(std::fs::read_to_string(&seen).unwrap().contains("guard\t"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cancelling_a_question_kills_and_reaps_its_owned_window() {
         let root = std::env::temp_dir().join(format!("vz-window-cancel-{}", std::process::id()));

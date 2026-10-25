@@ -112,6 +112,7 @@ impl QuestionId {
 /// The instance's asking.
 pub struct Asker<T = Key> {
     window: PathBuf,
+    attention: Option<PathBuf>,
     config: PathBuf,
     state: PathBuf,
     /// The host's runtime directory: where the launches' sockets of
@@ -147,6 +148,51 @@ struct Worker {
     wake: Arc<OwnedFd>,
 }
 
+/// A background request must not silently hide beneath another fullscreen
+/// app. Alert only: no focus stealing, destination disclosure or grant action.
+/// A broken notification daemon must not indefinitely delay the panel.
+fn notify_waiting(notify: &Path, label: &str, container: &str) {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let escape = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let body = format!("{} ({}) ожидает разрешения на сеть. Откройте окно программы. До ответа доступ не разрешён.", escape(label), escape(container));
+    let Ok(mut child) = Command::new(notify)
+        .args([
+            "-a",
+            "cellward",
+            "-u",
+            "critical",
+            "-t",
+            "10000",
+            "--",
+            "Cellward: запрос доступа к сети",
+            &body,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let until = Instant::now() + Duration::from_millis(750);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
         self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -156,6 +202,11 @@ impl Drop for Worker {
 }
 
 impl<T: Copy + Eq> Asker<T> {
+    pub(crate) fn with_attention(mut self, notify: &Path) -> Self {
+        self.attention = Some(notify.to_owned());
+        self
+    }
+
     pub fn new(
         window: &Path,
         config: &Path,
@@ -172,6 +223,7 @@ impl<T: Copy + Eq> Asker<T> {
         };
         Ok(Self {
             window: window.to_path_buf(),
+            attention: None,
             config: config.to_path_buf(),
             state: state.to_path_buf(),
             runtime: runtime.to_path_buf(),
@@ -279,6 +331,7 @@ impl<T: Copy + Eq> Asker<T> {
         // "Always" is a rule: a record and a program to write it for.
         let always = self.record.is_some() && question.program().is_some();
         let (window, shown) = (self.window.clone(), self.shown.clone());
+        let attention = self.attention.clone();
         let at = launch.map(|(pid, start)| (self.runtime.clone(), pid, start));
         // No time to answer in (the owner, 2026-10-15): the flows are held
         // until the person says, and a question open on the program's window
@@ -300,6 +353,9 @@ impl<T: Copy + Eq> Asker<T> {
             .name("net-question".to_owned())
             .spawn(move || {
                 let _worker = worker;
+                if let Some(notify) = attention {
+                    notify_waiting(&notify, &label, &shown);
+                }
                 let asked = Asked {
                     label: &label,
                     shown: &shown,
@@ -666,6 +722,30 @@ fn question(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waiting_notification_is_informational_and_bounded() {
+        let root = std::env::temp_dir().join(format!("cw-net-notice-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let helper = root.join("notify");
+        let seen = root.join("arguments");
+        crate::dialog::test_program(
+            &helper,
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", seen.display()),
+        );
+        notify_waiting(&helper, "<App>", "work");
+        let args = std::fs::read_to_string(&seen).unwrap();
+        assert!(args.contains("critical") && args.contains("&lt;App&gt;"));
+        assert!(
+            !args.contains("--action"),
+            "a notification cannot grant access"
+        );
+        crate::dialog::test_program(&helper, "#!/bin/sh\nexec sleep 20\n");
+        let started = std::time::Instant::now();
+        notify_waiting(&helper, "App", "work");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn strict_held(
         s: &mut crate::netqueue::Session,

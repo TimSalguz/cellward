@@ -186,6 +186,8 @@ pub enum Msg {
     Rested(u64),
     Select(usize),
     Paste(u64),
+    CopyForPaste(u64),
+    CopiedForPaste(Result<String, String>),
     Whole(u64),
     Got(String, u64, Result<String, String>),
     Thumb(String, u64, Result<crate::thumb::Thumb, String>),
@@ -216,6 +218,7 @@ pub enum Msg {
     TransferredSecret(String, Result<String, String>),
     Typing(bool),
     TypeMode(TypeMode),
+    TypeLines(clip_type::LineBreaks),
     TypeDelay(&'static str, String),
     TypePick,
     TypePickWindow(Option<iced::window::Id>),
@@ -316,6 +319,7 @@ pub struct Clip {
     type_target: Option<clip_type::Target>,
     type_active: Option<clip_type::Target>,
     type_mode: TypeMode,
+    type_lines: clip_type::LineBreaks,
     type_start: String,
     type_between: String,
     type_hold: String,
@@ -533,14 +537,14 @@ impl Clip {
 
     fn type_save(&mut self) {
         if let Ok(timing) = self.type_timing() {
-            if let Err(why) = clip_type::save(timing, self.type_mode) {
+            if let Err(why) = clip_type::save(timing, self.type_mode, self.type_lines) {
                 self.error = Some(why);
             }
         }
     }
 
     pub fn new(history: String, can_paste: bool, socket: PathBuf) -> Self {
-        let (timing, type_mode) = clip_type::load();
+        let (timing, type_mode, type_lines) = clip_type::load();
         Self {
             history,
             manager: false,
@@ -583,6 +587,7 @@ impl Clip {
             type_target: None,
             type_active: None,
             type_mode,
+            type_lines,
             type_start: timing.start_ms.to_string(),
             type_between: timing.between_ms.to_string(),
             type_hold: timing.hold_ms.to_string(),
@@ -766,6 +771,10 @@ impl Clip {
         )
     }
 
+    fn can_copy_for_paste(&self, id: u64) -> bool {
+        self.manager && !self.secrets && !self.type_busy && self.entry(id).is_some()
+    }
+
     fn paste(&self, id: u64) {
         if self.can_paste && self.entry(id).is_some() {
             print!("{}", paste_line(&self.active_history(), id));
@@ -856,6 +865,16 @@ impl Clip {
                 }
                 self.paste(id);
             }
+            Msg::CopyForPaste(id) => {
+                // Password export keeps its separate confirmation path.
+                if self.can_copy_for_paste(id) {
+                    return self.ok(clipd::select_request(&self.active_history(), id), Msg::CopiedForPaste);
+                }
+            }
+            Msg::CopiedForPaste(result) => match result {
+                Ok(_) => self.notice = Some("Запись в активном буфере рабочего стола. Вернитесь в нужное окно и нажмите Ctrl+V (в терминале — Ctrl+Shift+V).".into()),
+                Err(why) => self.error = Some(why),
+            },
             Msg::Whole(id) => {
                 if self.secrets {
                     return Task::none();
@@ -1144,6 +1163,10 @@ impl Clip {
                 self.type_mode = mode;
                 self.type_save();
             }
+            Msg::TypeLines(lines) => {
+                self.type_lines = lines;
+                self.type_save();
+            }
             Msg::TypeDelay(which, text) => {
                 if text.len() <= 5 && text.chars().all(|c| c.is_ascii_digit()) {
                     match which {
@@ -1239,19 +1262,19 @@ impl Clip {
                     self.type_busy = false;
                     return Task::none();
                 };
-                let (socket, history, mode) =
-                    (self.socket.clone(), self.active_history(), self.type_mode);
+                let (socket, history, mode, lines) =
+                    (self.socket.clone(), self.active_history(), self.type_mode, self.type_lines);
                 self.type_active = Some(target);
                 let work = Task::perform(
                     clipd::off_thread(move || {
                         std::thread::sleep(std::time::Duration::from_millis(150));
-                        clip_type::type_entry(target, &socket, &history, id, &mime, timing, mode)
+                        clip_type::type_entry(target, &socket, &history, id, &mime, timing, mode, lines)
                     }),
                     move |r| Msg::Typed(window, r.unwrap_or_else(|| Err("Ввод прерван".into()))),
                 );
-                return work;
+                return iced::window::close(window).chain(work);
             }
-            Msg::Typed(window, result) => {
+            Msg::Typed(_window, result) => {
                 self.type_busy = false;
                 self.type_active = None;
                 match result {
@@ -1261,8 +1284,8 @@ impl Clip {
                         self.type_target = None;
                     }
                 }
-                return iced::window::set_mode(window, iced::window::Mode::Windowed)
-                    .chain(iced::window::gain_focus(window));
+                let (_, open) = iced::window::open(clip_window_settings());
+                return open.map(Msg::Opened);
             }
             Msg::TypeCancel => {
                 if let Some(target) = self.type_active {
@@ -1621,6 +1644,9 @@ impl Clip {
         if self.type_enabled {
             page = page.push(self.view_typing());
         }
+        if self.manager && !self.type_enabled {
+            page = page.push(text("«Копировать для вставки» использует общий активный буфер рабочего стола, видимый менеджерам вроде CopyQ. Это не приватный буфер контейнера.").size(12));
+        }
         if let Some(why) = &self.error {
             page = page.push(
                 row![
@@ -1723,6 +1749,16 @@ impl Clip {
                 pick_list(TYPE_MODES.as_slice(), Some(self.type_mode), Msg::TypeMode).text_size(13),
             ]
             .spacing(8),
+            pick_list(
+                &[
+                    clip_type::LineBreaks::Reject,
+                    clip_type::LineBreaks::Spaces,
+                    clip_type::LineBreaks::Enter
+                ][..],
+                Some(self.type_lines),
+                Msg::TypeLines,
+            )
+            .text_size(13),
             text(if self.type_active.is_some() {
                 "Идёт ввод в выбранное окно. Кнопка остановки и Esc прерывают его."
             } else if self.type_target.is_some() {
@@ -2049,6 +2085,14 @@ impl Clip {
             }
         }
         let mut line = row![].spacing(8).align_y(Alignment::Center);
+        if self.manager && !self.type_enabled && !self.secrets {
+            line = line.push(
+                button(text("Копировать для вставки").size(13)).on_press_maybe(
+                    self.can_copy_for_paste(e.id)
+                        .then_some(Msg::CopyForPaste(e.id)),
+                ),
+            );
+        }
         if self.can_paste || self.type_enabled {
             line = line.push(
                 button(
@@ -2645,6 +2689,23 @@ mod tests {
 
     fn clip() -> Clip {
         Clip::new("main".to_owned(), true, PathBuf::from("/nonexistent/sock"))
+    }
+
+    #[test]
+    fn tray_copy_supports_images_but_never_bypasses_password_confirmation() {
+        let mut c = clip();
+        c.manager = true;
+        c.can_paste = false;
+        let mut image = entry(1, 10);
+        image.types = vec![("image/png".into(), 100)];
+        c.entries.push(image);
+        assert!(c.can_copy_for_paste(1));
+        assert!(!c.can_copy_for_paste(99));
+        c.secrets = true;
+        assert!(!c.can_copy_for_paste(1));
+        c.secrets = false;
+        c.type_busy = true;
+        assert!(!c.can_copy_for_paste(1));
     }
 
     #[test]
