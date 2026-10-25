@@ -1293,7 +1293,10 @@ fn ask_window(
     if tools.window.as_os_str().is_empty() {
         return None;
     }
-    let req = window_request(tools, key, label, default_net, memory);
+    let mut req = window_request(tools, key, label, default_net, memory);
+    if avoid.is_some() {
+        req.notes.push("Отдельный запуск: выбери другой контейнер/дом. Одна только смена сети не отделяет профиль браузера от уже открытого процесса.".to_owned());
+    }
     let reply = match show_window(tools, &req)? {
         Some(reply) => reply,
         None => return Some(None),
@@ -2076,9 +2079,19 @@ pub fn main() -> ExitCode {
                     // command to the old process. Only a different home is
                     // offered as a separate instance, regardless of network.
                     if launch::has_display() {
+                        // This is one unfinished launch, not a fresh picker
+                        // invocation. Keep its network across validation
+                        // failures without writing a last choice or a pin.
+                        let mut draft_zone = zone.clone();
                         loop {
-                            match ask_window(&tools, &key, &label, &zone, &memory, Some(&container))
-                            {
+                            match ask_window(
+                                &tools,
+                                &key,
+                                &label,
+                                &draft_zone,
+                                &memory,
+                                Some(&container),
+                            ) {
                                 Some(Some((chosen_zone, chosen_container)))
                                     if separate_home(&container, &chosen_container) =>
                                 {
@@ -2092,7 +2105,8 @@ pub fn main() -> ExitCode {
                                         &memory,
                                     );
                                 }
-                                Some(Some(_)) => {
+                                Some(Some((chosen_zone, _))) => {
+                                    draft_zone = chosen_zone;
                                     let answers = [
                                         ("again", "Выбрать другой контейнер", false),
                                         ("cancel", "Отмена", false),
@@ -3862,7 +3876,12 @@ mod tests {
         let mut m = memory();
         m.pinned_profile = MAIN.to_owned();
         m.bound = "host".to_owned();
-        assert_eq!(net_step(&m), NetStep::Bound { zone: "host".into() });
+        assert_eq!(
+            net_step(&m),
+            NetStep::Bound {
+                zone: "host".into()
+            }
+        );
         let plan = autostart_plan(&m, "terminal", |_| false, |_| None);
         assert_eq!(plan.zone, "host");
         assert!(plan.container.selector().is_empty());
@@ -4919,6 +4938,16 @@ mod tests {
         assert!(window_nets(&zones, "de")
             .iter()
             .any(|i| i.selected && i.tag == "de"));
+        // A retry's explicit draft choice must win over the presence of
+        // the VPN used by the running copy; the host network is not the
+        // unconfined launch mode.
+        let host = window_nets(&zones, "host");
+        let selected: Vec<_> = host
+            .iter()
+            .filter(|i| i.selected)
+            .map(|i| i.tag.as_str())
+            .collect();
+        assert_eq!(selected, ["host"]);
         // A container's network goes with its row: the window does not
         // offer it with another.
         let row = |name: &str, bound: &str| ProfileRow {

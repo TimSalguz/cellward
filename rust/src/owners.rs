@@ -228,13 +228,25 @@ fn holders_of(pids: &[i32]) -> (HashMap<u64, i32>, Vec<i32>) {
             }
             Err(_) => continue,
         };
+        let mut inaccessible = false;
         for fd in fds.flatten() {
-            if let Some(inode) = fs::read_link(fd.path())
-                .ok()
-                .and_then(|l| socket_inode(&l.to_string_lossy()))
-            {
-                out.entry(inode).or_insert(*pid);
+            match fs::read_link(fd.path()) {
+                Ok(link) => {
+                    if let Some(inode) = socket_inode(&link.to_string_lossy()) {
+                        out.entry(inode).or_insert(*pid);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    inaccessible = true;
+                }
+                Err(_) => {}
             }
+        }
+        // procfs can permit listing fd/ while denying ptrace-protected
+        // readlink(fd/N), notably for sandboxed browser subprocesses.
+        // These holders need the same cgroup fallback as an unreadable fd/.
+        if inaccessible {
+            closed.push(*pid);
         }
     }
     (out, closed)

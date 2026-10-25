@@ -40,6 +40,9 @@
 //! on its own window: a question nobody answered yet does not hold back
 //! every other program of the container. An unidentified flow is its own
 //! question: allowing it must not allow unrelated unidentified traffic.
+//! Unidentified questions are displayed one at a time within an instance;
+//! their authorizations remain independent. Known programs do not wait on
+//! this queue.
 //! Questions on one window are shown there one after another
 //! (`crate::wl_proxy`'s supervisor).
 
@@ -198,7 +201,22 @@ impl Asker {
 
     /// The questions of the programs waiting for one, each opened.
     fn next(&mut self) {
-        while let Some(program) = self.queue.pop_front() {
+        // Unknown connections have independent authorizations, but must not
+        // carpet the desktop with one modal window per parallel socket.
+        let pending = self.queue.len();
+        for _ in 0..pending {
+            let Some(program) = self.queue.pop_front() else {
+                break;
+            };
+            if matches!(program, QuestionId::Unknown(_))
+                && self
+                    .open
+                    .iter()
+                    .any(|id| matches!(id, QuestionId::Unknown(_)))
+            {
+                self.queue.push_back(program);
+                continue;
+            }
             if !self.open.contains(&program) {
                 self.start(program);
             }
@@ -297,11 +315,7 @@ impl Asker {
                 verdict = Verdict::Deny;
             }
             // Not written as a rule: kept for the instance's life.
-            if !written
-                && !refused
-                && question.program().is_some()
-                && answer != Answer::Always
-            {
+            if !written && !refused && question.program().is_some() && answer != Answer::Always {
                 self.session.insert(question.clone(), verdict);
             }
             for key in self.waiting.remove(&question).unwrap_or_default() {
@@ -533,6 +547,22 @@ mod tests {
         asker.tx.send((first, Answer::Now)).unwrap();
         assert_eq!(asker.answered(), vec![(key(1), Verdict::Allow)]);
         assert!(asker.waiting.contains_key(&other));
+        assert!(asker.session.is_empty());
+    }
+
+    #[test]
+    fn unidentified_questions_wait_instead_of_opening_parallel_windows() {
+        let root = std::env::temp_dir().join("vz-netask-queued");
+        let mut asker = Asker::new(Path::new(""), &root, &root, &root, None).unwrap();
+        let active = QuestionId::Unknown(key(1));
+        asker.open.insert(active.clone());
+        for port in 2..8 {
+            assert_eq!(asker.ask(None, None, None, key(port), "x:443".into()), None);
+        }
+        assert_eq!(asker.open.len(), 1);
+        assert_eq!(asker.queue.len(), 6);
+        assert_eq!(asker.waiting.len(), 6);
+        assert!(asker.open.contains(&active));
         assert!(asker.session.is_empty());
     }
 

@@ -294,6 +294,7 @@ enum Msg {
     /// The guard's time is over, if nothing came since this count of
     /// holds: taking a choice is possible.
     Armed(u64),
+    GuardTick(u64, u64),
 }
 
 struct Window {
@@ -317,6 +318,7 @@ struct Window {
     armed: bool,
     /// How many times the guard was started: only the last one arms.
     holds: u64,
+    guard_seconds: u64,
     /// The window has the keyboard's focus: a guarded window arms only
     /// then — its guard is counted from when the person can see it, and a
     /// window that never gets the focus never takes a choice.
@@ -372,6 +374,7 @@ impl Window {
                 .unwrap_or(0),
             armed: req.guard == 0,
             holds: 0,
+            guard_seconds: req.guard.div_ceil(1000),
             focused: false,
             measuring: false,
             req,
@@ -583,7 +586,20 @@ impl Window {
     fn hold(&mut self) -> Task<Msg> {
         self.armed = false;
         self.holds += 1;
+        self.guard_seconds = self.req.guard.div_ceil(1000);
         arm_after(self.req.guard, self.holds)
+    }
+
+    fn wait_label(&self) -> String {
+        if self.armed {
+            String::new()
+        } else {
+            format!(
+                "{} {}",
+                tr(self.req.language, UiKey::Wait),
+                self.guard_seconds
+            )
+        }
     }
 
     /// Whether Enter may start: anywhere in an ordinary window, only in the
@@ -702,6 +718,11 @@ impl Window {
             }
             // Armed by the last guard started, and only with the focus.
             Msg::Armed(holds) => self.armed |= holds == self.holds && self.focused,
+            Msg::GuardTick(holds, seconds) => {
+                if holds == self.holds && self.focused {
+                    self.guard_seconds = seconds;
+                }
+            }
             Msg::Press => {}
             // Losing the focus disarms; getting it starts the guard — the
             // first time too: nothing counts from the window's start.
@@ -972,11 +993,7 @@ impl Window {
         page = page.push(list);
         // "Секунду…" beside the close button, not a line of its own: the
         // window keeps the height it opened at.
-        let wait = if self.armed {
-            ""
-        } else {
-            tr(self.req.language, UiKey::Wait)
-        };
+        let wait = self.wait_label();
         page = page.push(
             row![
                 container(text(wait).size(13)).width(Length::Fill),
@@ -1085,7 +1102,7 @@ impl Window {
             }
         }
         let label = if !self.armed {
-            tr(self.req.language, UiKey::Wait).to_owned()
+            self.wait_label()
         } else if self.enter_starts() {
             tr(self.req.language, UiKey::Start).to_owned()
         } else {
@@ -1154,11 +1171,7 @@ impl Window {
             page = page.push(text(format!("ⓘ {note}")).size(14));
         }
         page = page.push(self.perms_view());
-        let wait = if self.armed {
-            ""
-        } else {
-            tr(self.req.language, UiKey::Wait)
-        };
+        let wait = self.wait_label();
         page = page.push(
             row![
                 container(text(wait).size(13)).width(Length::Fill),
@@ -1326,18 +1339,28 @@ impl Window {
 /// carries the input events: a sleep there would hold keys typed during the
 /// guard until after it, and they would count as typed when armed.
 fn arm_after(guard: u64, holds: u64) -> Task<Msg> {
-    let guard = std::time::Duration::from_millis(guard);
-    Task::perform(
-        async move {
-            let (done, over) = iced::futures::channel::oneshot::channel();
-            std::thread::spawn(move || {
-                std::thread::sleep(guard);
-                let _ = done.send(());
-            });
-            let _ = over.await;
-        },
-        move |()| Msg::Armed(holds),
-    )
+    let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(guard);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                let _ = sender.unbounded_send(Msg::Armed(holds));
+                break;
+            }
+            if sender
+                .unbounded_send(Msg::GuardTick(
+                    holds,
+                    left.as_millis().div_ceil(1000) as u64,
+                ))
+                .is_err()
+            {
+                break;
+            }
+            std::thread::sleep(left.min(std::time::Duration::from_millis(250)));
+        }
+    });
+    Task::run(receiver, |msg| msg)
 }
 
 /// The heights a window opens at no lower than, and no higher than: most
@@ -1617,6 +1640,24 @@ mod tests {
             let _ = w.update(Msg::Focus(true));
         }
         let _ = w.update(Msg::Armed(w.holds));
+    }
+
+    #[test]
+    fn countdown_is_visible_and_stale_ticks_cannot_change_a_new_guard() {
+        let mut w = Window::new(parse_request(&format!("{REQUEST}guard\t2500\n")));
+        assert!(w.wait_label().ends_with(" 3"));
+        let _ = w.update(Msg::Focus(true));
+        let previous = w.holds;
+        let _ = w.update(Msg::GuardTick(previous, 1));
+        assert!(w.wait_label().ends_with(" 1"));
+        let _ = w.update(Msg::Press);
+        assert!(w.wait_label().ends_with(" 3"));
+        let _ = w.update(Msg::GuardTick(previous, 1));
+        let _ = w.update(Msg::Armed(previous));
+        assert!(w.wait_label().ends_with(" 3"));
+        assert!(!w.armed);
+        let _ = w.update(Msg::Armed(w.holds));
+        assert_eq!(w.wait_label(), "");
     }
 
     /// A window a zone's program brought up takes nothing until the guard is
