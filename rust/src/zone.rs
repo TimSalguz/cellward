@@ -3863,7 +3863,27 @@ impl Transport {
             target_locked,
             hermetic: crate::hermetic::applied_in(&note, "hermetic") == Some(true),
         };
-        if let Some(refusal) = crate::switch::refusal(&facts) {
+        if let Some(mut refusal) = crate::switch::refusal(&facts) {
+            if refusal.code == "settings" {
+                let who = crate::instance::who_of(&self.id);
+                let target = wider
+                    .iter()
+                    .map(|key| {
+                        crate::hermetic::explain(&self.state.join(to), &self.config, to, &who, key)
+                    })
+                    .collect::<Vec<_>>();
+                let details = crate::hermetic::frozen_switch_details(&note, &target);
+                if !details.is_empty() {
+                    refusal.text.push_str(". Подробности: ");
+                    refusal.text.push_str(&details.join("; "));
+                }
+            }
+            if let Some(name) = &container {
+                refusal.text = refusal
+                    .text
+                    .replace("<контейнер>", name)
+                    .replace("<сеть>", to);
+            }
             println!(
                 "instance {}: no switch from {from} to {to} ({}): {}",
                 self.id, refusal.code, refusal.text

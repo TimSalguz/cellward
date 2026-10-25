@@ -1667,6 +1667,33 @@ pub fn switchable(
 /// journal — and the person is told what came of it. `None`: not such a
 /// launch ([`switchable`]), or the person chose the restart instead — the
 /// restart with a network chosen, as the ⇄ was until then.
+fn switch_settings_refusal_menu(
+    container: &str,
+    current: &str,
+    target: &str,
+    stderr: &str,
+) -> Option<crate::window::Menu> {
+    let reason = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("сеть не сменена (settings): "))?;
+    let mut notes = vec![format!(
+        "Контейнер «{container}» остаётся в сети «{current}». Переход в «{target}» не выполнен."
+    )];
+    if let Some((summary, details)) = reason.split_once(". Подробности: ") {
+        notes.push(summary.to_owned());
+        notes.extend(details.split("; ").map(str::to_owned));
+    } else {
+        notes.push(reason.to_owned());
+    }
+    notes.push("Повторная попытка без перезапуска не уберёт открытые каналы. Перезапуск требует отдельного подтверждения и закроет программы контейнера: сначала сохраните работу. Ограничения автоматически не снимаются.".into());
+    Some(crate::window::Menu {
+        title: format!("Сеть контейнера «{container}» не изменена"),
+        notes,
+        actions: vec![("keep".into(), "Оставить текущую сеть".into(), false)],
+        ..Default::default()
+    })
+}
+
 fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option<u8> {
     let (container, current) = switchable(launch, &crate::instance::running(&tools.state))?;
     let targets = switch_targets(&tools.state, &current);
@@ -1806,7 +1833,18 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
             Some(0)
         }
     } else {
-        notify(&format!("Сеть не сменена. {said}"));
+        if let Some(menu) = switch_settings_refusal_menu(
+            &container,
+            &current,
+            to,
+            &String::from_utf8_lossy(&out.stderr),
+        ) {
+            // Full diagnostics remain readable, rather than being truncated
+            // in an eight-second notification after a startup progress line.
+            let _ = ask_menu(tools, &menu);
+        } else {
+            notify(&format!("Сеть не сменена. {said}"));
+        }
         Some(1)
     }
 }
@@ -2081,6 +2119,32 @@ fn while_alive(target: &OwnedFd, mut dialog: Child) -> Option<Child> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn settings_refusal_keeps_the_old_network_and_never_offers_a_silent_bypass() {
+        let stderr = "поднимаю зону ch\nсеть не сменена (settings): нужны новые настройки. Подробности: nix_daemon: включено, требуется выключено (ограничение сети, Nix); audio_manager: нет достоверной записи\n";
+        let menu = super::switch_settings_refusal_menu("app-helium", "nl", "ch", stderr).unwrap();
+        assert!(menu.notes[0].contains("остаётся в сети «nl»"));
+        assert!(menu
+            .notes
+            .iter()
+            .any(|n| n.contains("nix_daemon") && n.contains("Nix")));
+        assert!(menu
+            .notes
+            .iter()
+            .any(|n| n.contains("audio_manager") && n.contains("нет достоверной записи")));
+        assert!(!menu.notes.iter().any(|n| n.contains("поднимаю")));
+        assert_eq!(
+            menu.actions,
+            [("keep".into(), "Оставить текущую сеть".into(), false)]
+        );
+        assert!(super::switch_settings_refusal_menu(
+            "app",
+            "nl",
+            "ch",
+            "сеть не сменена (locked): замок\n"
+        )
+        .is_none());
+    }
     use super::*;
 
     #[test]

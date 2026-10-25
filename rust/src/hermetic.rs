@@ -526,6 +526,55 @@ pub fn wider_than(note: &str, target: &[(&'static str, bool)]) -> Vec<&'static s
         .collect()
 }
 
+/// Explain only conflicts of frozen startup channels, not ordinary device
+/// permissions. A missing applied note is uncertainty, not proof a channel
+/// was enabled. Keep the same fail-closed predicate as wider_than.
+pub fn frozen_switch_details(note: &str, target: &[Explained]) -> Vec<String> {
+    target
+        .iter()
+        .filter_map(|e| {
+            let current = applied_in(note, e.key);
+            let safe = safe_value(e.key);
+            if e.value.0 != safe || current == Some(safe) {
+                return None;
+            }
+            let word = |v| {
+                if v {
+                    "включено"
+                } else {
+                    "выключено"
+                }
+            };
+            let current = current
+                .map(word)
+                .unwrap_or("нет достоверной записи старого запуска");
+            let owner = if e.tolerated.is_some_and(|(allowed, _)| !allowed) && e.asked.0 != safe {
+                "ограничение обходных каналов выбранной сети"
+            } else {
+                match e.asked.2 {
+                    Asker::Container => "настройка контейнера",
+                    Asker::Template => "общие настройки контейнеров",
+                    Asker::Network => "настройка сети",
+                    Asker::Nobody => "безопасный режим неизвестного контейнера",
+                }
+            };
+            let source = match e.value.1 {
+                Source::Nix => "Nix",
+                Source::Local => "локальная настройка",
+                Source::Default => "значение по умолчанию",
+            };
+            Some(format!(
+                "{}: текущий запуск — {}, при новом запуске — {} ({}, {})",
+                e.key,
+                current,
+                word(e.value.0),
+                owner,
+                source
+            ))
+        })
+        .collect()
+}
+
 /// Which settings of a running zone's own space differ now from those it
 /// came up with, by name. `None`: not known — no note (a zone a build from
 /// before it started). A setting the note does not name is not counted.
@@ -580,6 +629,36 @@ fn restart_needed_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frozen_switch_diagnostics_distinguish_unknown_notes_and_policy_sources() {
+        let target = Explained {
+            key: "nix_daemon",
+            asked: (true, Source::Local, Asker::Container),
+            tolerated: Some((false, Source::Nix)),
+            value: (false, Source::Nix),
+        };
+        let report = frozen_switch_details("nix_daemon=true\n", &[target]);
+        assert_eq!(report.len(), 1);
+        assert!(report[0].contains("nix_daemon: текущий запуск — включено"));
+        assert!(report[0].contains("ограничение обходных каналов выбранной сети, Nix"));
+        let missing = frozen_switch_details("", &[target]);
+        assert!(missing[0].contains("нет достоверной записи"));
+        assert!(frozen_switch_details("nix_daemon=false\n", &[target]).is_empty());
+        let same = Explained {
+            value: (true, Source::Local),
+            ..target
+        };
+        assert!(frozen_switch_details("nix_daemon=true\n", &[same]).is_empty());
+        let audio = Explained {
+            key: "audio_manager",
+            asked: (false, Source::Local, Asker::Container),
+            tolerated: None,
+            value: (false, Source::Local),
+        };
+        let report = frozen_switch_details("audio_manager=true\n", &[audio]);
+        assert!(report[0].contains("настройка контейнера, локальная настройка"));
+    }
 
     struct Dirs {
         base: std::path::PathBuf,

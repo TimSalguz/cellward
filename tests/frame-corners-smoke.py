@@ -32,6 +32,7 @@ def main():
         p.add_argument(f"--{tool}", required=True)
     p.add_argument("--hover-edge", type=int, default=2, choices=range(1, 13))
     p.add_argument("--resize-corner", type=int, default=16, choices=range(65))
+    p.add_argument("--menu", action="store_true", help="verify menu dismissal and app-level mouse delivery")
     args = p.parse_args()
     root = Path(tempfile.mkdtemp(prefix="cellward-corners-"))
     print(f"Artifacts: {root}", flush=True)
@@ -77,11 +78,16 @@ def main():
         for mode in ["always", "hover"]:
             for width in [1, 4]:
                 name = f"corners-{mode}-{width}"
+                mouse_log = root / f"{name}-mouse.bin"
+                child = ["sh", "-c", "printf 'Thin rounded frame\n'; sleep 120"]
+                if args.menu:
+                    reader = "import os,sys,tty; tty.setraw(0); os.write(1,b'\\x1b[?1000h\\x1b[?1006hMenu click witness\\r\\n'); f=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)\nwhile True:\n b=os.read(0,4096)\n if not b: break\n os.write(f,b)"
+                    child = [sys.executable, "-c", reader, str(mouse_log)]
                 terminal = start([str(Path(args.core).resolve()), "wl-sandbox", name, "--frame",
                                   f"ff00ff:{width}:{mode}:cellward:full:niri32:niri32:same:hover:3:one:maximize:{args.hover_edge}:{args.resize_corner}",
                                   "--frame-title", f"Network: test | Container: {name}", "--",
                                   args.foot, "--app-id", name, "--font", "DejaVu Sans Mono:size=14",
-                                  "sh", "-c", "printf 'Thin rounded frame\n'; sleep 120"], name)
+                                  *child], name)
                 def mapped():
                     raw = subprocess.check_output([args.niri, "msg", "-j", "windows"], env=env)
                     return any(w.get("app_id") == name for w in json.loads(raw))
@@ -112,6 +118,43 @@ def main():
                 pointer.write(f"move {(left + right) // 2} {top + width + args.hover_edge - 1}\n")
                 time.sleep(0.2)
                 safe = math.ceil(32 - math.sqrt(32 * 32 - (32 - width) ** 2))
+                if args.menu:
+                    def move_click(x, y):
+                        pointer.write(f"move {x} {y}\n")
+                        time.sleep(0.1)
+                        pointer.write("press\n")
+                        time.sleep(0.05)
+                        pointer.write("release\n")
+                        time.sleep(0.3)
+                    def reports():
+                        return mouse_log.read_bytes() if mouse_log.exists() else b""
+                    def menu_pixels():
+                        raw = subprocess.check_output([args.grim, "-t", "ppm", "-"], env=env).split(b"\n", 3)[3]
+                        return sum(raw[(y * sw + x) * 3:(y * sw + x) * 3 + 3] == bytes((255, 0, 255))
+                                   for y in range(top + width + 24, min(bottom - 40, top + 300), 2)
+                                   for x in range(left + 40, right - 40, 2))
+                    app_x, app_y = (left + right) // 2, bottom - 100
+                    move_click(app_x, app_y)
+                    wait_for(lambda: reports().count(b"\x1b[<") >= 2)
+                    baseline = reports()
+                    menu_x = right + 1 - safe - 84
+                    for outside, point in [("app", (app_x, app_y)), ("frame", (left + 100, top + width + 10))]:
+                        pointer.write(f"move {(left + right) // 2} {top + width}\n")
+                        time.sleep(0.2)
+                        move_click(menu_x, top + width + 10)
+                        wait_for(lambda: menu_pixels() > 1000)
+                        subprocess.run([args.grim, str(root / f"{name}-menu-{outside}.png")], env=env, check=True)
+                        assert reports() == baseline, "opening the menu clicked through"
+                        move_click(*point)
+                        wait_for(lambda: menu_pixels() < 100)
+                        assert reports() == baseline, f"dismissing over {outside} reached the app"
+                        subprocess.run([args.grim, str(root / f"{name}-dismissed-{outside}.png")], env=env, check=True)
+                        move_click(app_x, app_y)
+                        wait_for(lambda: reports().count(b"\x1b[<") >= baseline.count(b"\x1b[<") + 2)
+                        baseline = reports()
+                    print(f"{name}: menu dismisses without leaking clicks; next app click works", flush=True)
+                    pointer.write(f"move {(left + right) // 2} {top + width}\n")
+                    time.sleep(0.2)
                 x, y = right + 1 - safe - 2, top + width + 10
                 pointer.write(f"move {x} {y}\n")
                 time.sleep(0.3)
