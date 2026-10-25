@@ -33,6 +33,71 @@ use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+/// Pollable cancellation. Dropping the sole writer wakes every token with
+/// POLLHUP; cloning a token cannot accidentally keep cancellation disabled.
+pub struct Cancellation {
+    read: std::sync::Arc<OwnedFd>,
+    _write: OwnedFd,
+}
+
+#[derive(Clone)]
+pub struct CancelToken(std::sync::Arc<OwnedFd>);
+
+impl Cancellation {
+    pub fn new() -> io::Result<Self> {
+        let (read, write) = pipe_nonblocking()?;
+        Ok(Self {
+            read: std::sync::Arc::new(read),
+            _write: write,
+        })
+    }
+
+    pub fn token(&self) -> CancelToken {
+        CancelToken(self.read.clone())
+    }
+}
+
+impl CancelToken {
+    pub(crate) fn fd(&self) -> RawFd {
+        use std::os::fd::AsRawFd;
+        self.0.as_raw_fd()
+    }
+
+    pub fn cancelled(&self) -> bool {
+        let mut fd = libc::pollfd {
+            fd: self.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one live descriptor; no blocking and no consumption, so
+        // every clone observes cancellation independently.
+        loop {
+            let n = unsafe { libc::poll(&mut fd, 1, 0) };
+            if n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return n < 0 || fd.revents != 0;
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn all_tokens_wake_when_the_single_handle_is_dropped() {
+        let handle = Cancellation::new().unwrap();
+        let a = handle.token();
+        let b = a.clone();
+        assert!(!a.cancelled());
+        assert!(!b.cancelled());
+        drop(handle);
+        assert!(a.cancelled());
+        assert!(b.cancelled());
+    }
+}
+
 /// How many symlinks [`link_target`] follows before it gives up. The kernel's
 /// own limit is 40; a resolv.conf hidden behind more than a handful of links is
 /// a broken system, and any cap at all stops a symlink cycle from spinning here

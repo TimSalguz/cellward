@@ -285,6 +285,35 @@ pub fn question_on(
     answers: &[(&str, &str, bool)],
     deadline: Option<std::time::Duration>,
 ) -> Asked {
+    question_on_cancellable(
+        window,
+        display,
+        title,
+        text,
+        command,
+        answers,
+        (deadline, None),
+    )
+}
+
+/// As `question_on`, but cancellation ends and reaps only this owned window.
+/// Dropping an obsolete UI answer is not enough: its worker/window must end.
+pub(crate) fn question_on_cancellable(
+    window: &Path,
+    display: Option<&std::ffi::OsStr>,
+    title: &str,
+    text: &str,
+    command: Option<(&str, &[String])>,
+    answers: &[(&str, &str, bool)],
+    control: (
+        Option<std::time::Duration>,
+        Option<&crate::sys::CancelToken>,
+    ),
+) -> Asked {
+    let (deadline, cancel) = control;
+    if cancel.is_some_and(|c| c.cancelled()) {
+        return Asked::NoAnswer;
+    }
     let (program, command) = command.map_or((String::new(), Vec::new()), |(program, words)| {
         (program.to_owned(), words.to_vec())
     });
@@ -303,7 +332,56 @@ pub fn question_on(
     let Some(mut child) = spawn_menu_on(window, display, &menu) else {
         return Asked::NotShown;
     };
-    if let Some(deadline) = deadline {
+    if let Some(cancel) = cancel {
+        let started = std::time::Instant::now();
+        let pidfd = crate::sys::pidfd_open(child.id() as i32);
+        loop {
+            if cancel.cancelled() || deadline.is_some_and(|d| started.elapsed() >= d) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Asked::NoAnswer;
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {}
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Asked::NoAnswer;
+                }
+            }
+            use std::os::fd::AsRawFd;
+            let mut fds = [
+                libc::pollfd {
+                    fd: cancel.fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: pidfd.as_ref().map_or(-1, |f| f.as_raw_fd()),
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+            ];
+            // A short poll also covers kernels without pidfds; a finite
+            // deadline is checked above after EINTR or scheduler delays.
+            let ms = deadline
+                .map_or(crate::sys::LOOK_AGAIN, |d| {
+                    d.saturating_sub(started.elapsed())
+                        .min(crate::sys::LOOK_AGAIN)
+                })
+                .as_millis()
+                .max(1) as i32;
+            // SAFETY: initialized retained descriptors; no borrowed pointers.
+            if unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) } < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Asked::NoAnswer;
+            }
+        }
+    } else if let Some(deadline) = deadline {
         let ended = match crate::sys::pidfd_open(child.id() as i32) {
             Some(fd) => crate::sys::pidfd_wait(&fd, deadline),
             None => {
@@ -575,6 +653,50 @@ pub fn parse_reply(text: &str) -> Option<Reply> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancelling_a_question_kills_and_reaps_its_owned_window() {
+        let root = std::env::temp_dir().join(format!("vz-window-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let window = root.join("window");
+        let seen = root.join("pid");
+        crate::dialog::test_program(
+            &window,
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 20\n",
+                seen.display()
+            ),
+        );
+        let cancel = crate::sys::Cancellation::new().unwrap();
+        let token = cancel.token();
+        let worker = std::thread::spawn(move || {
+            super::question_on_cancellable(
+                &window,
+                None,
+                "network",
+                "test",
+                None,
+                &[("deny", "deny", false)],
+                (None, Some(&token)),
+            )
+        });
+        let started = std::time::Instant::now();
+        let pid = loop {
+            if let Some(pid) = std::fs::read_to_string(&seen)
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let pidfd = crate::sys::pidfd_open(pid).unwrap();
+        drop(cancel);
+        assert_eq!(worker.join().unwrap(), super::Asked::NoAnswer);
+        assert!(crate::sys::pidfd_wait(&pidfd, std::time::Duration::ZERO));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use super::*;
 
     #[test]

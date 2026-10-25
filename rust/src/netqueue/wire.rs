@@ -233,7 +233,7 @@ pub fn verdict(queue: u16, id: u32, allow: bool, sequence: u32) -> Vec<u8> {
 }
 
 #[cfg(test)]
-pub(super) fn fixture(queue: u16, id: u32, mark: u32) -> Vec<u8> {
+pub(crate) fn fixture(queue: u16, id: u32, mark: u32) -> Vec<u8> {
     let mut attrs = Vec::new();
     let mut header = id.to_be_bytes().to_vec();
     header.extend_from_slice(&[0x08, 0x00, 3]);

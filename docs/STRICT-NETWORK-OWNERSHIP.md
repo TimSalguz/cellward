@@ -87,6 +87,20 @@ information is display/logging data, not the identity.
   placement with no fallback to a shared epoch or denied group. Existing
   cgroups are refused rather than silently reusing identity. The legacy
   `place_launch` caller is unchanged until trusted registration is connected.
+- `netask::Asker<netqueue::Ticket>`: typed UI adapter using the actual packet
+  ticket, never reconstructing a verdict target from destination tuples.
+  Question/session allowances are scoped to queue session, network epoch,
+  policy revision and launch token. Two launches named `firefox` remain distinct.
+  At most eight strict question workers can exist, including cancelled workers
+  still exiting; packet/request retention has the queue's total/per-launch caps.
+  `cancel_all` invalidates replies **before** persistence, so an obsolete
+  "always" cannot rewrite a successor policy. It also wakes blocked panel
+  reads and kills/reaps its own separate question windows. Pollable cancellation
+  uses CLOEXEC pipes, not a polling timer that expires unanswered permissions.
+  Panel connections with a recorded generation validate kernel-pinned peer PID
+  and start time before sending the question. A reused numeric PID is refused.
+  The existing legacy relay uses `Asker<flows::Key>` and is not silently promoted
+  to strict mode by this change.
 
 None of these APIs makes UI-provided tokens/generations authoritative. They
 are trusted-controller building blocks. A `Decision` is preliminary until the
@@ -159,8 +173,13 @@ Compile and run sequentially beneath `tests/run-memory-guard.py`.
    application namespaces distinct from “without isolation”; do not apply an
    experimental policy to the host network namespace.
 4. Wire the tested collector lifecycle/ACK adapter and pre-exec barrier into
-   the live supervisor, with bounded UI integration. Per-launch packet quotas
-   are implemented, but do not substitute for bounded UI requests. Queue
+   the live supervisor and its typed UI adapter. Packet/request quotas and
+   cancellation are implemented; the integrating supervisor must cancel UI
+   requests before policy/epoch changes and consume only current tickets.
+   Before treating panels as strict answers, replace/audit the inner proxy's
+   existing wrapping 8-bit question sequence: a cancelled answer must never
+   alias a later request after sequence reuse. The ticket adapter does not
+   itself repair that separate transport. Queue
    configuration currently copies metadata only: destination display needs
    separately designed bounded header/conntrack metadata, not guessed tuple
    ownership or indiscriminate payload archiving. Tie approvals to token/session

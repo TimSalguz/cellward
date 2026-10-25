@@ -48,11 +48,30 @@ pub struct Ticket {
     revision: u64,
     packet: u32,
     nonce: u64,
+    token: Token,
+}
+
+/// Opaque permission scope: neither a tuple nor a numeric process ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Scope {
+    session: u128,
+    epoch: u64,
+    revision: u64,
+    token: Token,
 }
 
 impl Ticket {
     pub fn packet_id(self) -> u32 {
         self.packet
+    }
+
+    pub fn scope(self) -> Scope {
+        Scope {
+            session: self.session,
+            epoch: self.epoch,
+            revision: self.revision,
+            token: self.token,
+        }
     }
 }
 
@@ -216,6 +235,7 @@ impl Session {
                 revision: self.revision,
                 packet: packet.id(),
                 nonce: self.next_nonce,
+                token,
             },
             launch: Arc::clone(launch),
         };

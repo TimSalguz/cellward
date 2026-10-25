@@ -74,6 +74,21 @@ pub fn ask(
     labels: &[&str],
     timeout: Option<std::time::Duration>,
 ) -> OnWindow {
+    ask_checked(runtime, pid, None, text, labels, timeout, None)
+}
+
+/// A registered launch supplies its recorded process start time. Verify it
+/// against a kernel-pinned socket peer before sending anything to the panel;
+/// an archived PID alone must not select a reused process's window.
+pub(crate) fn ask_checked(
+    runtime: &Path,
+    pid: i32,
+    start: Option<u64>,
+    text: &str,
+    labels: &[&str],
+    timeout: Option<std::time::Duration>,
+    cancel: Option<&crate::sys::CancelToken>,
+) -> OnWindow {
     use std::io::{Read, Write};
     let elsewhere = OnWindow::Elsewhere(None);
     let Some(request) = crate::wl_proxy::ask_request(text, labels) else {
@@ -85,8 +100,28 @@ pub fn ask(
     if crate::sys::peer_pid(stream.as_raw_fd()) != Some(pid) {
         return elsewhere;
     }
-    if stream.set_read_timeout(timeout).is_err() || (&stream).write_all(&request).is_err() {
+    if let Some(start) = start {
+        let Some(peer) = crate::origin::Peer::of(stream.as_raw_fd()) else {
+            return elsewhere;
+        };
+        if peer.pid != pid || crate::sys::start_time(pid) != Some(start) || !peer.alive() {
+            return elsewhere;
+        }
+    }
+    if cancel.is_some_and(|c| c.cancelled()) {
+        return OnWindow::Unanswered;
+    }
+    if stream.set_read_timeout(timeout).is_err()
+        || (cancel.is_some()
+            && stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+                .is_err())
+        || (&stream).write_all(&request).is_err()
+    {
         return elsewhere;
+    }
+    if let Some(cancel) = cancel {
+        return cancellable_reply(&stream, timeout, cancel);
     }
     let mut reply = Vec::new();
     match (&stream)
@@ -103,6 +138,66 @@ pub fn ask(
             OnWindow::Unanswered
         }
         Err(_) => elsewhere,
+    }
+}
+
+fn cancellable_reply(
+    stream: &UnixStream,
+    timeout: Option<std::time::Duration>,
+    cancel: &crate::sys::CancelToken,
+) -> OnWindow {
+    use std::io::Read;
+    if stream.set_nonblocking(true).is_err() {
+        return OnWindow::Elsewhere(None);
+    }
+    let started = std::time::Instant::now();
+    let mut reply = Vec::new();
+    loop {
+        let left = timeout.map(|t| t.saturating_sub(started.elapsed()));
+        if left.is_some_and(|t| t.is_zero()) {
+            return OnWindow::Unanswered;
+        }
+        let mut fds = [
+            libc::pollfd {
+                fd: stream.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: cancel.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let ms = left.map_or(-1, |t| t.as_millis().max(1).min(i32::MAX as u128) as i32);
+        // SAFETY: two initialized descriptors, both retained for this call.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, ms) };
+        if n < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return OnWindow::Elsewhere(None);
+        }
+        if fds[1].revents != 0 || n == 0 {
+            return OnWindow::Unanswered;
+        }
+        let mut data = [0; MAX_DISPLAY + 2];
+        let mut input = stream;
+        match input.read(&mut data) {
+            Ok(0) => return reply_of(&reply),
+            Ok(n) => {
+                if reply.len() + n > MAX_DISPLAY + 1 {
+                    return OnWindow::Elsewhere(None);
+                }
+                reply.extend_from_slice(&data[..n]);
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(_) => return OnWindow::Elsewhere(None),
+        }
     }
 }
 
@@ -127,6 +222,52 @@ fn reply_of(reply: &[u8]) -> OnWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_interrupts_a_partial_panel_reply_without_waiting_for_eof() {
+        use std::io::Write;
+        let (client, mut panel) = UnixStream::pair().unwrap();
+        let cancel = crate::sys::Cancellation::new().unwrap();
+        let token = cancel.token();
+        let worker = std::thread::spawn(move || cancellable_reply(&client, None, &token));
+        panel.write_all(b"y").unwrap();
+        drop(cancel);
+        assert_eq!(worker.join().unwrap(), OnWindow::Unanswered);
+        // The peer deliberately stays open through the assertion.
+        drop(panel);
+    }
+
+    #[test]
+    fn a_reused_panel_pid_cannot_receive_a_registered_launchs_question() {
+        use std::io::Read;
+        let root = std::env::temp_dir().join(format!("vz-panel-generation-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pid = std::process::id() as i32;
+        let path = crate::wl_proxy::ask_path(&root, pid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            connection.read_to_end(&mut request).unwrap();
+            request
+        });
+        let wrong_start = crate::sys::start_time(pid).unwrap() + 1;
+        assert_eq!(
+            ask_checked(
+                &root,
+                pid,
+                Some(wrong_start),
+                "private question",
+                &["no", "yes"],
+                None,
+                None
+            ),
+            OnWindow::Elsewhere(None)
+        );
+        assert!(worker.join().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// The supervisor's word: "no" is the answer; anything else, and a
     /// word it never said, asks in the launch window — on its compositor

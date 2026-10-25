@@ -65,6 +65,13 @@ const PANEL: [&str; 3] = [
 ];
 const PANEL_TEMP: [&str; 2] = ["Запретить всю сеть", "Разрешить, пока работает"];
 const PANEL_UNKNOWN: [&str; 2] = ["Запретить это соединение", "Разрешить это соединение"];
+const PANEL_REGISTERED: [&str; 3] = [
+    "Запретить всю сеть программе",
+    "Разрешить этому запуску",
+    "Разрешить всегда…",
+];
+const PANEL_REGISTERED_TEMP: [&str; 2] =
+    ["Запретить всю сеть программе", "Разрешить этому запуску"];
 
 /// What the person said.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +88,8 @@ pub enum Answer {
 
 /// A program as the keeper found it: its launch's key, or none.
 pub type Program = Option<String>;
+type Panel = (i32, Option<u64>);
+type First = (String, Option<Panel>, Option<String>);
 
 /// An unknown owner has no stable program identity. In particular, `None`
 /// must not be one shared authorization bucket for all unknown traffic.
@@ -88,19 +97,20 @@ pub type Program = Option<String>;
 enum QuestionId {
     Known(String),
     Unknown(Key),
+    Registered(String, crate::netqueue::Scope),
 }
 
 impl QuestionId {
     fn program(&self) -> Option<&str> {
         match self {
-            Self::Known(program) => Some(program),
+            Self::Known(program) | Self::Registered(program, _) => Some(program),
             Self::Unknown(_) => None,
         }
     }
 }
 
 /// The instance's asking.
-pub struct Asker {
+pub struct Asker<T = Key> {
     window: PathBuf,
     config: PathBuf,
     state: PathBuf,
@@ -112,23 +122,40 @@ pub struct Asker {
     record: Option<String>,
     /// Its container as a person reads it.
     shown: String,
-    tx: mpsc::Sender<(QuestionId, Answer)>,
-    rx: mpsc::Receiver<(QuestionId, Answer)>,
+    tx: mpsc::Sender<(u64, QuestionId, Answer)>,
+    rx: mpsc::Receiver<(u64, QuestionId, Answer)>,
     /// The threads' word on an answer (read end, write end).
     wake: (OwnedFd, Arc<OwnedFd>),
     /// The flows waiting for their program's answer.
-    waiting: HashMap<QuestionId, Vec<Key>>,
+    waiting: HashMap<QuestionId, Vec<T>>,
     /// Where each program's first waiting flow goes, for its question, and
     /// the launch it came from.
-    first: HashMap<QuestionId, (String, Option<i32>, Option<String>)>,
+    first: HashMap<QuestionId, First>,
     /// The answers for the instance's life.
     session: HashMap<QuestionId, Verdict>,
     /// The programs asked about now, and those to be asked next.
     open: HashSet<QuestionId>,
     queue: VecDeque<QuestionId>,
+    round: u64,
+    closed: bool,
+    cancellation: Option<crate::sys::Cancellation>,
+    workers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl Asker {
+struct Worker {
+    count: Arc<std::sync::atomic::AtomicUsize>,
+    wake: Arc<OwnedFd>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: nonblocking wake pipe, retained until this worker exits.
+        unsafe { libc::write(self.wake.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
+    }
+}
+
+impl<T: Copy + Eq> Asker<T> {
     pub fn new(
         window: &Path,
         config: &Path,
@@ -158,6 +185,10 @@ impl Asker {
             session: HashMap::new(),
             open: HashSet::new(),
             queue: VecDeque::new(),
+            round: 0,
+            closed: false,
+            cancellation: Some(crate::sys::Cancellation::new()?),
+            workers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -174,22 +205,24 @@ impl Asker {
     /// — what the question says of a flow whose launch was not
     /// (`crate::owners`): it is asked about as its container's, by what is
     /// known, never as some program's.
-    pub fn ask(
+    fn ask_question(
         &mut self,
-        program: Program,
-        launch: Option<i32>,
+        question: QuestionId,
+        launch: Option<(i32, Option<u64>)>,
         process: Option<String>,
-        key: Key,
+        key: T,
         to: String,
     ) -> Option<Verdict> {
-        let question = match program {
-            Some(program) => QuestionId::Known(program),
-            None => QuestionId::Unknown(key),
-        };
+        if self.closed {
+            return Some(Verdict::Deny);
+        }
         if let Some(verdict) = self.session.get(&question) {
             return Some(*verdict);
         }
         let waiting = self.waiting.entry(question.clone()).or_default();
+        if waiting.contains(&key) {
+            return None;
+        }
         waiting.push(key);
         if waiting.len() == 1 {
             self.first.insert(question.clone(), (to, launch, process));
@@ -217,6 +250,15 @@ impl Asker {
                 self.queue.push_back(program);
                 continue;
             }
+            // The strict packet queue is bounded; its UI must be too. A
+            // launch token gets one question, not one thread per packet.
+            if matches!(program, QuestionId::Registered(..))
+                && (self.open.len() >= 8
+                    || self.workers.load(std::sync::atomic::Ordering::SeqCst) >= 8)
+            {
+                self.queue.push_back(program);
+                continue;
+            }
             if !self.open.contains(&program) {
                 self.start(program);
             }
@@ -237,7 +279,7 @@ impl Asker {
         // "Always" is a rule: a record and a program to write it for.
         let always = self.record.is_some() && question.program().is_some();
         let (window, shown) = (self.window.clone(), self.shown.clone());
-        let at = launch.map(|pid| (self.runtime.clone(), pid));
+        let at = launch.map(|(pid, start)| (self.runtime.clone(), pid, start));
         // No time to answer in (the owner, 2026-10-15): the flows are held
         // until the person says, and a question open on the program's window
         // waits there. It ends with its program or the instance.
@@ -245,25 +287,36 @@ impl Asker {
         let (tx, wake) = (self.tx.clone(), self.wake.1.clone());
         let question_of_failed = question.clone();
         let known = question.program().is_some();
+        let registered = matches!(question, QuestionId::Registered(..));
+        let round = self.round;
+        let cancel = self.cancellation.as_ref().map(|cancel| cancel.token());
+        self.workers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let worker = Worker {
+            count: self.workers.clone(),
+            wake: wake.clone(),
+        };
         let spawned = std::thread::Builder::new()
             .name("net-question".to_owned())
             .spawn(move || {
+                let _worker = worker;
                 let asked = Asked {
                     label: &label,
                     shown: &shown,
                     to: &to,
                     always,
                     known,
+                    registered,
                 };
-                let answer = self::question(&window, at, timeout, &asked);
-                let _ = tx.send((question, answer));
+                let answer = self::question(&window, at, timeout, &asked, cancel.as_ref());
+                let _ = tx.send((round, question, answer));
                 // SAFETY: one byte from a live buffer; the pipe is
                 // non-blocking, and a full one already wakes the keeper.
                 unsafe { libc::write(wake.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
             });
         if spawned.is_err() {
             // Nothing to ask in: closed.
-            let _ = self.tx.send((question_of_failed, Answer::Closed));
+            let _ = self.tx.send((round, question_of_failed, Answer::Closed));
             // SAFETY: as in the thread.
             unsafe { libc::write(self.wake.1.as_raw_fd(), [1u8].as_ptr().cast(), 1) };
         }
@@ -272,14 +325,20 @@ impl Asker {
     /// The answers that came: each written where it is kept — a rule in the
     /// record, or the instance's life — and the verdicts of the flows that
     /// waited for them, to be decided; the next question opened.
-    pub fn answered(&mut self) -> Vec<(Key, Verdict)> {
+    pub fn answered(&mut self) -> Vec<(T, Verdict)> {
         let mut buf = [0u8; 64];
         // SAFETY: read(2) into a buffer of the length passed; non-blocking.
         while unsafe { libc::read(self.wake.0.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0
         {
         }
         let mut decided = Vec::new();
-        while let Ok((question, answer)) = self.rx.try_recv() {
+        while let Ok((round, question, answer)) = self.rx.try_recv() {
+            // Cancellation must precede ANY persistence, not only a later
+            // queue verdict. Otherwise an obsolete "always" can rewrite a
+            // new policy even though its packet ticket is correctly rejected.
+            if round != self.round || !self.waiting.contains_key(&question) {
+                continue;
+            }
             // The question may have been open while the person or Nix
             // tightened the policy. A stale allowing answer must neither
             // release held traffic nor overwrite that newer refusal.
@@ -329,6 +388,80 @@ impl Asker {
     }
 }
 
+impl Asker<Key> {
+    pub fn ask(
+        &mut self,
+        program: Program,
+        launch: Option<i32>,
+        process: Option<String>,
+        key: Key,
+        to: String,
+    ) -> Option<Verdict> {
+        let question = match program {
+            Some(program) => QuestionId::Known(program),
+            None => QuestionId::Unknown(key),
+        };
+        self.ask_question(question, launch.map(|pid| (pid, None)), process, key, to)
+    }
+}
+
+impl Asker<crate::netqueue::Ticket> {
+    /// The destination is display data only. Authorization is returned for
+    /// the original ticket, never reconstructed from an address/port tuple.
+    pub fn ask_held(
+        &mut self,
+        held: &crate::netqueue::Held,
+        launch: Option<(i32, u64)>,
+        to: String,
+    ) -> Option<Verdict> {
+        let question = QuestionId::Registered(held.launch.program.clone(), held.ticket.scope());
+        let already_waiting = self
+            .waiting
+            .get(&question)
+            .is_some_and(|v| v.contains(&held.ticket));
+        if !already_waiting
+            && !self.session.contains_key(&question)
+            && (self.waiting.values().map(Vec::len).sum::<usize>() >= crate::netqueue::MAX_PENDING
+                || self
+                    .waiting
+                    .get(&question)
+                    .is_some_and(|v| v.len() >= crate::netqueue::MAX_PENDING_PER_LAUNCH))
+        {
+            return Some(Verdict::Deny);
+        }
+        self.ask_question(
+            question,
+            launch.map(|(pid, start)| (pid, Some(start))),
+            None,
+            held.ticket,
+            to,
+        )
+    }
+
+    /// Before changing policy/epoch or replacing the bound queue. Late UI
+    /// responses cannot persist rules or authorize a successor question.
+    pub fn cancel_all(&mut self) {
+        // Wake both panel waits and standalone windows. Merely discarding
+        // their eventual answers would leave unbounded obsolete UI workers.
+        drop(self.cancellation.take());
+        self.waiting.clear();
+        self.first.clear();
+        self.session.clear();
+        self.open.clear();
+        self.queue.clear();
+        match self.round.checked_add(1) {
+            Some(round) => self.round = round,
+            None => self.closed = true,
+        }
+        if !self.closed {
+            match crate::sys::Cancellation::new() {
+                Ok(cancel) => self.cancellation = Some(cancel),
+                Err(_) => self.closed = true,
+            }
+        }
+    }
+}
+
 /// A program's label, as its launcher entry has it, else its key.
 fn label_of(state: &Path, key: &str) -> String {
     std::fs::read_to_string(state.join(".labels").join(key))
@@ -370,6 +503,7 @@ struct Asked<'a> {
     to: &'a str,
     always: bool,
     known: bool,
+    registered: bool,
 }
 
 /// The question itself: on the program's window when its launch (`at`: the
@@ -379,16 +513,21 @@ struct Asked<'a> {
 /// [`Answer::Closed`].
 fn question(
     window: &Path,
-    at: Option<(PathBuf, i32)>,
+    at: Option<(PathBuf, i32, Option<u64>)>,
     timeout: Option<std::time::Duration>,
     asked: &Asked,
+    cancel: Option<&crate::sys::CancelToken>,
 ) -> Answer {
+    if cancel.is_some_and(|c| c.cancelled()) {
+        return Answer::Closed;
+    }
     let Asked {
         label,
         shown,
         to,
         always,
         known,
+        registered,
     } = *asked;
     let title = format!("Сеть — {label}");
     // A flow of no launch found: by its container, and said so.
@@ -397,7 +536,9 @@ fn question(
     } else {
         format!("{shown}, программа не определена")
     };
-    let scope = if known {
+    let scope = if registered {
+        "Решение касается всей сети, не только этого сайта. «Пока работает» — только этот запуск в текущей сети; постоянное правило — программа в этом контейнере. Пока вы не ответили, сети нет."
+    } else if known {
         "Решение касается всей сети программы, не только этого сайта. Пока вы не ответили, сети нет."
     } else {
         "Приложение определить не удалось: разрешение будет только для этого соединения. Пока вы не ответили, сети нет."
@@ -405,26 +546,35 @@ fn question(
     let text = format!("{label} ({whose}) хочет в сеть: {to}.\n{scope}");
     let started = std::time::Instant::now();
     let mut display = None;
-    if let Some((runtime, pid)) = at {
+    if let Some((runtime, pid, start)) = at {
         // Programs such as browsers open their first connection while their
         // first Wayland window is still being mapped. "No window" at that
         // instant is not a reason to detach the question into a separate
         // launch window: give the program window a brief chance to appear.
         let appear_until = started + std::time::Duration::from_secs(5);
         loop {
+            if cancel.is_some_and(|c| c.cancelled()) {
+                return Answer::Closed;
+            }
             let left = timeout.map(|t| t.saturating_sub(started.elapsed()));
-            match crate::onwindow::ask(
+            match crate::onwindow::ask_checked(
                 &runtime,
                 pid,
+                start,
                 &text,
                 if !known {
                     &PANEL_UNKNOWN
+                } else if registered && always {
+                    &PANEL_REGISTERED
+                } else if registered {
+                    &PANEL_REGISTERED_TEMP
                 } else if always {
                     &PANEL
                 } else {
                     &PANEL_TEMP
                 },
                 left,
+                cancel,
             ) {
                 OnWindow::No => return Answer::Deny,
                 OnWindow::Yes => return Answer::Now,
@@ -459,7 +609,9 @@ fn question(
         ),
         (
             "now",
-            if known {
+            if registered {
+                "Разрешить этому запуску, пока работает"
+            } else if known {
                 "Разрешить, пока работает"
             } else {
                 "Разрешить это соединение"
@@ -470,14 +622,17 @@ fn question(
     if always {
         answers.push(("always", "Разрешить всю сеть программе всегда", false));
     }
-    let asked = crate::window::question_on(
+    if cancel.is_some_and(|c| c.cancelled()) {
+        return Answer::Closed;
+    }
+    let asked = crate::window::question_on_cancellable(
         window,
         display.as_deref(),
         &title,
         &text,
         None,
         &answers,
-        timeout,
+        (timeout, cancel),
     );
     match asked {
         crate::window::Asked::Chose(tag) => match tag.as_str() {
@@ -492,6 +647,146 @@ fn question(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strict_held(
+        s: &mut crate::netqueue::Session,
+        token: crate::netqueue::Token,
+        id: u32,
+    ) -> crate::netqueue::Held {
+        let messages = crate::netqueue::wire::parse(
+            &crate::netqueue::wire::fixture(7, id, token.mark()),
+            0,
+            false,
+        )
+        .unwrap();
+        let crate::netqueue::wire::Message::Packet(packet) = &messages[0] else {
+            panic!()
+        };
+        s.hold(123, packet).unwrap()
+    }
+
+    fn strict_question(held: &crate::netqueue::Held) -> QuestionId {
+        QuestionId::Registered(held.launch.program.clone(), held.ticket.scope())
+    }
+
+    #[test]
+    fn strict_questions_keep_same_named_launches_and_packet_tickets_separate() {
+        let root = std::env::temp_dir().join(format!("vz-netask-strict-{}", std::process::id()));
+        let mut asker =
+            Asker::<crate::netqueue::Ticket>::new(Path::new(""), &root, &root, &root, None)
+                .unwrap();
+        let mut session = crate::netqueue::Session::new(123, 7, 1, 1).unwrap();
+        let a = session.register("firefox".into(), 10).unwrap();
+        let b = session.register("firefox".into(), 11).unwrap();
+        session.activate(123, a).unwrap();
+        session.activate(123, b).unwrap();
+        let first = strict_held(&mut session, a, 1);
+        let second = strict_held(&mut session, b, 2);
+        let question_a = strict_question(&first);
+        let question_b = strict_question(&second);
+        assert_ne!(question_a, question_b);
+        asker.open.extend([question_a.clone(), question_b.clone()]);
+        assert_eq!(
+            asker.ask_held(&first, None, "same-address:443".into()),
+            None
+        );
+        assert_eq!(
+            asker.ask_held(&first, None, "same-address:443".into()),
+            None
+        );
+        assert_eq!(
+            asker.ask_held(&second, None, "same-address:443".into()),
+            None
+        );
+        assert_eq!(asker.waiting[&question_a].len(), 1);
+        asker.tx.send((0, question_a, Answer::Now)).unwrap();
+        assert_eq!(asker.answered(), [(first.ticket, Verdict::Allow)]);
+        assert!(asker.waiting.contains_key(&question_b));
+        assert!(asker.session.get(&question_b).is_none());
+        session.decide(first.ticket, true).unwrap();
+        assert!(session.decide(second.ticket, false).is_ok());
+    }
+
+    #[test]
+    fn cancelled_strict_answer_cannot_persist_or_consume_a_new_question() {
+        let root = std::env::temp_dir().join(format!("vz-netask-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut asker = Asker::<crate::netqueue::Ticket>::new(
+            Path::new(""),
+            &root,
+            &root,
+            &root,
+            Some("work".into()),
+        )
+        .unwrap();
+        let file = crate::container::policy_dir_in(&root, "work").join(crate::container::FILE);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "net_default = ask\n").unwrap();
+        let mut session = crate::netqueue::Session::new(123, 7, 1, 1).unwrap();
+        let token = session.register("helium".into(), 10).unwrap();
+        session.activate(123, token).unwrap();
+        let held = strict_held(&mut session, token, 1);
+        let question = strict_question(&held);
+        asker.open.insert(question.clone());
+        asker.ask_held(&held, None, "one:443".into());
+        asker.cancel_all();
+        // Even if the exact scope is requested again, the old worker's reply
+        // cannot be mistaken for the new invocation's answer.
+        asker.open.insert(question.clone());
+        asker.ask_held(&held, None, "two:443".into());
+        asker
+            .tx
+            .send((0, question.clone(), Answer::Always))
+            .unwrap();
+        assert!(asker.answered().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "net_default = ask\n"
+        );
+        assert!(asker.waiting.contains_key(&question));
+        asker.tx.send((1, question, Answer::Now)).unwrap();
+        assert_eq!(asker.answered(), [(held.ticket, Verdict::Allow)]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn strict_question_round_exhaustion_closes_instead_of_reusing_callbacks() {
+        let root = Path::new("");
+        let mut asker =
+            Asker::<crate::netqueue::Ticket>::new(root, root, root, root, None).unwrap();
+        asker.round = u64::MAX;
+        asker.cancel_all();
+        let mut session = crate::netqueue::Session::new(123, 7, 1, 1).unwrap();
+        let token = session.register("helium".into(), 10).unwrap();
+        session.activate(123, token).unwrap();
+        let held = strict_held(&mut session, token, 1);
+        assert_eq!(
+            asker.ask_held(&held, None, "x:443".into()),
+            Some(Verdict::Deny)
+        );
+        assert!(asker.waiting.is_empty());
+    }
+
+    #[test]
+    fn strict_worker_limit_includes_cancelled_workers_until_they_exit() {
+        let root = Path::new("");
+        let mut asker =
+            Asker::<crate::netqueue::Ticket>::new(root, root, root, root, None).unwrap();
+        let mut session = crate::netqueue::Session::new(123, 7, 1, 1).unwrap();
+        let token = session.register("helium".into(), 10).unwrap();
+        session.activate(123, token).unwrap();
+        let held = strict_held(&mut session, token, 1);
+        // Previous workers have received cancellation, but have not exited
+        // their poll/child-reaping path. No new batch may exceed the cap.
+        asker.workers.store(8, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..20 {
+            assert_eq!(asker.ask_held(&held, None, "x:443".into()), None);
+            assert!(asker.open.is_empty());
+            assert_eq!(asker.queue.len(), 1);
+            asker.cancel_all();
+            assert_eq!(asker.workers.load(std::sync::atomic::Ordering::SeqCst), 8);
+        }
+    }
 
     #[test]
     fn a_new_denial_wins_over_an_open_questions_allowing_answer() {
@@ -513,7 +808,7 @@ mod tests {
                     crate::container::policy_dir_in(&config, "work").join(crate::container::FILE);
                 std::fs::create_dir_all(file.parent().unwrap()).unwrap();
                 std::fs::write(&file, rule).unwrap();
-                asker.tx.send((program.clone(), answer)).unwrap();
+                asker.tx.send((0, program.clone(), answer)).unwrap();
                 assert_eq!(
                     asker.answered(),
                     [(key(1), Verdict::Deny), (key(2), Verdict::Deny)]
@@ -544,7 +839,7 @@ mod tests {
         asker.open.extend([first.clone(), other.clone()]);
         asker.waiting.insert(first.clone(), vec![key(1)]);
         asker.waiting.insert(other.clone(), vec![key(2)]);
-        asker.tx.send((first, Answer::Now)).unwrap();
+        asker.tx.send((0, first, Answer::Now)).unwrap();
         assert_eq!(asker.answered(), vec![(key(1), Verdict::Allow)]);
         assert!(asker.waiting.contains_key(&other));
         assert!(asker.session.is_empty());
@@ -575,7 +870,7 @@ mod tests {
         let id = QuestionId::Known("helium".into());
         asker.open.insert(id.clone());
         asker.waiting.insert(id.clone(), vec![key(1)]);
-        asker.tx.send((id, Answer::Always)).unwrap();
+        asker.tx.send((0, id, Answer::Always)).unwrap();
         assert_eq!(asker.answered(), vec![(key(1), Verdict::Deny)]);
         assert!(asker.session.is_empty());
         std::fs::remove_file(root).unwrap();
