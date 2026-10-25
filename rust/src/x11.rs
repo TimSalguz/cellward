@@ -197,6 +197,7 @@ pub fn run(args: Args) -> u8 {
     let mut satellite = Command::new(&args.xwayland);
     satellite
         .arg(&display)
+        .env("CELLWARD_X11_CLIPBOARD_FALLBACK", "1")
         .arg("-listenfd")
         .arg(fd.to_string())
         .stdout(Stdio::null())

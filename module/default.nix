@@ -180,6 +180,11 @@ let
   vpn-zone-window = pkgs.callPackage ../window/package.nix { };
   # История буфера обмена (../clip/package.nix): своя, как окно.
   cellward-clip = pkgs.callPackage ../clip/package.nix { };
+  # Only Cellward's private X servers get the opt-in, launch-local fallback.
+  # The host's Satellite package and normal focused X11 copies are unchanged.
+  cellward-xwayland = pkgs.xwayland-satellite.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./patches/xwayland-satellite-local-clipboard.patch ];
+  });
 
   # Чем открываются ссылки программ зоны и песочницы (LEAK-MODEL §2): xdg-open,
   # но без запасного браузера. Для схемы без обработчика xdg-open берёт
@@ -299,7 +304,7 @@ let
       # ровно как юнит передаёт держателю зоны --ip/--pasta.
       bwrap = "${pkgs.bubblewrap}/bin/bwrap";
       dbus-proxy = "${dbusProxy}/bin/xdg-dbus-proxy";
-      xwayland = "${pkgs.xwayland-satellite}/bin/xwayland-satellite";
+      xwayland = "${cellward-xwayland}/bin/xwayland-satellite";
       # Доверенные сертификаты контейнеров (docs/CERTIFICATES.ru.md): openssl
       # разбирает сертификат при `cellward trust add`, certutil ставит его в
       # базы NSS контейнера из `profile-run`.

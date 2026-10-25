@@ -76,10 +76,29 @@ Both shared-launch cases passed with the installed Alacritty on the private
 headless display, with software rendering and no user desktop clipboard access.
 
 This fixes the reproduced Wayland-terminal -> X11-CLI **paste** scenario in
-one launch. It does not implement the reverse direction for a windowless
-X11 copier, PRIMARY synchronization, independent active storage across
-launches, or host CopyQ exclusion. An unconfined host launch does not use
-this proxy and is unchanged.
+one launch. The reverse direction for a windowless X11 copier is now also
+implemented and covered below. PRIMARY synchronization, independent active
+storage across launches, and global host CopyQ exclusion remain unfinished.
+An unconfined host launch does not use this proxy and is unchanged.
+
+## Windowless reverse copy
+
+The private Satellite package receives an opt-in patch, not the host's
+Satellite. When it has never received a keyboard serial, CLIPBOARD copies
+use serial zero as a launch-local request. The proxy consumes that request
+without forwarding it to the host compositor, announces the local source
+only to its own readers, and invalidates local offers on source cancellation
+or destruction. Existing focused copies and PRIMARY are unchanged.
+
+`tests/clipboard-reverse-smoke.py` passed on private headless sway, framed
+and unframed: three changed text/valid-PNG copies, a late Wayland reader,
+selection clearing, active X11 owner exit, and recovery to a foreign offer
+which still requires a paste gesture. No X11 window is ever mapped or
+focused. A separate launch and a trusted observer of the private compositor
+never receive the private payload. Peak sampled RSS was 375/378 MiB.
+The forward windowless-paste regression also passed with the patched
+Satellite. These are synthetic Xlib/Wayland helpers, not a trace of the
+actual Codex backend or a full NixOS VM test.
 
 ## Full private broker: remaining integration
 

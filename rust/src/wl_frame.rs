@@ -6374,7 +6374,7 @@ pub(crate) fn watch_clipboard(id: &Rc<dyn Object>, unframed: bool) {
 impl WlDataDeviceManagerHandler for DataDeviceManager {
     fn handle_create_data_source(&mut self, slf: &Rc<WlDataDeviceManager>, id: &Rc<WlDataSource>) {
         slf.send_create_data_source(id);
-        id.set_handler(Source);
+        id.set_handler(Source::default());
         // What this program copies says whose it is (`clip`).
         if let Some(mark) = crate::clip::mark() {
             id.send_offer(&mark);
@@ -6402,6 +6402,21 @@ struct DataDevice {
 }
 
 impl WlDataDeviceHandler for DataDevice {
+    fn handle_set_selection(
+        &mut self,
+        slf: &Rc<WlDataDevice>,
+        source: Option<&Rc<WlDataSource>>,
+        serial: u32,
+    ) {
+        // Reserve zero on this private connection for launch-local copies.
+        // Satellite's fallback must never export them to the compositor.
+        if serial == 0 {
+            clipboard_relay::set_local(slf, source);
+        } else {
+            slf.send_set_selection(source, serial);
+        }
+    }
+
     fn handle_enter(
         &mut self,
         slf: &Rc<WlDataDevice>,
@@ -6461,13 +6476,40 @@ impl WlDataDeviceHandler for DataDevice {
 
 /// What the program copies (`wl_data_source`): a mark of ours it cannot
 /// say itself, and never asked of it.
-struct Source;
+struct Source {
+    types: Vec<String>,
+    relay_overflow: bool,
+    alive: Rc<Cell<bool>>,
+}
+
+impl Default for Source {
+    fn default() -> Self {
+        Self {
+            types: Vec::new(),
+            relay_overflow: false,
+            alive: Rc::new(Cell::new(true)),
+        }
+    }
+}
 
 impl WlDataSourceHandler for Source {
+    fn handle_cancelled(&mut self, slf: &Rc<WlDataSource>) {
+        self.alive.set(false);
+        clipboard_relay::source_destroyed(slf);
+        slf.send_cancelled();
+    }
+
     fn handle_offer(&mut self, slf: &Rc<WlDataSource>, mime_type: &str) {
         if !crate::clip::is_mark(mime_type) {
+            clipboard_relay::keep_type(&mut self.types, &mut self.relay_overflow, mime_type);
             slf.send_offer(mime_type);
         }
+    }
+
+    fn handle_destroy(&mut self, slf: &Rc<WlDataSource>) {
+        self.alive.set(false);
+        clipboard_relay::source_destroyed(slf);
+        slf.send_destroy();
     }
 
     fn handle_send(&mut self, slf: &Rc<WlDataSource>, mime_type: &str, fd: &Rc<OwnedFd>) {

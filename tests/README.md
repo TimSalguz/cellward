@@ -333,3 +333,41 @@ nix-prefetch-url --unpack https://github.com/NixOS/nixpkgs/archive/<rev>.tar.gz
 # то же для home-manager (ветка release-XX.YY), затем вписать rev+sha256
 # в tests/pins.nix и поправить home.stateVersion в harness.nix и vm.nix.
 ```
+
+## Resource-limited local checks
+
+Run local compilation/tests on the **host** with
+`python3 tests/run-limited.py -- cargo test --offline -j 1 …`.
+This requires the host's user systemd bus. The transient service caps the
+whole process tree at 1 GiB RAM, no swap, one CPU worth of time, 64 tasks,
+and 15 minutes; Cargo and Rust tests default to one job/thread. Failure to
+create that service is an error, not permission to run without limits.
+`--print-command` only prints the invocation. Unit coverage (no service or
+build starts): `python3 tests/test-run-limited.py`.
+
+Do **not** use this to run Nix builds or acquire dependencies: work performed
+by the host Nix daemon is outside the service's cgroup and therefore outside
+these limits. These are maximums, not a guarantee that every build will fit;
+an OOM or timeout is a failed check, not a reason to silently increase limits.
+
+When that user bus is unavailable, `run-memory-guard.py` is a separate,
+explicit alternative for trusted offline compilation only. It applies
+per-process kernel address/data limits and one-CPU affinity, samples the
+private build process group's RSS every 5 ms, and kills it on exceeding its
+budget, a 10-minute timeout, or host MemAvailable below 3 GiB. The default
+RSS budget is 1536 MiB; `--budget-mib` allows at most 5120 MiB, only when
+explicitly agreed. This is **not** an aggregate kernel limit: brief RSS
+overshoot is possible, swap is not disabled, external Nix-daemon work and
+children escaping the process group are not covered. Do not use it for VM
+or smoke tests that create other process groups. Check it with
+`python3 tests/test-memory-guard.py`.
+
+`clipboard-reverse-smoke.py` deliberately keeps its children in one process
+group and can run under that guard. It needs the core, patched Satellite,
+sway/swaymsg, foot, wl-copy, libX11 and libxkbcommon paths as command-line
+arguments; add `--unframed` for the second case. Its compositor, runtime,
+HOME and clipboard are private, all payloads synthetic. The trusted observer
+uses data-control only on that private compositor; confined readers use the
+ordinary wl_data_device protocol. No data-control access is added to zones.
+The forward `clipboard-bridge-smoke.py` needs `--single-process-group` when
+run under this guard; `--relay --only-shared` selects the shared-launch cases.

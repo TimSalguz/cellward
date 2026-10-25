@@ -104,6 +104,7 @@ def main():
     p.add_argument("--relay", action="store_true", help="also verify a terminal and Satellite within one launch")
     p.add_argument("--only-shared", action="store_true", help="run only same-launch regression cases")
     p.add_argument("--alacritty", help="use Alacritty instead of foot for the native terminal")
+    p.add_argument("--single-process-group", action="store_true", help="keep children in the external memory guard's process group")
     args = p.parse_args()
     spec = importlib.util.spec_from_file_location("typing_smoke", Path(__file__).with_name("typing-smoke.py"))
     helper = importlib.util.module_from_spec(spec)
@@ -122,12 +123,20 @@ def main():
     def start(cmd, name, payload=None):
         log = open(root / (name + ".log"), "wb")
         logs.append(log)
-        proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=log, stdin=subprocess.PIPE if payload is not None else None, start_new_session=True)
+        proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=log, stdin=subprocess.PIPE if payload is not None else None, start_new_session=not args.single_process_group)
+        if args.single_process_group:
+            assert os.getpgid(proc.pid) == os.getpgrp()
         processes.append(proc)
         if payload is not None:
             proc.stdin.write(payload)
             proc.stdin.close()
         return proc
+
+    def stop(proc, sig=signal.SIGTERM):
+        if args.single_process_group:
+            proc.send_signal(sig)
+        else:
+            os.killpg(proc.pid, sig)
 
     def focused(app_id):
         tree = json.loads(subprocess.check_output([args.swaymsg, "-t", "get_tree"], env=env))
@@ -233,14 +242,14 @@ def main():
                 time.sleep(.5)
                 assert json.loads(body_path.read_text())["bytes"] == 0, "another launch's gesture authorized this X11 bridge"
                 print(f"{mode}: another launch's paste does not authorize X11 reads", flush=True)
-                os.killpg(other.pid, signal.SIGTERM)
+                stop(other)
                 other.wait(timeout=3)
                 (control / "native-stop").touch()
                 helper.wait_for(lambda: (control / "native-stopped").exists())
             else:
                 assert "image/png" not in json.loads(output.read_text()), "unexpected X11 update while native Wayland window is focused"
                 print(f"{mode}: Wayland focus leaves X11 offer stale (terminal/CLI scenario)", flush=True)
-                os.killpg(native.pid, signal.SIGTERM)
+                stop(native)
                 native.wait(timeout=3)
             if not shared:
                 helper.wait_for(lambda: "image/png" in json.loads(output.read_text()))
@@ -249,19 +258,19 @@ def main():
             image_copy.wait(timeout=3)
             text_copy.terminate()
             text_copy.wait(timeout=3)
-            os.killpg(client.pid, signal.SIGTERM)
+            stop(client)
             client.wait(timeout=3)
-            os.killpg(sat.pid, signal.SIGTERM)
+            stop(sat)
             sat.wait(timeout=3)
         vk.close()
     finally:
         for proc in reversed(processes):
             if proc.poll() is None:
-                os.killpg(proc.pid, signal.SIGTERM)
+                stop(proc)
                 try:
                     proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    stop(proc, signal.SIGKILL)
                     proc.wait()
         for log in logs:
             log.close()

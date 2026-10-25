@@ -94,12 +94,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- A windowless X11 copier that has never received keyboard focus can now
+  publish CLIPBOARD text/images to native readers of its own launch through
+  Cellward's patched private Satellite. The fallback is launch-local, not
+  exported to the host compositor. A private headless regression checks
+  repeated valid PNG/text copies, late readers, clear/owner exit, foreign
+  paste gating, and separation from the host and another launch, with and
+  without a frame. PRIMARY, cross-launch private buffers and global CopyQ
+  exclusion remain separate unfinished work.
 - X11 clipboard readers inside a native Wayland terminal now receive current
   CLIPBOARD offers through the same launch's proxy without requiring a visible
   or focused X11 window. Payload reads remain ownership/paste-gesture gated,
   including with no cosmetic frame; another launch's gesture grants no access.
   A private headless test checks changed valid PNG payloads with a windowless
-  Xlib reader. Cross-launch private buffers, reverse X11 copy and PRIMARY
+  Xlib reader. Cross-launch private buffers and PRIMARY
   synchronization are not part of this fix.
 - Clipboard drag/history authorization uses proxy-wide offer identities rather
   than connection-local Wayland object ids, preventing accidental permission

@@ -16,14 +16,40 @@ const MAX_TYPE_BYTES: usize = 256;
 struct Selection {
     id: u64,
     device: Weak<WlDataDevice>,
-    source: Rc<WlDataOffer>,
-    own: bool,
+    origin: Origin,
     types: Rc<Vec<String>>,
+}
+
+#[derive(Clone)]
+enum Origin {
+    Foreign {
+        source: Rc<WlDataOffer>,
+        own: bool,
+    },
+    Local {
+        source: Rc<WlDataSource>,
+        alive: Rc<Cell<bool>>,
+    },
 }
 
 impl Selection {
     fn alive(&self) -> bool {
-        self.source.server_id().is_some() && !self.source.state().is_destroyed()
+        match &self.origin {
+            Origin::Foreign { source, .. } => {
+                source.server_id().is_some() && !source.state().is_destroyed()
+            }
+            Origin::Local { source, alive } => {
+                alive.get() && source.client_id().is_some() && !source.state().is_destroyed()
+            }
+        }
+    }
+
+    fn cancel_local(&self) {
+        if let Origin::Local { source, alive } = &self.origin {
+            if alive.replace(false) && !source.state().is_destroyed() {
+                source.send_cancelled();
+            }
+        }
     }
 }
 
@@ -61,8 +87,10 @@ pub(super) fn selected(device: &Rc<WlDataDevice>, source: Option<&Rc<WlDataOffer
         (!handler.relay_overflow).then(|| Selection {
             id: handler.id,
             device: Rc::downgrade(device),
-            source: source.clone(),
-            own: handler.own,
+            origin: Origin::Foreign {
+                source: source.clone(),
+                own: handler.own,
+            },
             types: Rc::new(handler.types.clone()),
         })
     });
@@ -75,6 +103,9 @@ pub(super) fn selected(device: &Rc<WlDataDevice>, source: Option<&Rc<WlDataOffer
                     return true;
                 }
             }
+        }
+        if let Some(old) = &r.selection {
+            old.cancel_local();
         }
         r.selection = offered;
         r.devices
@@ -90,6 +121,70 @@ pub(super) fn selected(device: &Rc<WlDataDevice>, source: Option<&Rc<WlDataOffer
         }
         false
     })
+}
+
+/// A source created by this launch belongs to it, with no host gesture or
+/// serial needed for local readers. Zero is never forwarded upstream.
+pub(super) fn set_local(device: &Rc<WlDataDevice>, source: Option<&Rc<WlDataSource>>) {
+    let selection = source.and_then(|source| {
+        let handler = source.try_get_handler_ref::<Source>().ok()?;
+        (!handler.relay_overflow && !handler.types.is_empty() && handler.alive.get()).then(|| {
+            Selection {
+                id: crate::clip::fresh_offer_id(),
+                device: Rc::downgrade(device),
+                origin: Origin::Local {
+                    source: source.clone(),
+                    alive: handler.alive.clone(),
+                },
+                types: Rc::new(handler.types.clone()),
+            }
+        })
+    });
+    if source.is_some() && selection.is_none() {
+        return;
+    }
+    RELAY.with(|r| {
+        let mut r = r.borrow_mut();
+        // Reinstalling the current source must not cancel the shared alive
+        // flag used by both the old and the replacement offer.
+        if source.is_some_and(|source| {
+            r.selection.as_ref().is_some_and(|s| {
+                matches!(&s.origin, Origin::Local { source: own, .. } if Rc::ptr_eq(own, source))
+            })
+        }) {
+            return;
+        }
+        if let Some(old) = &r.selection {
+            old.cancel_local();
+        }
+        r.selection = selection;
+        r.devices
+            .retain(|d| d.upgrade().is_some_and(|d| !d.state().is_destroyed()));
+        for other in r.devices.iter().filter_map(Weak::upgrade) {
+            if !Rc::ptr_eq(&other, device) {
+                if let Some(s) = &r.selection {
+                    announce(&other, s);
+                } else {
+                    other.send_selection(None);
+                }
+            }
+        }
+    });
+}
+
+pub(super) fn source_destroyed(source: &Rc<WlDataSource>) {
+    RELAY.with(|r| {
+        let mut r = r.borrow_mut();
+        let owned = r.selection.as_ref().is_some_and(
+            |s| matches!(&s.origin, Origin::Local { source: own, .. } if Rc::ptr_eq(own, source)),
+        );
+        if owned {
+            r.selection = None;
+            for device in r.devices.iter().filter_map(Weak::upgrade) {
+                device.send_selection(None);
+            }
+        }
+    });
 }
 
 fn announce(device: &Rc<WlDataDevice>, selection: &Selection) {
@@ -111,11 +206,16 @@ struct RelayedOffer {
 impl WlDataOfferHandler for RelayedOffer {
     fn handle_receive(&mut self, _: &Rc<WlDataOffer>, mime: &str, fd: &Rc<OwnedFd>) {
         let s = &self.selection;
-        if s.alive()
-            && s.types.iter().any(|t| t == mime)
-            && crate::clip::may_read(s.own, crate::clip::Which::Clipboard, mime, s.id)
-        {
-            s.source.send_receive(mime, fd);
+        if !s.alive() || !s.types.iter().any(|t| t == mime) {
+            return;
+        }
+        match &s.origin {
+            Origin::Foreign { source, own } => {
+                if crate::clip::may_read(*own, crate::clip::Which::Clipboard, mime, s.id) {
+                    source.send_receive(mime, fd);
+                }
+            }
+            Origin::Local { source, .. } => source.send_send(mime, fd),
         }
     }
 

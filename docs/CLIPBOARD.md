@@ -24,6 +24,44 @@ The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):
 - **Leaves data-control closed.** Unrestricted background access to the host
   clipboard is not offered to containers.
 
+## Reverse X11 copies without keyboard focus
+
+Cellward's private Satellite has an opt-in fallback:
+an X11 owner that has never received a Wayland keyboard serial can publish
+its CLIPBOARD to the launch-local relay. Serial zero is consumed locally,
+not forwarded to the host compositor. PRIMARY and focused X11 copies are
+unchanged. Reinstalling the same local source must not cancel it; source
+destruction/cancellation invalidates its offers.
+
+`tests/clipboard-reverse-smoke.py` verifies the reverse path on a private
+headless sway, with and without a frame. An unmapped Xlib owner replaces
+synthetic text and valid PNG three times while a native terminal keeps
+focus. A regular Wayland data-device reader checks the exact bytes by hash;
+a late reader receives the current offer too. Clearing the X11 selection
+and killing an active owner leave no stale payload. A foreign replacement
+remains unreadable in the background and becomes readable after Ctrl+V.
+A trusted data-control observer of the private compositor and a separate
+confined launch confirm that the local copy reaches neither of them. The
+actual desktop clipboard is never accessed. These runs peaked at 375 and
+378 MiB sampled process-group RSS; forward-paste regressions also passed
+with the patched Satellite (300 MiB).
+
+This is not a cross-launch instance broker and does not solve global CopyQ
+capture of ordinary focused copies. PRIMARY is unchanged. No actual Codex
+session or complete desktop VM was used for these graphical regressions.
+On 2026-10-25 the offline, single-job/no-debug/no-incremental core build
+completed with 1057 MiB sampled process-group peak RSS. The test binary
+compiled at 1410 MiB; the full suite passed (1028 tests, 5 ignored), with
+115 MiB during execution. Patched Satellite compiled after selecting native
+64-bit XCB (443 MiB for the final compile/link step). Its initial dependency
+build peaked at 699 MiB before a wrong-architecture link failure.
+The per-process limits and watchdog are in `tests/run-memory-guard.py`;
+the preferable hard aggregate cgroup runner is `tests/run-limited.py`, but
+the current container cannot start user-systemd services. Early attempts
+with smaller per-process limits aborted on allocation rather than removing
+the limits. The windowless reverse path is verified, not full active-buffer
+isolation between instances.
+
 ## X11 CLI paste in a native Wayland terminal
 
 The launch proxy relays current CLIPBOARD offers between a native terminal
