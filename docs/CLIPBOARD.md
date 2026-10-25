@@ -21,8 +21,17 @@ The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):
   whatever the layout — or a middle click for the primary selection; and when
   it is dragged onto the program. The offered types stay visible: a program
   knows there is something to paste.
-- **Leaves data-control closed.** Reading the clipboard without focus is not
-  offered to containers at all.
+- **Leaves data-control closed.** Unrestricted background access to the host
+  clipboard is not offered to containers.
+
+## X11 CLI paste in a native Wayland terminal
+
+The launch proxy relays current CLIPBOARD offers between a native terminal
+and its own Xwayland Satellite, including when the X11 CLI has no visible
+window. Foreign contents still require the person's paste gesture in that
+launch; the frame is optional. It does not expose host data-control or the
+host X server. The detailed regression and remaining reverse-copy/PRIMARY
+limitations are in [the bridge diagnosis](CLIPBOARD-BRIDGE-DIAGNOSIS.md).
 
 ## Not covered yet
 

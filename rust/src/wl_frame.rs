@@ -6358,6 +6358,19 @@ impl ZwpTabletToolV2Handler for Tool {
 
 struct DataDeviceManager;
 
+mod clipboard_relay;
+
+/// Clipboard policy must apply even when no cosmetic frame is drawn.
+pub(crate) fn watch_clipboard(id: &Rc<dyn Object>, unframed: bool) {
+    if let Some(o) = id.try_downcast::<WlDataDeviceManager>() {
+        o.set_handler(DataDeviceManager);
+    } else if let Some(o) = id.try_downcast::<ZwpPrimarySelectionDeviceManagerV1>() {
+        o.set_handler(PrimaryManager);
+    } else if unframed {
+        clipboard_relay::watch_unframed(id);
+    }
+}
+
 impl WlDataDeviceManagerHandler for DataDeviceManager {
     fn handle_create_data_source(&mut self, slf: &Rc<WlDataDeviceManager>, id: &Rc<WlDataSource>) {
         slf.send_create_data_source(id);
@@ -6376,6 +6389,7 @@ impl WlDataDeviceManagerHandler for DataDeviceManager {
     ) {
         slf.send_get_data_device(id, seat);
         id.set_handler(DataDevice::default());
+        clipboard_relay::register(id);
     }
 }
 
@@ -6402,7 +6416,9 @@ impl WlDataDeviceHandler for DataDevice {
             // A drag is the person's own act: what it carries is theirs to
             // drop, whoever's it is.
             if let Some(offer) = id {
-                crate::clip::dragged(offer.unique_id());
+                if let Ok(info) = offer.try_get_handler_ref::<Offer>() {
+                    crate::clip::dragged(info.id);
+                }
             }
             slf.send_enter(serial, surface, x, y, id);
         }
@@ -6432,8 +6448,13 @@ impl WlDataDeviceHandler for DataDevice {
     }
 
     fn handle_selection(&mut self, slf: &Rc<WlDataDevice>, id: Option<&Rc<WlDataOffer>>) {
+        if clipboard_relay::selected(slf, id) {
+            return;
+        }
         slf.send_selection(id);
-        crate::clip::selection(id.map(|o| o.unique_id()));
+        crate::clip::selection(
+            id.and_then(|o| o.try_get_handler_ref::<Offer>().ok().map(|info| info.id)),
+        );
         paste_waiting();
     }
 }
@@ -6459,9 +6480,22 @@ impl WlDataSourceHandler for Source {
 /// What is offered to the program (`wl_data_offer`): the selection, or a
 /// drag. Its mark said whose it is, and is not passed on; a foreign one is
 /// read only when the person pastes, or drops it (`clip`).
-#[derive(Default)]
 struct Offer {
+    id: u64,
     own: bool,
+    types: Vec<String>,
+    relay_overflow: bool,
+}
+
+impl Default for Offer {
+    fn default() -> Self {
+        Self {
+            id: crate::clip::fresh_offer_id(),
+            own: false,
+            types: Vec::new(),
+            relay_overflow: false,
+        }
+    }
 }
 
 impl WlDataOfferHandler for Offer {
@@ -6469,20 +6503,16 @@ impl WlDataOfferHandler for Offer {
         if crate::clip::is_mark(mime_type) {
             self.own |= crate::clip::is_own(mime_type);
             if mime_type == crate::clip::HISTORY_MARK {
-                crate::clip::history_offer(slf.unique_id());
+                crate::clip::history_offer(self.id);
             }
             return;
         }
+        clipboard_relay::keep_type(&mut self.types, &mut self.relay_overflow, mime_type);
         slf.send_offer(mime_type);
     }
 
     fn handle_receive(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str, fd: &Rc<OwnedFd>) {
-        if crate::clip::may_read(
-            self.own,
-            crate::clip::Which::Clipboard,
-            mime_type,
-            slf.unique_id(),
-        ) {
+        if crate::clip::may_read(self.own, crate::clip::Which::Clipboard, mime_type, self.id) {
             slf.send_receive(mime_type, fd);
         }
     }
@@ -6548,9 +6578,18 @@ impl ZwpPrimarySelectionSourceV1Handler for PrimarySource {
     }
 }
 
-#[derive(Default)]
 struct PrimaryOffer {
+    id: u64,
     own: bool,
+}
+
+impl Default for PrimaryOffer {
+    fn default() -> Self {
+        Self {
+            id: crate::clip::fresh_offer_id(),
+            own: false,
+        }
+    }
 }
 
 impl ZwpPrimarySelectionOfferV1Handler for PrimaryOffer {
@@ -6568,12 +6607,7 @@ impl ZwpPrimarySelectionOfferV1Handler for PrimaryOffer {
         mime_type: &str,
         fd: &Rc<OwnedFd>,
     ) {
-        if crate::clip::may_read(
-            self.own,
-            crate::clip::Which::Primary,
-            mime_type,
-            slf.unique_id(),
-        ) {
+        if crate::clip::may_read(self.own, crate::clip::Which::Primary, mime_type, self.id) {
             slf.send_receive(mime_type, fd);
         }
     }

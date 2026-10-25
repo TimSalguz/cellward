@@ -3172,6 +3172,7 @@ impl WlRegistryHandler for Registry {
                 }
             }
             self.focus.watch(&id);
+            crate::wl_frame::watch_clipboard(&id, self.frames.is_none());
             slf.send_bind(name, id);
             return;
         }

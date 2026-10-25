@@ -94,6 +94,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- X11 clipboard readers inside a native Wayland terminal now receive current
+  CLIPBOARD offers through the same launch's proxy without requiring a visible
+  or focused X11 window. Payload reads remain ownership/paste-gesture gated,
+  including with no cosmetic frame; another launch's gesture grants no access.
+  A private headless test checks changed valid PNG payloads with a windowless
+  Xlib reader. Cross-launch private buffers, reverse X11 copy and PRIMARY
+  synchronization are not part of this fix.
+- Clipboard drag/history authorization uses proxy-wide offer identities rather
+  than connection-local Wayland object ids, preventing accidental permission
+  aliasing between a launch's connections.
 - Live-switch compatibility refusals distinguish frozen host service/file
   channels from VPN permissions, list their actual or unknown launch values
   and configuration provenance, and keep the previous network explicit in a

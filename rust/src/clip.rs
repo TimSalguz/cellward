@@ -64,6 +64,9 @@ pub enum Which {
 
 #[derive(Default)]
 struct State {
+    /// wl-proxy object ids are only unique within one connection. Paste,
+    /// drag and history authorization is shared by all launch connections.
+    next_offer: Cell<u64>,
     mark: RefCell<Option<String>>,
     /// A paste of the history's to press for the person, until then.
     inject: Cell<Option<Instant>>,
@@ -80,6 +83,19 @@ struct State {
 thread_local! {
     // The proxy is one thread: its connections share what the person did.
     static STATE: State = State::default();
+}
+
+/// A proxy-wide offer identity, never a compositor/client supplied id.
+pub fn fresh_offer_id() -> u64 {
+    STATE.with(|s| {
+        let id = s
+            .next_offer
+            .get()
+            .checked_add(1)
+            .expect("clipboard offer identities exhausted");
+        s.next_offer.set(id);
+        id
+    })
 }
 
 /// The launch's mark, set once in the proxy before it serves.
