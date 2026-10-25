@@ -105,8 +105,14 @@ actual Codex backend or a full NixOS VM test.
 Implementation progress: `clip/src/broker.rs` now supplies the bounded volatile
 selection model (independent CLIPBOARD/PRIMARY, per-instance scopes, revisions,
 explicit transfer, and payload erasure on replacement/drop). Unit tests cover
-the model, **not** compositor integration. No Wayland/X11 transport uses it yet;
-the global active desktop selection and CopyQ recording are therefore unchanged.
+the model, **not** compositor integration. `clip/src/broker_transport.rs` now
+adds real nonblocking, scope-bound socket pairs with no wire operation for
+choosing an instance or transferring between them. Socket tests cover isolation,
+stale revisions, lifetime/revocation, fair progress, timeouts and bounded I/O.
+No Wayland/X11 adapter uses it yet; the global active desktop selection and
+ordinary CopyQ recording are therefore unchanged. The exact checkpoint and
+remaining integration/security requirements are in
+[the private broker plan](PRIVATE-CLIPBOARD-BROKER.md).
 
 History file exposure was addressed separately: see the storage section of
 `CLIPBOARD.md`. Restarting the updated daemon migrates the old store and key into

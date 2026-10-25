@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Security
+- Active-selection model and IPC buffers erase their full allocated capacity,
+  not only visible bytes, covering truncated secret tails. The new scoped
+  transport is internal groundwork, not yet the desktop clipboard path.
 - Move clipboard history, favourites, passwords and their master key into
   `~/.local/state/vpn-zones/.clipboard`, covered by the existing container
   mount boundary even for real-home containers. The old store outside that
@@ -17,6 +20,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Migration tests and a real isolated mount-namespace test exercise this fix.
 
 ### Added
+- Internal nonblocking socket-pair transport for the private active-selection
+  broker: immutable instance scopes, separate CLIPBOARD/PRIMARY, revision-pinned
+  reads, bounded I/O and timeouts, and explicit controller-only transfers.
+  Real socket tests cover scope isolation and revocation. Wayland/X11, recorder
+  and manager adapters are still pending: this does not enable private buffers
+  or stop ordinary CopyQ capture yet (`docs/PRIVATE-CLIPBOARD-BROKER.md`).
 - Frame settings now expose the hover trigger depth (1–12 logical px) and
   diagonal resize-corner span (0–64 px), with live cosmetic previews and Nix
   overrides/reset. The app's top two pointer pixels remain accessible; the

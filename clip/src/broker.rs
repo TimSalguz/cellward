@@ -32,6 +32,15 @@ impl Selection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Revision(u64);
 
+impl Revision {
+    pub(crate) fn wire(self) -> u64 {
+        self.0
+    }
+    pub(crate) fn from_wire(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     UnknownInstance,
@@ -69,14 +78,18 @@ struct Offer {
 impl Drop for Offer {
     fn drop(&mut self) {
         for content in &mut self.contents {
-            for byte in &mut content.data {
-                // SAFETY: a byte of our owned buffer; volatile so dropping
-                // a password selection does not optimize the erasure away.
-                unsafe {
-                    std::ptr::write_volatile(byte, 0);
-                }
-            }
+            erase(&mut content.data);
         }
+    }
+}
+
+pub(crate) fn erase(bytes: &mut Vec<u8>) {
+    let ptr = bytes.as_mut_ptr();
+    for i in 0..bytes.capacity() {
+        // SAFETY: u8 storage owned by this Vec, within its allocation. It is
+        // legal to initialize spare capacity; truncated secrets may remain
+        // there even though they are no longer part of the logical slice.
+        unsafe { std::ptr::write_volatile(ptr.add(i), 0) };
     }
 }
 

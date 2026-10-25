@@ -80,6 +80,12 @@ limitations are in [the bridge diagnosis](CLIPBOARD-BRIDGE-DIAGNOSIS.md).
 
 ## The host manager (in progress)
 
+Independent active selections now have a tested model and a scope-bound
+Unix socket-pair transport, but are not enabled in the graphical paths yet.
+See [the broker checkpoint](PRIVATE-CLIPBOARD-BROKER.md). This is separate
+from the encrypted history/manager below; ordinary copies can still be
+recorded by host CopyQ until that integration is complete.
+
 With `clipboard.history = true`, the recorder also owns one host tray icon.
 Its click opens `vpn-zone-window clip --manager`: the host and each history
 that has been created appear as tabs. The manager can browse and explicitly
