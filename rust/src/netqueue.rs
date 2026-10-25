@@ -8,6 +8,10 @@
 //! The state machine performs no syscalls or policy writes. Its explicit
 //! socket adapter is separate and never installs a firewall automatically.
 
+#[path = "netqueue/driver.rs"]
+pub mod driver;
+#[path = "netqueue/gate.rs"]
+pub mod gate;
 #[path = "netqueue/socket.rs"]
 pub mod socket;
 #[path = "netqueue/wire.rs"]
@@ -18,6 +22,7 @@ use std::sync::Arc;
 
 pub const MAX_LAUNCHES: usize = 4096;
 pub const MAX_PENDING: usize = 1024;
+pub const MAX_PENDING_PER_LAUNCH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Token(u32);
@@ -91,7 +96,8 @@ pub struct Session {
     last_packet: Option<u32>,
     launches: HashMap<Token, Arc<Launch>>,
     armed: HashSet<Token>,
-    pending: HashMap<u32, Held>,
+    pending: HashMap<u32, (Held, Token)>,
+    per_launch: HashMap<Token, usize>,
     closed: bool,
 }
 
@@ -111,6 +117,7 @@ impl Session {
             launches: HashMap::new(),
             armed: HashSet::new(),
             pending: HashMap::new(),
+            per_launch: HashMap::new(),
             closed: false,
         })
     }
@@ -195,7 +202,11 @@ impl Session {
         if launch.epoch != self.epoch {
             return Err(Error::OldEpoch);
         }
-        if self.pending.len() >= MAX_PENDING || self.next_nonce == u64::MAX {
+        let token = Token(packet.mark());
+        if self.pending.len() >= MAX_PENDING
+            || self.per_launch.get(&token).copied().unwrap_or(0) >= MAX_PENDING_PER_LAUNCH
+            || self.next_nonce == u64::MAX
+        {
             return Err(Error::Capacity);
         }
         let held = Held {
@@ -209,7 +220,8 @@ impl Session {
             launch: Arc::clone(launch),
         };
         self.next_nonce += 1;
-        self.pending.insert(packet.id(), held.clone());
+        self.pending.insert(packet.id(), (held.clone(), token));
+        *self.per_launch.entry(token).or_default() += 1;
         Ok(held)
     }
 
@@ -219,7 +231,7 @@ impl Session {
         if self.closed {
             return Err(Error::Closed);
         }
-        let pending = self.pending.get(&ticket.packet).ok_or(Error::StaleTicket)?;
+        let (pending, token) = self.pending.get(&ticket.packet).ok_or(Error::StaleTicket)?;
         if pending.ticket != ticket
             || ticket.session != self.id
             || ticket.epoch != self.epoch
@@ -227,7 +239,14 @@ impl Session {
         {
             return Err(Error::StaleTicket);
         }
+        let token = *token;
         self.pending.remove(&ticket.packet);
+        if let Some(count) = self.per_launch.get_mut(&token) {
+            *count -= 1;
+            if *count == 0 {
+                self.per_launch.remove(&token);
+            }
+        }
         Ok(if allow {
             Decision::Accept(ticket)
         } else {
@@ -261,7 +280,11 @@ impl Session {
     }
 
     fn drain(&mut self) -> Vec<Ticket> {
-        self.pending.drain().map(|(_, held)| held.ticket).collect()
+        self.per_launch.clear();
+        self.pending
+            .drain()
+            .map(|(_, (held, _))| held.ticket)
+            .collect()
     }
 
     /// Adapter must close the underlying NFQUEUE socket on loss, malformed
@@ -270,6 +293,7 @@ impl Session {
     pub fn fail(&mut self) {
         self.closed = true;
         self.pending.clear();
+        self.per_launch.clear();
     }
 }
 
@@ -395,19 +419,47 @@ mod tests {
     fn bounded_registry_and_pending_queue_do_not_evict_identity_or_allow() {
         let mut s = session();
         let first = ready(&mut s, "terminal", 10);
+        let mut tokens = vec![first];
+        for i in 1..MAX_PENDING / MAX_PENDING_PER_LAUNCH {
+            tokens.push(ready(&mut s, "terminal", 10 + i as u128));
+        }
         for id in 1..=MAX_PENDING as u32 {
-            s.hold(123, &packet(id, first.mark())).unwrap();
+            let token = tokens[(id as usize - 1) / MAX_PENDING_PER_LAUNCH];
+            s.hold(123, &packet(id, token.mark())).unwrap();
         }
         assert_eq!(
             s.hold(123, &packet(MAX_PENDING as u32 + 1, first.mark())),
             Err(Error::Capacity)
         );
         assert_eq!(s.pending.len(), MAX_PENDING);
-        for id in 1..MAX_LAUNCHES {
+        for id in tokens.len()..MAX_LAUNCHES {
             s.register("terminal".into(), id as u128 + 10).unwrap();
         }
         assert_eq!(s.register("terminal".into(), 9999), Err(Error::Capacity));
         assert_eq!(s.launches[&first].generation, 10);
+    }
+
+    #[test]
+    fn an_unanswered_launch_cannot_fill_the_whole_queue() {
+        let mut s = session();
+        let noisy = ready(&mut s, "noisy", 10);
+        let quiet = ready(&mut s, "quiet", 11);
+        let mut first = None;
+        for id in 1..=MAX_PENDING_PER_LAUNCH as u32 {
+            let held = s.hold(123, &packet(id, noisy.mark())).unwrap();
+            first.get_or_insert(held);
+        }
+        let next = MAX_PENDING_PER_LAUNCH as u32 + 1;
+        assert_eq!(
+            s.hold(123, &packet(next, noisy.mark())),
+            Err(Error::Capacity)
+        );
+        assert!(s.hold(123, &packet(next + 1, quiet.mark())).is_ok());
+        s.decide(first.unwrap().ticket, false).unwrap();
+        assert!(s.hold(123, &packet(next + 2, noisy.mark())).is_ok());
+        s.change_policy(2).unwrap();
+        assert!(s.per_launch.is_empty());
+        assert!(s.hold(123, &packet(next + 3, noisy.mark())).is_ok());
     }
 
     #[test]

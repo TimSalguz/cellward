@@ -291,6 +291,78 @@ fn main() -> io::Result<()> {
     launch_sender("send-once")?; // no listener and no queue bypass
     no_delivery()?;
     println!("PASS: collector exit drops held packets and does not bypass the absent queue");
+
+    // Exercise the production queue-lifetime adapter, not hand-written ACK
+    // handling. Reinstall the mapping in the fresh session before activation.
+    let mut driver =
+        netqueue::driver::Driver::bind(socket::Socket::open_here()?, 456, queue, 1, 1)?;
+    let token = driver.register("runtime-udp".into(), 20).unwrap();
+    checked(
+        &nft,
+        &["-f", "-"],
+        Some(&format!("delete table inet cellward_owner_probe\n{rules}")),
+    )?;
+    driver.activate_after_mapping_ack(token).unwrap();
+    launch_sender("send-once")?;
+    driver.wait(Duration::from_secs(2))?;
+    let held = driver.receive()?.remove(0);
+    if held.launch.program != "runtime-udp" {
+        return Err(io::Error::other("driver assigned incorrect identity"));
+    }
+    driver.decide(held.ticket, true)?;
+    receiver.set_read_timeout(Some(Duration::from_secs(2)))?;
+    receiver.recv_from(&mut payload)?;
+    println!("PASS: runtime driver binds, retains identity and acknowledges individual ACCEPT");
+
+    launch_sender("send-once")?;
+    driver.wait(Duration::from_secs(2))?;
+    let stale = driver.receive()?.remove(0);
+    driver.change_policy(2)?;
+    if driver.decide(stale.ticket, true).is_ok() {
+        return Err(io::Error::other("old UI reply authorized a new policy"));
+    }
+    no_delivery()?;
+    // A stale callback must not close an otherwise healthy active queue.
+    launch_sender("send-once")?;
+    driver.wait(Duration::from_secs(2))?;
+    let held = driver.receive()?.remove(0);
+    driver.decide(held.ticket, false)?;
+    no_delivery()?;
+    println!("PASS: runtime policy transition drops held data and rejects stale UI approval without killing the queue");
+
+    driver.change_epoch(2)?;
+    launch_sender("send-once")?;
+    driver.wait(Duration::from_secs(2))?;
+    if !driver.receive()?.is_empty() {
+        return Err(io::Error::other(
+            "old socket identity survived epoch change",
+        ));
+    }
+    no_delivery()?;
+    let next = driver.register("runtime-new-epoch".into(), 21).unwrap();
+    let next_rules = rules.replace(
+        &format!("meta mark set {} queue", token.mark()),
+        &format!("meta mark set {} queue", next.mark()),
+    );
+    checked(
+        &nft,
+        &["-f", "-"],
+        Some(&format!(
+            "delete table inet cellward_owner_probe\n{next_rules}"
+        )),
+    )?;
+    driver.activate_after_mapping_ack(next).unwrap();
+    launch_sender("send-once")?;
+    driver.wait(Duration::from_secs(2))?;
+    let held = driver.receive()?.remove(0);
+    if held.launch.epoch != 2 || held.launch.program != "runtime-new-epoch" {
+        return Err(io::Error::other("new epoch identity incorrect"));
+    }
+    driver.close();
+    no_delivery()?;
+    launch_sender("send-once")?;
+    no_delivery()?;
+    println!("PASS: runtime epoch change rejects old identity; explicit close drops backlog and prevents bypass");
     // The entire namespace, table and bound queue disappear on exit.
     Ok(())
 }

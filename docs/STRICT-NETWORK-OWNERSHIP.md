@@ -51,6 +51,9 @@ information is display/logging data, not the identity.
   death. Tokens are never reused within a session. Limits are 4096 launch
   records and 1024 pending packets, with explicit capacity failures, no eviction
   into another identity and no automatic approval.
+  A single launch may retain at most 64 pending packets, independently of the
+  instance-wide 1024 limit. Rejection does not evict another launch's identity;
+  deciding or draining a packet restores its launch's quota.
 - A fresh controller-supplied session generation, network epoch, policy revision
   and request nonce bind decisions. Stale/forged tickets cannot consume a newer
   request. Policy/epoch transitions return pending packets to drop; old socket
@@ -66,6 +69,24 @@ information is display/logging data, not the identity.
   NETLINK_NETFILTER adapter. The peer identity comes from recvmsg sockaddr_nl,
   not a user-supplied nlmsg header. No firewall rule is installed by opening it.
   Metadata only is retained; packet payloads are not archived.
+- `rust/src/netqueue/driver.rs`: socket-owning runtime adapter. Binding and
+  individual verdicts require exact outstanding sequence ACKs; unexpected,
+  failed or missing ACKs close the actual transport and invalidate the model.
+  Sequences never wrap. Packets arriving while awaiting an ACK are retained
+  under the same bounds, not ignored. Unknown/unarmed/old-epoch identities are
+  dropped without presenting an ownerless permission question. Policy/epoch
+  changes acknowledge DROP of outstanding tickets; late UI callbacks cannot
+  authorize them or close a healthy successor. External egress fencing and
+  policy/route installation remain the integrating supervisor's responsibility.
+- `rust/src/netqueue/gate.rs`: inherited CLOEXEC socketpair pre-exec barrier,
+  with consuming prepared/release transitions. EOF, timeout or malformed replies
+  abort the child's wait, never authorize execution. No public socket pathname.
+  This primitive is **not yet wired into `enter::run`**; its caller must drop
+  the other fork endpoint and validate dedicated membership/mapping ACKs.
+- `epoch::Epoch::place_launch_strict`: dedicated, newly created launch cgroup
+  placement with no fallback to a shared epoch or denied group. Existing
+  cgroups are refused rather than silently reusing identity. The legacy
+  `place_launch` caller is unchanged until trusted registration is connected.
 
 None of these APIs makes UI-provided tokens/generations authoritative. They
 are trusted-controller building blocks. A `Decision` is preliminary until the
@@ -76,7 +97,7 @@ operational error. There must be no bypass/default allow fallback.
 
 ## Verification performed
 
-21 unit tests pass, including token reservation/activation, stale sessions,
+35 queue/barrier unit tests pass, including token reservation/activation, stale sessions,
 policies/epochs, replay/wrap, bounded capacity, malformed messages and byte
 orders. They can be compiled without rebuilding the rest of core:
 
@@ -93,7 +114,7 @@ cgroupfs view. No host cgroup is created/moved/written, no host firewall rule
 is installed, and no VM is started. Firewall setup in the outer network namespace,
 a non-disposable UID mapping or a namespace with extra interfaces is refused.
 
-Four cases passed for **both** families:
+Seven cases passed for **both** families:
 
 1. Reap a short UDP process before receiving its queued packet. The cgroup
    token still names the launch; an individual ACCEPT delivers the held data.
@@ -103,6 +124,13 @@ Four cases passed for **both** families:
    and the adapter's DROP prevents delivery instead of selecting another app.
 4. Close the collector with a packet held, then send another packet with no
    queue listener. Neither is delivered; no fail-open or queue bypass occurs.
+5. Use the runtime driver to bind, hold a packet with immutable launch identity,
+   and acknowledge an individual ACCEPT.
+6. Change policy with a packet held. It is dropped; its old UI ticket cannot
+   authorize it, and a subsequent valid request still works.
+7. Change epoch: old identities are automatically denied without a question.
+   Register/map a fresh token; explicit driver close drops its held packet and
+   leaves no bypass for later sends.
 
 The probe uses one cgroup (the test namespace's cgroup root), not distinct
 production launch cgroups. Thus it proves the short-UDP/kernel mechanism and
@@ -130,9 +158,9 @@ Compile and run sequentially beneath `tests/run-memory-guard.py`.
    broad exemption for traffic whose identity was missing. Keep isolated
    application namespaces distinct from “without isolation”; do not apply an
    experimental policy to the host network namespace.
-4. Collector lifecycle, ACK correlation (including request-sequence exhaustion)
-   and bounded UI integration, with per-launch quotas so one unanswered app
-   cannot occupy the entire queue. Queue
+4. Wire the tested collector lifecycle/ACK adapter and pre-exec barrier into
+   the live supervisor, with bounded UI integration. Per-launch packet quotas
+   are implemented, but do not substitute for bounded UI requests. Queue
    configuration currently copies metadata only: destination display needs
    separately designed bounded header/conntrack metadata, not guessed tuple
    ownership or indiscriminate payload archiving. Tie approvals to token/session

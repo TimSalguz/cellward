@@ -176,6 +176,28 @@ impl Epoch {
         self.dir().join(leaf)
     }
 
+    /// Strict registration's placement: a NEW dedicated launch cgroup or an
+    /// error. Unlike `place_launch`, never joins the epoch/denied parent on
+    /// failure and never reuses an existing launch identity. The supervisor
+    /// must verify membership and register the pinned cgroup before exec.
+    pub fn place_launch_strict(&self, leaf: &str) -> io::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if !sane_path(&self.path) || !leaf_of(leaf).is_some_and(|(pid, start)| pid > 0 && start > 0)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid dedicated launch cgroup",
+            ));
+        }
+        let dir = self.leaf_dir(leaf);
+        fs::create_dir(&dir)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir.join("cgroup.procs"))?
+            .write_all(b"0")
+    }
+
     /// Put the calling process into a cgroup of its launch's own, `leaf`
     /// below this epoch, made now; where it cannot be made — or `leaf` is
     /// no launch's name —, into the epoch itself, as before launches had
@@ -653,6 +675,26 @@ pub fn probe_verdict(line: &str) -> Result<(), &'static str> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn strict_placement_rejects_invalid_identity_before_touching_cgroupfs() {
+        let epoch = super::Epoch::of("/unit", 1);
+        for leaf in [
+            "",
+            "..",
+            "denied",
+            "/l1-1",
+            "l0-1",
+            "l1-0",
+            "l1-1/child",
+            "../l1-1",
+        ] {
+            assert_eq!(
+                epoch.place_launch_strict(leaf).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+    }
 
     /// A launch's cgroup is named by its waiter's pid and start time, and
     /// nothing else passes for one.
