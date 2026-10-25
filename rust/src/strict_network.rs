@@ -5,8 +5,12 @@ use crate::verdicts::Verdict;
 use std::collections::HashMap;
 use std::fs;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+mod archive;
 
 pub const READY: &str = "strict-network";
 pub const REQUIRED: &str = "strict-network-required";
@@ -26,18 +30,23 @@ pub fn mode(dir: &Path) -> &'static str {
 }
 
 struct Mapping {
+    // Only a fresh registration/epoch resolves a live path. Queue rotation
+    // preserves the kernel map; archive reads deliberately leave this empty.
     path: String,
     leaf: String,
     program: String,
     generation: u128,
     panel: Option<(i32, u64)>,
     token: Token,
+    cgroup: u64,
+    level: u8,
+    epoch: u64,
 }
 pub struct Runtime {
     driver: Driver<Socket>,
     session: u128,
     revision: u64,
-    mappings: Vec<Mapping>,
+    archive: Arc<archive::Archive>,
     asker: crate::netask::Asker<Ticket>,
     pending: HashMap<Ticket, (Held, crate::flows::Key, Option<String>)>,
     config: PathBuf,
@@ -45,6 +54,9 @@ pub struct Runtime {
     record: Option<String>,
     rules: crate::netrules::Rules,
     failed: bool,
+    core: PathBuf,
+    nft: PathBuf,
+    space: OwnedFd,
 }
 
 impl Runtime {
@@ -64,7 +76,7 @@ impl Runtime {
         let mut bytes = [0; 16];
         crate::bridge::random_bytes(&mut bytes).map_err(|e| e.to_string())?;
         let session = u128::from_ne_bytes(bytes).max(1);
-        let driver = Driver::bind(
+        let mut driver = Driver::bind(
             crate::bridge::owner_socket(core, space)?,
             session,
             QUEUE,
@@ -72,12 +84,14 @@ impl Runtime {
             1,
         )
         .map_err(|e| e.to_string())?;
+        let archive = Arc::new(archive::Archive::create(dir, session).map_err(|e| e.to_string())?);
+        attach_archive(&mut driver, &archive)?;
         let rules = load_rules(config, record.as_deref());
         let runtime = Self {
             driver,
             session,
             revision: 1,
-            mappings: Vec::new(),
+            archive,
             asker,
             pending: HashMap::new(),
             config: config.into(),
@@ -85,8 +99,16 @@ impl Runtime {
             record,
             rules,
             failed: false,
+            core: core.into(),
+            nft: nft.into(),
+            space: space.try_clone().map_err(|e| e.to_string())?,
         };
-        crate::bridge::owner_rules(core, nft, space, &classification(&[], false)?)?;
+        crate::bridge::owner_rules(
+            core,
+            nft,
+            space,
+            &classification(&[], epoch.level() + 1, false)?,
+        )?;
         fs::write(dir.join(READY), format!("{session:032x}\n")).map_err(|e| e.to_string())?;
         Ok(runtime)
     }
@@ -98,7 +120,7 @@ impl Runtime {
         self.asker.fd()
     }
     pub fn ready(&self) -> bool {
-        self.driver.has_ready()
+        self.driver.has_ready() || self.driver.rotation_due()
     }
 
     /// Does not acquire the instance LOCK: enter holds it shared while
@@ -155,17 +177,20 @@ impl Runtime {
         let leaf = crate::epoch::leaf_name(peer.pid, start);
         let cg = fs::read_to_string(format!("/proc/{child}/cgroup")).map_err(|e| e.to_string())?;
         let path = crate::kill::cgroup_of(&cg).ok_or("no child cgroup")?;
-        let leaf = if path == format!("{}/{}", epoch.path, leaf) {
-            leaf
-        } else if path == format!("{}/denied/{}", epoch.path, leaf) {
-            crate::epoch::denied_leaf(&leaf)
-        } else {
+        if path != format!("{}/{}", epoch.path, leaf) {
             return Err("child is not in its dedicated launch cgroup".into());
-        };
+        }
         if !held.alive() || !peer.alive() || crate::sys::start_time(peer.pid) != Some(start) {
             return Err("launch generation changed".into());
         }
-        if self.mappings.iter().any(|m| m.path == path) {
+        let cgroup = fs::metadata(epoch.leaf_dir(&leaf))
+            .map_err(|e| e.to_string())?
+            .ino();
+        if self
+            .archive
+            .contains_cgroup(cgroup)
+            .map_err(|e| e.to_string())?
+        {
             return Err("launch identity already registered".into());
         }
         let generation = (u128::from(peer.pid as u32) << 64) | u128::from(start);
@@ -174,19 +199,27 @@ impl Runtime {
             .register(program.clone(), generation)
             .map_err(|e| format!("strict registry: {e:?}"))?;
         let panel = panel.and_then(|pid| crate::sys::start_time(pid).map(|stamp| (pid, stamp)));
-        self.mappings.push(Mapping {
+        let mapping = Mapping {
             path: path.into(),
             leaf,
             program,
             generation,
             panel,
             token,
-        });
+            cgroup,
+            level: u8::try_from(epoch.level() + 1)
+                .map_err(|_| "cgroup depth exceeds kernel limit")?,
+            epoch: u64::from(epoch.n),
+        };
+        if let Err(error) = self.archive.append(&mapping) {
+            self.fail();
+            return Err(error.to_string());
+        }
         // Do not re-resolve archived directories which may have been swept.
         // Existing rules retain the kernel birth identity after removal.
         let rule = format!(
-            "add rule inet {TABLE} launches {}\n",
-            mapping_clause(self.mappings.last().unwrap())?
+            "add element inet {TABLE} launch_ids {{ {} }}\n",
+            mapping_clause(&mapping)?
         );
         let result = crate::bridge::owner_rules(core, nft, space, &rule).and_then(|()| {
             self.driver
@@ -211,6 +244,9 @@ impl Runtime {
         if self.failed {
             return Ok(());
         }
+        if self.driver.rotation_due() {
+            self.rotate_queue()?;
+        }
         let rules = load_rules(&self.config, self.record.as_deref());
         if rules != self.rules {
             self.asker.cancel_all();
@@ -224,13 +260,17 @@ impl Runtime {
                 .map_err(|e| e.to_string())?;
             self.rules = rules;
         }
-        for (ticket, verdict) in self.asker.answered() {
+        let answers = self.asker.answered();
+        // answered() can persist a rule. One coherent snapshot per intake
+        // round avoids opening config files for every packet in a burst.
+        let current = load_rules(&self.config, self.record.as_deref());
+        for (ticket, verdict) in answers {
             if let Some((held, key, name)) = self.pending.remove(&ticket) {
                 // answered() may have saved a permanent rule. Re-read before
                 // emitting the kernel verdict, without trusting tuple caches.
-                let rules = load_rules(&self.config, self.record.as_deref());
-                let permitted = packet_verdict(&rules, &key, name.as_deref(), &held.launch.program)
-                    != Some(Verdict::Deny);
+                let permitted =
+                    packet_verdict(&current, &key, name.as_deref(), &held.launch.program)
+                        != Some(Verdict::Deny);
                 self.driver
                     .decide(ticket, verdict == Verdict::Allow && permitted)
                     .map_err(|e| e.to_string())?;
@@ -239,11 +279,10 @@ impl Runtime {
         let names = crate::flows::read(&self.dir)
             .map(|(_, names)| names)
             .unwrap_or_default();
-        for held in self.driver.receive().map_err(|e| e.to_string())? {
+        let mut decisions = Vec::new();
+        for held in self.driver.receive_round().map_err(|e| e.to_string())? {
             let Some(destination) = held.destination else {
-                self.driver
-                    .decide(held.ticket, false)
-                    .map_err(|e| e.to_string())?;
+                decisions.push((held.ticket, false));
                 continue;
             };
             let key = crate::flows::Key {
@@ -253,27 +292,35 @@ impl Runtime {
                 rport: destination.port,
             };
             let name = crate::flows::name_of(&names, &key.remote).map(str::to_owned);
-            let rules = load_rules(&self.config, self.record.as_deref());
-            let verdict = packet_verdict(&rules, &key, name.as_deref(), &held.launch.program);
-            let verdict = verdict.or_else(|| {
-                let panel = self
-                    .mappings
-                    .iter()
-                    .find(|m| {
-                        m.generation == held.launch.generation && m.program == held.launch.program
-                    })
-                    .and_then(|m| m.panel);
-                self.asker
-                    .ask_held(&held, panel, crate::netask::destination(&key, &names))
-            });
+            let verdict = packet_verdict(&current, &key, name.as_deref(), &held.launch.program);
+            let verdict = if verdict.is_some() {
+                verdict
+            } else {
+                let mapping = self
+                    .archive
+                    .read(held.ticket.token_mark())
+                    .map_err(|e| e.to_string())?
+                    .ok_or("held packet has no immutable archive record")?;
+                if mapping.generation != held.launch.generation
+                    || mapping.program != held.launch.program
+                {
+                    return Err("held packet archive identity changed".into());
+                }
+                self.asker.ask_held(
+                    &held,
+                    mapping.panel,
+                    crate::netask::destination(&key, &names),
+                )
+            };
             if let Some(verdict) = verdict {
-                self.driver
-                    .decide(held.ticket, verdict == Verdict::Allow)
-                    .map_err(|e| e.to_string())?;
+                decisions.push((held.ticket, verdict == Verdict::Allow));
             } else {
                 self.pending.insert(held.ticket, (held, key, name));
             }
         }
+        self.driver
+            .decide_round(decisions)
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -290,8 +337,18 @@ impl Runtime {
             self.driver
                 .change_epoch(u64::from(epoch.n))
                 .map_err(|e| e.to_string())?;
-            let old = std::mem::take(&mut self.mappings);
-            for mapping in old {
+            let count = self.archive.count();
+            let mut mappings = Vec::new();
+            for index in 1..=count {
+                let mapping = self
+                    .archive
+                    .read(index)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing launch archive row")?;
+                // Already archived epochs are tombstones, not live groups.
+                if mapping.epoch + 1 != u64::from(epoch.n) {
+                    continue;
+                }
                 let path = epoch.leaf_dir(&mapping.leaf);
                 if !path.is_dir() {
                     continue;
@@ -300,20 +357,79 @@ impl Runtime {
                     .driver
                     .register(mapping.program.clone(), mapping.generation)
                     .map_err(|e| format!("strict registry: {e:?}"))?;
-                self.mappings.push(Mapping {
+                let mapping = Mapping {
                     path: format!("{}/{}", epoch.path, mapping.leaf),
+                    cgroup: fs::metadata(&path).map_err(|e| e.to_string())?.ino(),
+                    epoch: u64::from(epoch.n),
                     token,
                     ..mapping
-                });
+                };
+                self.archive.append(&mapping).map_err(|e| e.to_string())?;
+                mappings.push(mapping);
             }
-            crate::bridge::owner_rules(core, nft, space, &classification(&self.mappings, true)?)?;
-            for mapping in &self.mappings {
+            crate::bridge::owner_rules(
+                core,
+                nft,
+                space,
+                &classification(&mappings, epoch.level() + 1, true)?,
+            )?;
+            for mapping in &mappings {
                 self.driver
                     .activate_after_mapping_ack(mapping.token)
                     .map_err(|e| format!("activation: {e:?}"))?;
             }
             Ok(())
         })();
+        if result.is_err() {
+            self.fail();
+        }
+        result
+    }
+
+    fn rotate_queue(&mut self) -> Result<(), String> {
+        // Fence and ACK before destroying a queue. Unmatched/late packets
+        // cannot slip through while the kernel queue ID counter resets.
+        crate::bridge::owner_rules(&self.core, &self.nft, &self.space,
+            &format!("add chain inet {TABLE} rotation {{ type filter hook output priority -6; policy drop; }}\n"))?;
+        let mut bytes = [0; 16];
+        crate::bridge::random_bytes(&mut bytes).map_err(|e| e.to_string())?;
+        let id = u128::from_ne_bytes(bytes).max(1);
+        if id == self.driver.session_id() {
+            return Err("queue generation collision".into());
+        }
+        self.asker.rotate_session(self.driver.session_id(), id);
+        self.pending.clear();
+        self.driver.close();
+        // The archive's registration session remains stable. Only packet/UI
+        // tickets change generation; in-progress launch registrations keep
+        // working across this internal queue rotation.
+        let epoch = crate::epoch::read(&self.dir).ok_or("rotation has no network epoch")?;
+        let mut driver = Driver::bind(
+            crate::bridge::owner_socket(&self.core, &self.space)?,
+            id,
+            QUEUE,
+            u64::from(epoch.n),
+            self.revision,
+        )
+        .map_err(|e| e.to_string())?;
+        attach_archive(&mut driver, &self.archive)?;
+        self.driver = driver;
+        crate::bridge::owner_rules(
+            &self.core,
+            &self.nft,
+            &self.space,
+            &format!("delete chain inet {TABLE} rotation\n"),
+        )?;
+        Ok(())
+    }
+
+    /// Host-only maintenance uses the same path as automatic counter
+    /// rotation, so real kernel tests need not send a billion packets.
+    pub(crate) fn maintenance_rotate(&mut self) -> Result<(), String> {
+        if self.failed {
+            return Err("strict controller is closed".into());
+        }
+        let result = self.rotate_queue();
         if result.is_err() {
             self.fail();
         }
@@ -344,8 +460,15 @@ fn packet_verdict(
 ) -> Option<Verdict> {
     if program == DIAGNOSTIC || rules.decide(Some(program)) == crate::netrules::Rule::Deny {
         Some(Verdict::Deny)
+    } else if crate::relay::to_forwarder(key) {
+        // Preserve the explicit DNS-forwarder exception for an asking app.
+        Some(Verdict::Allow)
+    } else if rules.blocked(name, &key.remote) {
+        Some(Verdict::Deny)
     } else {
-        rules.of_flow(key, name, Some(program))
+        // The relay deliberately ignores some protocols for legacy gating.
+        // A decoded strict packet must NEVER inherit that automatic allow.
+        rules.decide(Some(program)).verdict()
     }
 }
 
@@ -429,18 +552,49 @@ fn registered_launch(registry: &Path, pid: i32) -> Option<(String, i32)> {
     None
 }
 
-fn classification(mappings: &[Mapping], replace: bool) -> Result<String, String> {
+fn attach_archive(
+    driver: &mut Driver<Socket>,
+    archive: &Arc<archive::Archive>,
+) -> Result<(), String> {
+    let count = archive.count();
+    let archive = archive.clone();
+    driver
+        .set_archive(count, move |token| {
+            Ok(archive.read(token)?.map(|m| crate::netqueue::Launch {
+                program: m.program,
+                generation: m.generation,
+                epoch: m.epoch,
+            }))
+        })
+        .map_err(|e| e.to_string())
+}
+
+fn classification(mappings: &[Mapping], level: u32, replace: bool) -> Result<String, String> {
     let mut text = if replace {
         format!("delete table inet {TABLE}\n")
     } else {
         String::new()
     };
-    text.push_str(&format!("table inet {TABLE} {{ chain launches {{\n"));
-    for mapping in mappings {
-        text.push_str(&mapping_clause(mapping)?);
-        text.push('\n');
+    if !(1..=255).contains(&level) {
+        return Err("invalid launch cgroup depth".into());
     }
-    text.push_str(" }\n chain output { type filter hook output priority -5; policy drop;\n meta mark set 0\n oifname \"lo\" accept\n icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert } accept\n jump launches\n counter drop\n }\n}\n");
+    text.push_str(&format!(
+        "table inet {TABLE} {{\n map launch_ids {{ typeof socket cgroupv2 level 0 : meta mark;\n"
+    ));
+    if !mappings.is_empty() {
+        text.push_str("elements = { ");
+        for (i, mapping) in mappings.iter().enumerate() {
+            if u32::from(mapping.level) != level {
+                return Err("mixed launch cgroup depth".into());
+            }
+            if i != 0 {
+                text.push_str(", ");
+            }
+            text.push_str(&mapping_clause(mapping)?);
+        }
+        text.push_str(" }\n");
+    }
+    text.push_str(&format!(" }}\n chain output {{ type filter hook output priority -5; policy drop;\n meta mark set 0\n oifname \"lo\" accept\n icmpv6 type {{ nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert }} accept\n meta mark set socket cgroupv2 level {level} map @launch_ids\n meta mark != 0 queue num {QUEUE}\n counter drop\n }}\n}}\n"));
     if text.len() > 1024 * 1024 {
         return Err("strict rule capacity exhausted".into());
     }
@@ -448,16 +602,17 @@ fn classification(mappings: &[Mapping], replace: bool) -> Result<String, String>
 }
 
 fn mapping_clause(mapping: &Mapping) -> Result<String, String> {
-    if !crate::epoch::sane_path(&mapping.path) {
-        return Err("invalid launch cgroup path".into());
+    if mapping.cgroup == 0 || mapping.level == 0 || !crate::epoch::sane_path(&mapping.path) {
+        return Err("invalid kernel cgroup identity".into());
     }
-    let path = mapping
-        .path
-        .strip_prefix('/')
-        .ok_or("absolute cgroup path required")?;
-    let level = mapping.path.split('/').filter(|p| !p.is_empty()).count();
+    // nftables <=1.1.6 interprets numeric cgroup map keys as paths. Resolve
+    // the live group once, retaining its full-width kernel ID thereafter.
     Ok(format!(
-        "socket cgroupv2 level {level} \"{path}\" meta mark set {} queue num {QUEUE}",
+        "\"{}\" : {}",
+        mapping
+            .path
+            .strip_prefix('/')
+            .ok_or("absolute cgroup path required")?,
         mapping.token.mark()
     ))
 }
@@ -465,6 +620,29 @@ fn mapping_clause(mapping: &Mapping) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_policy_never_inherits_legacy_ungated_protocol_allowance() {
+        let root = std::env::temp_dir().join(format!("cw-strict-policy-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let rules = crate::netrules::Rules::template_only(&root);
+        let key = crate::flows::Key {
+            proto: 50,
+            lport: 0,
+            remote: "198.51.100.1".parse().unwrap(),
+            rport: 0,
+        };
+        assert_eq!(
+            rules.of_flow(&key, None, Some("test")),
+            Some(Verdict::Allow)
+        );
+        assert_eq!(packet_verdict(&rules, &key, None, "test"), None);
+        assert_eq!(
+            packet_verdict(&rules, &key, None, DIAGNOSTIC),
+            Some(Verdict::Deny)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn strict_registry_requires_a_live_generation_and_unique_launcher_key() {
@@ -489,9 +667,9 @@ mod tests {
 
     #[test]
     fn classifier_drops_unregistered_egress_and_clears_application_marks_first() {
-        let rules = classification(&[], false).unwrap();
+        let rules = classification(&[], 2, false).unwrap();
         assert!(rules.contains("policy drop"));
-        assert!(rules.find("meta mark set 0").unwrap() < rules.find("jump launches").unwrap());
+        assert!(rules.find("meta mark set 0").unwrap() < rules.find("map @launch_ids").unwrap());
         assert!(!rules.contains("bypass"));
         assert!(!rules.contains("policy accept"));
         assert!(rules.contains("counter drop"));
@@ -504,12 +682,14 @@ mod tests {
             generation: 1,
             panel: None,
             token,
+            cgroup: 0x1_0000_0001,
+            level: 2,
+            epoch: 1,
         };
         let clause = mapping_clause(&mapping).unwrap();
-        // nft's cgroup path token preserves literal systemd backslashes.
-        // Doubling them changes the filesystem path and fails resolution.
         assert!(clause.contains("a\\x2db.service"));
         assert!(!clause.contains("a\\\\x2db.service"));
+        assert!(classification(&[mapping], 3, false).is_err());
     }
 
     #[test]
@@ -534,7 +714,7 @@ mod tests {
             .stdin
             .take()
             .unwrap()
-            .write_all(classification(&[], false).unwrap().as_bytes())
+            .write_all(classification(&[], 2, false).unwrap().as_bytes())
             .unwrap();
         assert!(child.wait().unwrap().success());
     }

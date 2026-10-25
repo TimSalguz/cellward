@@ -646,6 +646,11 @@ pub fn has_display() -> bool {
 /// Run a program inside a zone. Returns only when something went wrong: the
 /// successful path ends in `execvp`.
 pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
+    if Selection::parse(argv).is_ok_and(|s| !is_unconfined_name(&s.zone.to_string_lossy())) {
+        if let Some(code) = crate::user_launch::maybe_delegate(tools, "run", argv) {
+            return code;
+        }
+    }
     // The picker's pipe, when it watches this launch for a hand-over
     // (`crate::picker`): taken at once — nothing this starts on the way
     // (a dialog, systemctl) inherits it —, given on to `wl-sandbox` just

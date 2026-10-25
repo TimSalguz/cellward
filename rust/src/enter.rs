@@ -387,7 +387,7 @@ fn cloexec_from_three() -> io::Result<()> {
 
 /// Higher descriptors are closed on exec. Standard descriptors must not
 /// carry an already-connected host IP/packet/control socket into strict mode.
-fn strict_stdio() -> io::Result<()> {
+pub(crate) fn strict_stdio() -> io::Result<()> {
     for fd in 0..=2 {
         let mut domain = 0i32;
         let mut len = std::mem::size_of_val(&domain) as libc::socklen_t;

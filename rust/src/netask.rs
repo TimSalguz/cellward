@@ -406,6 +406,25 @@ impl Asker<Key> {
 }
 
 impl Asker<crate::netqueue::Ticket> {
+    /// Trusted queue rotation only: identity, epoch and policy are unchanged.
+    /// Cancel pending workers/tickets, preserve only completed launch-scoped
+    /// grants. Old callbacks still carry the old round and cannot persist.
+    pub(crate) fn rotate_session(&mut self, old: u128, new: u128) {
+        let completed = std::mem::take(&mut self.session);
+        self.cancel_all();
+        if self.closed {
+            return;
+        }
+        for (question, verdict) in completed {
+            if let QuestionId::Registered(program, scope) = question {
+                if let Some(scope) = scope.rebind_session(old, new) {
+                    self.session
+                        .insert(QuestionId::Registered(program, scope), verdict);
+                }
+            }
+        }
+    }
+
     /// The destination is display data only. Authorization is returned for
     /// the original ticket, never reconstructed from an address/port tuple.
     pub fn ask_held(
@@ -705,6 +724,44 @@ mod tests {
         assert!(asker.session.get(&question_b).is_none());
         session.decide(first.ticket, true).unwrap();
         assert!(session.decide(second.ticket, false).is_ok());
+    }
+
+    #[test]
+    fn queue_rotation_preserves_only_completed_grants_and_cancels_old_workers() {
+        let root = std::env::temp_dir().join(format!("vz-netask-requeue-{}", std::process::id()));
+        let mut asker =
+            Asker::<crate::netqueue::Ticket>::new(Path::new(""), &root, &root, &root, None)
+                .unwrap();
+        let mut old = crate::netqueue::Session::new(123, 7, 1, 1).unwrap();
+        let a = old.register("firefox".into(), 10).unwrap();
+        old.activate(123, a).unwrap();
+        let first = strict_held(&mut old, a, 1);
+        let question = strict_question(&first);
+        asker.session.insert(question.clone(), Verdict::Allow);
+        asker
+            .tx
+            .send((asker.round, question, Answer::Always))
+            .unwrap();
+        asker.rotate_session(123, 456);
+        assert!(
+            asker.answered().is_empty(),
+            "old queued UI result cannot persist"
+        );
+        let mut next = crate::netqueue::Session::new(456, 7, 1, 1).unwrap();
+        let a = next.register("firefox".into(), 10).unwrap();
+        next.activate(456, a).unwrap();
+        let messages =
+            crate::netqueue::wire::parse(&crate::netqueue::wire::fixture(7, 1, a.mark()), 0, false)
+                .unwrap();
+        let crate::netqueue::wire::Message::Packet(packet) = &messages[0] else {
+            panic!()
+        };
+        let held = next.hold(456, packet).unwrap();
+        assert_eq!(
+            asker.ask_held(&held, None, "server".into()),
+            Some(Verdict::Allow)
+        );
+        assert!(asker.waiting.is_empty());
     }
 
     #[test]

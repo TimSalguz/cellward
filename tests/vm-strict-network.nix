@@ -49,10 +49,11 @@ let
       def alice(cmd):
           return machine.succeed("su -l alice -c " + shlex.quote("export XDG_RUNTIME_DIR=/run/user/1000; " + cmd))
       def run(cmd):
-          # A login session created by root's su has no delegated common
-          # cgroup ancestor. Model desktop launches from the user manager;
-          # strict mode must not fall back when migration is forbidden.
-          return alice("systemd-run --user --wait --pipe --collect --quiet cellward run host --container strict-test -- " + cmd)
+          # A root-created login must be delegated automatically by Cellward.
+          return alice("cellward run host --container strict-test -- " + cmd)
+      def rotate_queue():
+          code = "import pathlib,socket; p=next(pathlib.Path('/home/alice/.local/state/vpn-zones/.instances').glob('*/strict-network')); s=socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect(str(p.parent/'control')); s.sendall(b'ROTATE-OWNER-QUEUE\\\\n'); assert s.recv(512)==b'REQUEUED\\\\n'"
+          alice("python3 -c " + shlex.quote(code))
       peer.succeed("ip addr add 198.51.100.1/24 dev eth1; mkdir -p /tmp/strict-http; echo STRICT_OK > /tmp/strict-http/index.html")
       peer.succeed("systemd-run --unit=strict-http ${pkgs.python3}/bin/python3 -m http.server 8000 --bind 0.0.0.0 --directory /tmp/strict-http")
       peer.wait_for_open_port(8000)
@@ -78,6 +79,11 @@ let
           assert int(machine.succeed("grep -c STRICT_OK /tmp/strict-loop.log || true").strip()) == 0
           alice(f"printf '\\nnet_default = allow\\n' >> {policy}")
           machine.wait_until_succeeds("grep -q STRICT_OK /tmp/strict-loop.log", timeout=20)
+          rotate_queue()
+          machine.sleep(1)
+          rotated = machine.succeed("grep -c STRICT_OK /tmp/strict-loop.log").strip()
+          rotate_queue()
+          machine.wait_until_succeeds(f"test $(grep -c STRICT_OK /tmp/strict-loop.log) -gt {rotated}", timeout=20)
           alice(f"printf '\\nnet_default = deny\\n' >> {policy}")
           machine.sleep(2)
           before = machine.succeed("grep -c STRICT_OK /tmp/strict-loop.log").strip()
@@ -87,7 +93,7 @@ let
           machine.wait_until_succeeds(f"test $(grep -c STRICT_OK /tmp/strict-loop.log) -gt {before}", timeout=20)
           alice("systemctl --user stop strict-loop.service")
       with subtest("doctor has an explicit network-denied diagnostic registration"):
-          result = alice("systemd-run --user --wait --pipe --collect --quiet cellward doctor host || true")
+          result = alice("cellward doctor host || true")
           assert "strict launch registration failed" not in result, result
           assert "network-owner" in result, result
       with subtest("network switch drains and re-registers existing launches"):

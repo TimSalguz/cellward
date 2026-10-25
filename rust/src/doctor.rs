@@ -2687,6 +2687,9 @@ fn all_zones(tools: &Tools) -> Vec<String> {
 
 /// `vpn-zone doctor [<zone>…] [--json]`. Exit code 1 when anything failed.
 pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
+    if let Some(code) = crate::user_launch::maybe_delegate(tools, "doctor", args) {
+        return code;
+    }
     let json = args.iter().any(|a| a == "--json");
     let asked: Vec<String> = args
         .iter()

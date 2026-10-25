@@ -207,11 +207,12 @@ fn packet(body: &[u8]) -> Result<Packet, Error> {
     })
 }
 
-/// Unsupported fragments/extension headers have no destination and must be
-/// dropped by the live controller, never bypass destination restrictions.
+/// Decode bounded IP headers without retaining their contents. Real fragments
+/// lacking the transport header still require reassembly; never invent ports
+/// from fragment data. Atomic IPv6 fragments can be decoded normally.
 fn header_destination(family: u8, b: &[u8]) -> Option<Destination> {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    let (protocol, address, offset) = match family {
+    let (mut protocol, address, mut offset) = match family {
         2 if b.len() >= 20 && b[0] >> 4 == 4 => {
             let offset = usize::from(b[0] & 15) * 4;
             if offset < 20 || offset > b.len() || u16::from_be_bytes([b[6], b[7]]) & 0x3fff != 0 {
@@ -230,17 +231,70 @@ fn header_destination(family: u8, b: &[u8]) -> Option<Destination> {
         ),
         _ => return None,
     };
+    if family == 10 {
+        loop {
+            let size = match protocol {
+                // RFC 8200: length excludes the first eight octets.
+                0 | 43 | 60 => (usize::from(*b.get(offset + 1)?) + 1) * 8,
+                // RFC 4302: AH length excludes the first two words.
+                51 => {
+                    let size = (usize::from(*b.get(offset + 1)?) + 2) * 4;
+                    if size < 12 {
+                        return None;
+                    }
+                    size
+                }
+                44 => {
+                    let header = b.get(offset..offset.checked_add(8)?)?;
+                    // A zero offset with M=0 is an atomic fragment. Reserved
+                    // bits must be zero too; noninitial/partial fragments do
+                    // not contain an independently authorizable transport.
+                    if header[1] != 0 || header[2..4] != [0, 0] {
+                        return None;
+                    }
+                    8
+                }
+                _ => break,
+            };
+            let end = offset.checked_add(size)?;
+            let header = b.get(offset..end)?;
+            protocol = header[0];
+            offset = end;
+        }
+    }
     let transport = b.get(offset..)?;
     let (local_port, port) = match protocol {
-        6 | 17 if transport.len() >= if protocol == 6 { 20 } else { 8 } => (
-            u16::from_be_bytes([transport[0], transport[1]]),
-            u16::from_be_bytes([transport[2], transport[3]]),
-        ),
-        1 | 58 if transport.len() >= 8 && transport[0] == if protocol == 1 { 8 } else { 128 } => (
-            u16::from_be_bytes([transport[4], transport[5]]),
-            u16::from(transport[0]),
-        ),
-        _ => return None,
+        6 | 17 | 33 | 132 | 136 => {
+            let minimum = match protocol {
+                6 => 20,
+                33 | 132 => 12,
+                _ => 8,
+            };
+            if transport.len() < minimum {
+                return None;
+            }
+            (
+                u16::from_be_bytes([transport[0], transport[1]]),
+                u16::from_be_bytes([transport[2], transport[3]]),
+            )
+        }
+        1 | 58 => {
+            if transport.len() < 8 {
+                return None;
+            }
+            let echo = matches!((protocol, transport[0]), (1, 0 | 8) | (58, 128 | 129));
+            (
+                if echo {
+                    u16::from_be_bytes([transport[4], transport[5]])
+                } else {
+                    0
+                },
+                u16::from(transport[0]),
+            )
+        }
+        // Protocols without a decoded port remain subject to the strict
+        // launch/destination policy, not the legacy relay's ungated bypass.
+        _ => (0, 0),
     };
     Some(Destination {
         protocol,
@@ -288,7 +342,7 @@ fn binding(queue: u16, sequence: u32, max_pending: u32, headers: bool) -> Result
     }
     let mut attrs = Vec::new();
     attr(&mut attrs, 1, &[1, 0, 0, 0]); // BIND
-    let mut params = (if headers { 128u32 } else { 0 }).to_be_bytes().to_vec();
+    let mut params = (if headers { 4096u32 } else { 0 }).to_be_bytes().to_vec();
     params.push(if headers { 2 } else { 1 });
     attr(&mut attrs, 2, &params);
     attr(&mut attrs, 3, &max_pending.to_be_bytes());
@@ -326,6 +380,54 @@ pub(crate) fn fixture(queue: u16, id: u32, mark: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv6_extension_chain_and_atomic_fragment_keep_the_actual_transport() {
+        // Hop-by-hop -> routing -> destination -> AH -> atomic fragment -> UDP.
+        let mut b = vec![0; 40 + 8 + 8 + 8 + 12 + 8 + 8];
+        b[0] = 0x60;
+        b[6] = 0;
+        b[24..40].copy_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+        b[40] = 43;
+        b[48] = 60;
+        b[56] = 51;
+        b[64] = 44;
+        b[65] = 1;
+        b[76] = 17;
+        b[84..88].copy_from_slice(&[0x12, 0x34, 0x01, 0xbb]);
+        let d = header_destination(10, &b).unwrap();
+        assert_eq!((d.protocol, d.local_port, d.port), (17, 0x1234, 443));
+        for cut in 0..b.len() {
+            assert!(header_destination(10, &b[..cut]).is_none(), "cut {cut}");
+        }
+        b[79] = 1;
+        assert!(
+            header_destination(10, &b).is_none(),
+            "first fragment needs reassembly"
+        );
+        b[79] = 8;
+        assert!(
+            header_destination(10, &b).is_none(),
+            "noninitial fragment is not UDP"
+        );
+        b[79] = 0;
+        b[65] = 0;
+        assert!(header_destination(10, &b).is_none(), "undersized AH");
+    }
+
+    #[test]
+    fn long_options_and_protocols_without_ports_are_not_automatically_blocked() {
+        let mut b = vec![0; 40 + 2048 + 8];
+        b[0] = 0x60;
+        b[6] = 60;
+        b[40] = 17;
+        b[41] = 255;
+        b[2088..2092].copy_from_slice(&[0x12, 0x34, 0x01, 0xbb]);
+        assert_eq!(header_destination(10, &b).unwrap().port, 443);
+        b[6] = 50;
+        let d = header_destination(10, &b).unwrap();
+        assert_eq!((d.protocol, d.local_port, d.port), (50, 0, 0));
+    }
 
     #[test]
     fn kernel_may_omit_padding_only_after_the_final_attribute_and_message() {

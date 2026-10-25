@@ -1290,10 +1290,12 @@ fn ask_window(
     memory: &Memory,
     avoid: Option<&Container>,
 ) -> Option<Option<(String, Container)>> {
+    let startup = StartupTrace::new();
     if tools.window.as_os_str().is_empty() {
         return None;
     }
     let mut req = window_request(tools, key, label, default_net, memory);
+    startup.mark("dialog request prepared");
     if avoid.is_some() {
         req.notes.push("Отдельный запуск: выбери другой контейнер/дом. Одна только смена сети не отделяет профиль браузера от уже открытого процесса.".to_owned());
     }
@@ -1773,15 +1775,18 @@ fn restrict_reply_offers(req: &window::Request, reply: &mut window::Reply) {
 }
 
 fn show_window(tools: &Tools, req: &window::Request) -> Option<Option<window::Reply>> {
+    let startup = StartupTrace::new();
     let mut child = Command::new(&tools.window)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    startup.mark("dialog process spawned (not first frame)");
     if let Some(mut stdin) = child.stdin.take() {
         let _ = std::io::Write::write_all(&mut stdin, window::render(req).as_bytes());
     }
+    startup.mark("dialog request delivered (not first frame)");
     // From here on a failure is a close, never the menus on top of a window
     // the person has already answered.
     let Ok(out) = child.wait_with_output() else {
@@ -1950,7 +1955,32 @@ pub fn run_argv(
 // --- THE PROGRAM -------------------------------------------------------------
 
 /// Entry point of the `vpn-zone-pick` binary.
+/// Opt-in startup milestones. Never log argv, clipboard contents or destinations.
+/// Times end before waiting for a person's reply; that wait is not UI startup.
+struct StartupTrace(Option<std::time::Instant>);
+
+impl StartupTrace {
+    fn new() -> Self {
+        Self(
+            (std::env::var_os("CELLWARD_TRACE_STARTUP").as_deref()
+                == Some(std::ffi::OsStr::new("1")))
+            .then(std::time::Instant::now),
+        )
+    }
+
+    fn mark(&self, stage: &str) {
+        if let Some(started) = self.0 {
+            eprintln!(
+                "cellward startup [{}]: {stage}: {} ms",
+                std::process::id(),
+                started.elapsed().as_millis()
+            );
+        }
+    }
+}
+
 pub fn main() -> ExitCode {
+    let startup = StartupTrace::new();
     // From a program of another launch: the session's compositor, for the
     // window and the launch (`wl_sandbox::session_compositor`).
     crate::wl_sandbox::session_compositor();
@@ -1970,6 +2000,7 @@ pub fn main() -> ExitCode {
             return ExitCode::from(EXIT_TOOLS);
         }
     };
+    startup.mark("tools loaded");
     for dir in [".last", ".lastprofile", ".pinnedprofile", ".labels"] {
         let _ = fs::create_dir_all(tools.state.join(dir));
     }
@@ -2039,6 +2070,7 @@ pub fn main() -> ExitCode {
         );
     }
     let memory = read_memory(&tools, &key);
+    startup.mark("launch state loaded (before any container startup)");
     if args.autostart {
         // For the launch: a network refused at an autostart question of this
         // session is not asked again (`connect::autostart_launch`).

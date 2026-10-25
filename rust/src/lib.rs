@@ -155,6 +155,7 @@ pub mod netask;
 pub mod netmap;
 pub mod netqueue;
 pub mod strict_network;
+pub mod user_launch;
 pub mod netrules;
 pub mod niri;
 pub mod oc_form;

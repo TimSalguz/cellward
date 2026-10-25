@@ -1,5 +1,6 @@
 //! Kernel-only, nonblocking NFNETLINK transport. Opening this socket does
 //! not install a firewall or enable the experimental strict backend.
+use std::cell::RefCell;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
@@ -8,9 +9,35 @@ use super::wire;
 
 pub struct Socket {
     fd: OwnedFd,
+    buffer: RefCell<Vec<u8>>,
 }
 
 impl Socket {
+    /// Bound kernel backlog to the real netlink receive budget. Rootless
+    /// helpers cannot raise the host's rmem_max; blindly requesting 1024
+    /// copies can strand packets or kill the collector on a stock host.
+    pub fn queue_capacity(&self) -> io::Result<u32> {
+        let mut bytes = 0i32;
+        let mut len = std::mem::size_of_val(&bytes) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                self.fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                std::ptr::from_mut(&mut bytes).cast(),
+                &mut len,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // 4096 prefix + metadata rounds to an 8KiB skb; reserve at least
+        // half for ACK skb accounting, incoming races and allocator overhead.
+        if bytes < 16 * 1024 {
+            return Err(io::Error::other("netlink receive budget below 16KiB"));
+        }
+        Ok((bytes as u32 / (16 * 1024)).clamp(1, super::MAX_PENDING as u32))
+    }
     /// Only for a descriptor handed back by the trusted namespace helper.
     pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
         for (option, expected) in [
@@ -41,7 +68,10 @@ impl Socket {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            buffer: RefCell::new(vec![0; wire::MAX_DATAGRAM]),
+        })
     }
 
     pub fn open_here() -> io::Result<Self> {
@@ -57,6 +87,21 @@ impl Socket {
             return Err(io::Error::last_os_error());
         }
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let requested = 8 * 1024 * 1024i32;
+        // This is an ordinary per-socket request, capped by rmem_max. No
+        // host sysctl or privileged SO_RCVBUFFORCE operation is used.
+        if unsafe {
+            libc::setsockopt(
+                fd.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                std::ptr::from_ref(&requested).cast(),
+                std::mem::size_of_val(&requested) as libc::socklen_t,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
         // SAFETY: zeroed sockaddr_nl with family/pid/groups initialized.
         let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         address.nl_family = libc::AF_NETLINK as u16;
@@ -70,7 +115,10 @@ impl Socket {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            buffer: RefCell::new(vec![0; wire::MAX_DATAGRAM]),
+        })
     }
 
     pub fn fd(&self) -> RawFd {
@@ -110,7 +158,7 @@ impl Socket {
     }
 
     pub fn receive(&self) -> io::Result<Option<Vec<wire::Message>>> {
-        let mut data = vec![0u8; wire::MAX_DATAGRAM];
+        let mut data = self.buffer.borrow_mut();
         let mut sender: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         let mut iov = libc::iovec {
             iov_base: data.as_mut_ptr().cast(),

@@ -12,11 +12,11 @@ Requirements: Linux 6.5+ (`SO_PEERPIDFD`), delegated launch cgroups,
 generation. Unsupported/missing prerequisites refuse startup. `status --json`
 reports `network_ownership`; `doctor` reports strict availability. After collector
 failure its sticky required marker prevents an unregistered fallback launch.
-Launches must originate below the delegated user manager. A root-created `su`
-login session cannot migrate through its root-owned common cgroup ancestor;
-strict mode refuses that launch rather than silently sharing an identity.
-For such a CLI session, use `systemd-run --user --wait --pipe --collect
-cellward run …` to launch through the user manager.
+Launches must originate below the delegated user manager. CLI launches from
+outside it now automatically hand off through a transient user service. A
+host-authenticated Unix socket transfers byte-exact argv/environment, the cwd
+descriptor and optional window notification pipe. Standard I/O is checked
+before delegation; failure refuses startup rather than sharing an identity.
 This extends [the procfs-independent lookup fix](NETWORK-OWNERSHIP.md).
 
 ## Invariant and mechanism
@@ -62,9 +62,12 @@ information is display/logging data, not the identity.
 - `rust/src/netqueue.rs`: bounded launch/ticket state. Reservation is distinct
   from activation; an unactivated token cannot hold an authorizable packet.
   Registrations retain immutable program and generation data after process
-  death. Tokens are never reused within a session. Limits are 4096 launch
-  records and 1024 pending packets, with explicit capacity failures, no eviction
-  into another identity and no automatic approval.
+  death. Tokens are never reused within a session. The live cache holds 4096
+  launch records; a private append-only archive restores evicted identities
+  without re-reading a dead process. Pending identities cannot be evicted.
+  Archive storage and kernel mappings still consume resources; this is not an
+  unlimited lifetime guarantee. Pending packets are bounded by 1024 and a
+  smaller kernel queue limit derived from the actual receive buffer.
   A single launch may retain at most 64 pending packets, independently of the
   instance-wide 1024 limit. Rejection does not evict another launch's identity;
   deciding or draining a packet restores its launch's quota.
@@ -82,13 +85,18 @@ information is display/logging data, not the identity.
 - `rust/src/netqueue/socket.rs`: explicit nonblocking, close-on-exec
   NETLINK_NETFILTER adapter. The peer identity comes from recvmsg sockaddr_nl,
   not a user-supplied nlmsg header. No firewall rule is installed by opening it.
-  The live driver transiently copies at most 128 packet-prefix bytes to decode
+  The live driver transiently copies at most 4096 packet-prefix bytes to decode
   addresses/protocol/ports; only those fields survive parsing. Payload bytes are
   not archived. The metadata-only codec remains available for kernel probes.
 - `rust/src/netqueue/driver.rs`: socket-owning runtime adapter. Binding and
   individual verdicts require exact outstanding sequence ACKs; unexpected,
   failed or missing ACKs close the actual transport and invalidate the model.
-  Sequences never wrap. Packets arriving while awaiting an ACK are retained
+  Sequences never wrap. Before counter exhaustion, a fail-closed egress fence
+  permits queue replacement with a fresh ticket generation, retaining archived
+  launch identity and completed grants but cancelling pending questions.
+  Normal traffic uses bounded rounds with individual asynchronous verdict ACKs;
+  policy transitions still synchronously acknowledge their DROP barrier.
+  Packets arriving while awaiting an ACK are retained
   under the same bounds, not ignored. Unknown/unarmed/old-epoch identities are
   dropped without presenting an ownerless permission question. Policy/epoch
   changes acknowledge DROP of outstanding tickets; late UI callbacks cannot
@@ -208,17 +216,16 @@ Compile and run sequentially beneath `tests/run-memory-guard.py`.
 
 ## Limits and remaining coverage
 
-1. The bounded header decoder supports ordinary IPv4/IPv6 TCP, UDP and echo
-   requests. Unparsed extension/fragment headers and unsupported protocols DROP,
-   not an ownerless permission question or allow. Broader protocol coverage and
-   GSO/fragment stress still need dedicated tests. DNS forwarding policy retains
-   the existing `netrules::Rules::of_flow` semantics; this is not a new promise
-   of destination-level or DNS-request approval.
-2. Implement safe automatic session rotation before token, record or packet-ID exhaustion.
-   No tombstone may be deleted while delayed kernel messages, held packets or
-   old UI replies could refer to it. Restarts do not reuse a live queue's old
-   identity. Capacity/unsupported-kernel conditions are startup/operational
-   failures, not an “unknown application, allow?” modal per connection.
+1. The bounded decoder handles IPv4 options, checked IPv6 extension chains and
+   atomic fragment headers. Unsupported/truncated fragmentation drops rather
+   than guessing. Other IP protocols retain launch identity and require explicit
+   policy, not the legacy automatic protocol allowance. Broader GSO and DNS
+   integration stress still need dedicated tests; destination-level approval
+   is not promised by launch ownership.
+2. Queue rotation is implemented before packet/verdict sequence exhaustion.
+   Archive token exhaustion and finite disk/kernel resources still fail closed;
+   no tombstone is reused for a different owner. Capacity/unsupported-kernel
+   conditions are operational failures, not ownerless permission questions.
 3. Expand multi-launch namespace/VM regression tests: two actual birth cgroups, same
    tuples/reuseport, rapid UDP, TCP/QUIC, DNS, passed FDs, network switches,
    policy changes, startup races and collector crashes. The focused

@@ -1,19 +1,27 @@
 //! Fail-closed queue lifetime and ACK handling. This is not launch registration
 //! IPC and does not install cgroup rules. A failed driver drops its socket,
 //! rather than leaving an apparently closed model with a live kernel queue.
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io;
 use std::time::{Duration, Instant};
 
-use super::{socket::Socket, wire, Decision, Held, Session, Ticket, Token, MAX_PENDING};
+use super::{socket::Socket, wire, Decision, Held, Launch, Session, Ticket, Token, MAX_PENDING};
+
+type Lookup = Box<dyn Fn(u32) -> io::Result<Option<Launch>> + Send + Sync>;
 
 pub trait Transport {
     fn send(&self, message: &[u8]) -> io::Result<()>;
     fn receive(&self) -> io::Result<Option<Vec<wire::Message>>>;
     fn wait(&self, timeout: Duration) -> io::Result<()>;
+    fn queue_capacity(&self) -> io::Result<u32> {
+        Ok(MAX_PENDING as u32)
+    }
 }
 
 impl Transport for Socket {
+    fn queue_capacity(&self) -> io::Result<u32> {
+        self.queue_capacity()
+    }
     fn send(&self, message: &[u8]) -> io::Result<()> {
         self.send(message)
     }
@@ -31,8 +39,9 @@ pub struct Driver<T: Transport> {
     id: u128,
     queue: u16,
     sequence: u32,
-    acknowledgements: HashSet<u32>,
+    acknowledgements: BTreeMap<u32, Instant>,
     ready: VecDeque<Held>,
+    archive: Option<Lookup>,
 }
 
 impl<T: Transport> Driver<T> {
@@ -49,12 +58,13 @@ impl<T: Transport> Driver<T> {
             id,
             queue,
             sequence: 0,
-            acknowledgements: HashSet::new(),
+            acknowledgements: BTreeMap::new(),
             ready: VecDeque::new(),
+            archive: None,
         };
         let result = (|| {
             let sequence = driver.next_sequence()?;
-            let binding = wire::bind_headers(queue, sequence, MAX_PENDING as u32)
+            let binding = wire::bind_headers(queue, sequence, driver.socket()?.queue_capacity()?)
                 .map_err(|e| io::Error::other(format!("network queue binding: {e:?}")))?;
             driver.send(sequence, &binding)?;
             driver.flush()?;
@@ -66,6 +76,24 @@ impl<T: Transport> Driver<T> {
 
     pub fn register(&mut self, program: String, generation: u128) -> Result<Token, super::Error> {
         self.session.register(program, generation)
+    }
+
+    pub fn set_archive(
+        &mut self,
+        issued: u32,
+        lookup: impl Fn(u32) -> io::Result<Option<Launch>> + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        self.session.use_archive(issued).map_err(model_error)?;
+        self.archive = Some(Box::new(lookup));
+        Ok(())
+    }
+
+    pub fn rotation_due(&self) -> bool {
+        self.transport.is_some() && (self.sequence >= 1 << 30 || self.session.rotation_due())
+    }
+
+    pub(crate) fn session_id(&self) -> u128 {
+        self.id
     }
 
     /// Caller must have independently acknowledged the nft mapping for this
@@ -90,6 +118,27 @@ impl<T: Transport> Driver<T> {
         self.checked(result)
     }
 
+    /// Fair nonblocking production intake: decide this round before reading
+    /// another burst. The per-launch unanswered-question quota must not drop
+    /// an already-authorized burst merely because it exceeded 64 packets.
+    pub fn receive_round(&mut self) -> io::Result<Vec<Held>> {
+        let result = (|| {
+            for _ in 0..32 {
+                if self.ready.len() >= 32 {
+                    break;
+                }
+                let Some(messages) = self.socket()?.receive()? else {
+                    break;
+                };
+                self.messages(messages)?;
+            }
+            self.drain_overdue()?;
+            let count = self.ready.len().min(32);
+            Ok(self.ready.drain(..count).collect())
+        })();
+        self.checked(result)
+    }
+
     pub fn wait(&mut self, timeout: Duration) -> io::Result<()> {
         let result = self.socket()?.wait(timeout);
         // An ordinary caller poll timeout is not transport loss.
@@ -109,6 +158,47 @@ impl<T: Transport> Driver<T> {
         let result = (|| {
             self.verdict(ticket.packet_id(), matches!(decision, Decision::Accept(_)))?;
             self.flush()
+        })();
+        self.checked(result)
+    }
+
+    /// A trusted intake round: individual verdicts, one ACK barrier. This
+    /// does not use NFQUEUE's batch verdict (which could approve other held
+    /// packets). Unlike a late UI callback, an invalid ticket in this internal
+    /// batch is a controller error and closes the transport.
+    pub fn decide_batch(&mut self, decisions: Vec<(Ticket, bool)>) -> io::Result<()> {
+        self.verdict_round(decisions, true)
+    }
+
+    /// ACKs are consumed by subsequent intake rounds, with an absolute
+    /// deadline on the oldest outstanding request. Policy/epoch barriers
+    /// still synchronously drain/ACK before their transition completes.
+    pub fn decide_round(&mut self, decisions: Vec<(Ticket, bool)>) -> io::Result<()> {
+        self.verdict_round(decisions, false)
+    }
+
+    fn verdict_round(&mut self, decisions: Vec<(Ticket, bool)>, wait: bool) -> io::Result<()> {
+        let result = (|| {
+            if decisions.len() > MAX_PENDING {
+                return Err(io::Error::other("network verdict round too large"));
+            }
+            let mut verdicts = Vec::with_capacity(decisions.len());
+            for (ticket, allow) in decisions {
+                let decision = self.session.decide(ticket, allow).map_err(model_error)?;
+                verdicts.push((ticket.packet_id(), matches!(decision, Decision::Accept(_))));
+            }
+            // Validate the complete round before emitting any acceptance.
+            let ids: HashSet<_> = verdicts.iter().map(|(id, _)| *id).collect();
+            self.ready
+                .retain(|held| !ids.contains(&held.ticket.packet_id()));
+            for (id, allow) in verdicts {
+                self.verdict(id, allow)?;
+            }
+            if wait {
+                self.flush()
+            } else {
+                self.drain_overdue()
+            }
         })();
         self.checked(result)
     }
@@ -166,11 +256,11 @@ impl<T: Transport> Driver<T> {
     }
 
     fn send(&mut self, sequence: u32, message: &[u8]) -> io::Result<()> {
-        if self.acknowledgements.len() >= MAX_PENDING {
+        if self.acknowledgements.len() >= 8 * MAX_PENDING {
             return Err(io::Error::other("network queue ACK capacity"));
         }
         self.socket()?.send(message)?;
-        self.acknowledgements.insert(sequence);
+        self.acknowledgements.insert(sequence, Instant::now());
         Ok(())
     }
 
@@ -186,25 +276,37 @@ impl<T: Transport> Driver<T> {
         for message in messages {
             match message {
                 wire::Message::Ack { sequence, errno } => {
-                    if !self.acknowledgements.remove(&sequence) {
+                    if self.acknowledgements.remove(&sequence).is_none() {
                         return Err(io::Error::other("unexpected network queue ACK"));
                     }
                     if errno != 0 {
                         return Err(io::Error::from_raw_os_error(-errno));
                     }
                 }
-                wire::Message::Packet(packet) => match self.session.hold(self.id, &packet) {
-                    Ok(held) => self.ready.push_back(held),
-                    Err(
-                        super::Error::UnknownToken
-                        | super::Error::UnarmedToken
-                        | super::Error::OldEpoch
-                        | super::Error::Capacity,
-                    ) => {
-                        self.verdict(packet.id(), false)?;
+                wire::Message::Packet(packet) => {
+                    if self.session.missing(packet.mark()) {
+                        if let Some(lookup) = &self.archive {
+                            if let Some(launch) = lookup(packet.mark())? {
+                                match self.session.restore(packet.mark(), launch) {
+                                    Ok(()) | Err(super::Error::OldEpoch) => {}
+                                    Err(error) => return Err(model_error(error)),
+                                }
+                            }
+                        }
                     }
-                    Err(error) => return Err(model_error(error)),
-                },
+                    match self.session.hold(self.id, &packet) {
+                        Ok(held) => self.ready.push_back(held),
+                        Err(
+                            super::Error::UnknownToken
+                            | super::Error::UnarmedToken
+                            | super::Error::OldEpoch
+                            | super::Error::Capacity,
+                        ) => {
+                            self.verdict(packet.id(), false)?;
+                        }
+                        Err(error) => return Err(model_error(error)),
+                    }
+                }
             }
         }
         Ok(())
@@ -213,6 +315,10 @@ impl<T: Transport> Driver<T> {
     fn flush(&mut self) -> io::Result<()> {
         let deadline = Instant::now() + Duration::from_secs(2);
         while !self.acknowledgements.is_empty() {
+            self.drain_overdue()?;
+            if self.acknowledgements.is_empty() {
+                break;
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(io::Error::new(
@@ -226,6 +332,37 @@ impl<T: Transport> Driver<T> {
             }
         }
         Ok(())
+    }
+
+    fn check_ack_deadline(&self) -> io::Result<()> {
+        if self
+            .acknowledgements
+            .first_key_value()
+            .is_some_and(|(_, sent)| sent.elapsed() >= Duration::from_secs(2))
+        {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "network queue ACK deadline expired",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn drain_overdue(&mut self) -> io::Result<()> {
+        // A scheduling pause is not proof of a missing kernel ACK: it can
+        // already be queued behind packet notifications. Drain a bounded
+        // FIFO prefix before declaring loss, preserving ready tickets.
+        for _ in 0..16 * MAX_PENDING {
+            if self.check_ack_deadline().is_ok() {
+                return Ok(());
+            }
+            let Some(messages) = self.socket()?.receive()? else {
+                break;
+            };
+            self.messages(messages)?;
+        }
+        self.check_ack_deadline()
     }
 }
 
@@ -300,6 +437,126 @@ mod tests {
         let state = Rc::new(State::default());
         assert!(Driver::bind(Fake(state.clone()), 123, 7, 1, 1).is_err());
         assert!(state.closed.get());
+    }
+    #[test]
+    fn verdict_round_never_approves_other_pending_packets() {
+        let (mut driver, state, token) = driver();
+        for id in 1..=3 {
+            packet(&state, id, token.mark());
+        }
+        let held = driver.receive().unwrap();
+        driver
+            .decide_batch(vec![(held[0].ticket, true), (held[2].ticket, false)])
+            .unwrap();
+        assert_eq!(state.sent.borrow().len(), 3); // binding + TWO individual verdicts
+        driver.decide(held[1].ticket, false).unwrap();
+        assert!(!state.closed.get());
+    }
+
+    #[test]
+    fn fresh_queue_restores_archived_tokens_but_refuses_old_ui_tickets() {
+        let (mut old, state, token) = driver();
+        packet(&state, 1, token.mark());
+        let old_ticket = old.receive().unwrap().remove(0).ticket;
+        old.close();
+        let state = Rc::new(State::default());
+        state.auto_ack.set(true);
+        let mut next = Driver::bind(Fake(state.clone()), 456, 7, 1, 1).unwrap();
+        next.set_archive(5000, |token| {
+            Ok(Some(Launch {
+                program: "helium".into(),
+                generation: u128::from(token) + 54,
+                epoch: 1,
+            }))
+        })
+        .unwrap();
+        packet(&state, 1, token.mark());
+        let restored = next.receive().unwrap().remove(0);
+        assert_eq!(restored.launch.generation, 55);
+        assert!(next.decide(old_ticket, true).is_err());
+        assert!(!state.closed.get());
+        next.decide(restored.ticket, false).unwrap();
+        assert_eq!(next.register("new".into(), 9999).unwrap().mark(), 5001);
+    }
+
+    #[test]
+    fn archive_read_failure_closes_queue_instead_of_guessing_an_owner() {
+        let state = Rc::new(State::default());
+        state.auto_ack.set(true);
+        let mut driver = Driver::bind(Fake(state.clone()), 123, 7, 1, 1).unwrap();
+        driver
+            .set_archive(1, |_| Err(io::Error::other("corrupt archive")))
+            .unwrap();
+        packet(&state, 1, 1);
+        assert!(driver.receive().is_err());
+        assert!(state.closed.get());
+    }
+    #[test]
+    fn invalid_internal_round_emits_no_partial_acceptance_and_closes() {
+        let (mut driver, state, token) = driver();
+        packet(&state, 1, token.mark());
+        let held = driver.receive().unwrap().remove(0);
+        assert!(driver
+            .decide_batch(vec![(held.ticket, true), (held.ticket, true)])
+            .is_err());
+        assert_eq!(state.sent.borrow().len(), 1);
+        assert!(state.closed.get());
+    }
+    #[test]
+    fn verdict_round_ack_failure_closes_the_actual_transport() {
+        let (mut driver, state, token) = driver();
+        packet(&state, 1, token.mark());
+        let held = driver.receive().unwrap().remove(0);
+        state.auto_ack.set(false);
+        assert!(driver.decide_batch(vec![(held.ticket, true)]).is_err());
+        assert!(state.closed.get());
+    }
+
+    #[test]
+    fn asynchronous_rounds_do_not_apply_the_question_quota_to_an_approved_burst() {
+        let (mut driver, state, token) = driver();
+        for id in 1..=256 {
+            packet(&state, id, token.mark());
+        }
+        let mut count = 0;
+        while count < 256 {
+            let held = driver.receive_round().unwrap();
+            assert!(!held.is_empty());
+            assert!(held.len() <= 32);
+            count += held.len();
+            driver
+                .decide_round(held.into_iter().map(|h| (h.ticket, true)).collect())
+                .unwrap();
+        }
+        assert!(driver.receive().unwrap().is_empty());
+        assert!(driver.acknowledgements.is_empty());
+        assert_eq!(state.sent.borrow().len(), 257);
+        for verdict in state.sent.borrow().iter().skip(1) {
+            assert_eq!(verdict[24..28], 1u32.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn missing_async_ack_expires_but_a_queued_ack_survives_a_scheduling_pause() {
+        for queued in [false, true] {
+            let (mut driver, state, token) = driver();
+            packet(&state, 1, token.mark());
+            let held = driver.receive_round().unwrap().remove(0);
+            state.auto_ack.set(queued);
+            driver.decide_round(vec![(held.ticket, true)]).unwrap();
+            let ack = state.incoming.borrow_mut().pop_front();
+            for id in 2..=61 {
+                packet(&state, id, token.mark());
+            }
+            if let Some(ack) = ack {
+                state.incoming.borrow_mut().push_back(ack);
+            }
+            for sent in driver.acknowledgements.values_mut() {
+                *sent = Instant::now() - Duration::from_secs(3);
+            }
+            assert_eq!(driver.receive_round().is_ok(), queued);
+            assert_eq!(state.closed.get(), !queued);
+        }
     }
     #[test]
     fn unknown_identity_is_dropped_without_a_question() {

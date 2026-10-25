@@ -1,4 +1,4 @@
-//! Strict egress-identity foundation, not yet a live firewall backend.
+//! Strict egress-identity state machine used by the live firewall backend.
 //!
 //! A trusted controller must register a launch, install and acknowledge its
 //! socket-cgroup -> mark rule, and only then release its child to execute.
@@ -17,7 +17,7 @@ pub mod socket;
 #[path = "netqueue/wire.rs"]
 pub mod wire;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 pub const MAX_LAUNCHES: usize = 4096;
@@ -30,6 +30,10 @@ pub struct Token(u32);
 impl Token {
     pub fn mark(self) -> u32 {
         self.0
+    }
+
+    pub(crate) fn archived(value: u32) -> Option<Self> {
+        (value != 0).then_some(Self(value))
     }
 }
 
@@ -60,9 +64,22 @@ pub struct Scope {
     token: Token,
 }
 
+impl Scope {
+    pub(crate) fn rebind_session(self, old: u128, new: u128) -> Option<Self> {
+        (self.session == old && new != 0).then_some(Self {
+            session: new,
+            ..self
+        })
+    }
+}
+
 impl Ticket {
     pub fn packet_id(self) -> u32 {
         self.packet
+    }
+
+    pub(crate) fn token_mark(self) -> u32 {
+        self.token.mark()
     }
 
     pub fn scope(self) -> Scope {
@@ -119,6 +136,8 @@ pub struct Session {
     pending: HashMap<u32, (Held, Token)>,
     per_launch: HashMap<Token, usize>,
     closed: bool,
+    archived: bool,
+    cache_order: VecDeque<Token>,
 }
 
 impl Session {
@@ -139,6 +158,8 @@ impl Session {
             pending: HashMap::new(),
             per_launch: HashMap::new(),
             closed: false,
+            archived: false,
+            cache_order: VecDeque::new(),
         })
     }
 
@@ -158,9 +179,10 @@ impl Session {
         {
             return Err(Error::InvalidIdentity);
         }
-        if self.launches.len() >= MAX_LAUNCHES || self.next_token > u64::from(u32::MAX) {
+        if self.next_token > u64::from(u32::MAX) {
             return Err(Error::Capacity);
         }
+        self.cache_room()?;
         let token = Token(self.next_token as u32);
         self.next_token += 1;
         self.launches.insert(
@@ -172,6 +194,69 @@ impl Session {
             }),
         );
         Ok(token)
+    }
+
+    /// Trusted archive integration only. An issued token is never recycled;
+    /// an absent cache entry must be recovered from the private archive, not
+    /// inferred from the current process or connection tuple.
+    pub(super) fn use_archive(&mut self, issued: u32) -> Result<(), Error> {
+        if self.closed
+            || !self.launches.is_empty()
+            || !self.pending.is_empty()
+            || self.next_token != 1
+        {
+            return Err(Error::InvalidIdentity);
+        }
+        self.archived = true;
+        self.next_token = u64::from(issued) + 1;
+        Ok(())
+    }
+
+    pub(super) fn missing(&self, token: u32) -> bool {
+        self.archived
+            && token != 0
+            && u64::from(token) < self.next_token
+            && !self.launches.contains_key(&Token(token))
+    }
+
+    pub(super) fn restore(&mut self, token: u32, launch: Launch) -> Result<(), Error> {
+        if !self.missing(token) || launch.generation == 0 || launch.program.is_empty() {
+            return Err(Error::InvalidIdentity);
+        }
+        if launch.epoch != self.epoch {
+            return Err(Error::OldEpoch);
+        }
+        self.cache_room()?;
+        self.launches.insert(Token(token), Arc::new(launch));
+        self.armed.insert(Token(token));
+        self.cache_order.push_back(Token(token));
+        Ok(())
+    }
+
+    fn cache_room(&mut self) -> Result<(), Error> {
+        if self.launches.len() < MAX_LAUNCHES {
+            return Ok(());
+        }
+        if self.archived {
+            // Pending tickets and unacknowledged reservations cannot leave
+            // the cache. Eviction removes neither the trusted archive record
+            // nor its kernel mapping, and never transfers its token.
+            for _ in 0..self.cache_order.len() {
+                let token = self.cache_order.pop_front().unwrap();
+                if self.per_launch.contains_key(&token) {
+                    self.cache_order.push_back(token);
+                } else {
+                    self.launches.remove(&token);
+                    self.armed.remove(&token);
+                    return Ok(());
+                }
+            }
+        }
+        Err(Error::Capacity)
+    }
+
+    pub(super) fn rotation_due(&self) -> bool {
+        self.last_packet.is_some_and(|n| n >= 1 << 30)
     }
 
     /// Call only after matching the trusted kernel's rule-install ACK for
@@ -188,7 +273,9 @@ impl Session {
         if launch.epoch != self.epoch {
             return Err(Error::OldEpoch);
         }
-        self.armed.insert(token);
+        if self.armed.insert(token) {
+            self.cache_order.push_back(token);
+        }
         Ok(())
     }
 
@@ -459,6 +546,53 @@ mod tests {
         }
         assert_eq!(s.register("terminal".into(), 9999), Err(Error::Capacity));
         assert_eq!(s.launches[&first].generation, 10);
+    }
+
+    #[test]
+    fn archived_cache_is_bounded_but_total_launches_are_not_limited_to_4096() {
+        let mut s = session();
+        s.use_archive(0).unwrap();
+        let pinned = ready(&mut s, "pinned", 10);
+        let held = s.hold(123, &packet(1, pinned.mark())).unwrap();
+        let old = ready(&mut s, "old", 11);
+        for i in 0..MAX_LAUNCHES * 2 {
+            ready(&mut s, "new", i as u128 + 100);
+        }
+        assert_eq!(s.launches.len(), MAX_LAUNCHES);
+        assert_eq!(s.cache_order.len(), MAX_LAUNCHES);
+        assert!(
+            s.launches.contains_key(&pinned),
+            "pending owner cannot be evicted"
+        );
+        assert!(s.missing(old.mark()));
+        s.restore(
+            old.mark(),
+            Launch {
+                program: "old".into(),
+                generation: 11,
+                epoch: 1,
+            },
+        )
+        .unwrap();
+        let restored = s.hold(123, &packet(2, old.mark())).unwrap();
+        assert_eq!(restored.launch.generation, 11);
+        assert_ne!(held.ticket.scope(), restored.ticket.scope());
+        s.decide(held.ticket, false).unwrap();
+        s.decide(restored.ticket, true).unwrap();
+        let mut next = Session::new(456, 7, 2, 1).unwrap();
+        next.use_archive(9000).unwrap();
+        assert_eq!(
+            next.restore(
+                1,
+                Launch {
+                    program: "old".into(),
+                    generation: 11,
+                    epoch: 1
+                }
+            ),
+            Err(Error::OldEpoch)
+        );
+        assert!(!next.missing(9001));
     }
 
     #[test]

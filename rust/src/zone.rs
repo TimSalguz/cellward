@@ -2571,6 +2571,7 @@ fn keep(
     let mut space_gone = false;
     // How the holder ended: KILL passed on from its pid 1 is a kill.
     let mut holder_code = 0u8;
+    let mut strict_look = std::time::Instant::now();
     let pollin = |fd: RawFd| libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -2608,6 +2609,8 @@ fn keep(
             || transport.strict.as_ref().is_some_and(|s| s.ready())
         {
             0
+        } else if strict_fd.is_some() {
+            250
         } else {
             -1
         };
@@ -2660,7 +2663,9 @@ fn keep(
         if fds[2].revents != 0
             || fds[3].revents != 0
             || transport.strict.as_ref().is_some_and(|s| s.ready())
+            || (strict_fd.is_some() && strict_look.elapsed() >= Duration::from_millis(250))
         {
+            strict_look = std::time::Instant::now();
             if let Some(strict) = &mut transport.strict {
                 if let Err(e) = strict.handle() {
                     eprintln!("instance {}: strict network closed: {e}", transport.id);
@@ -2866,6 +2871,23 @@ fn answer_request(
 ) {
     let _ = conn.set_nonblocking(false);
     let _ = conn.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+    if line == "ROTATE-OWNER-QUEUE" {
+        let result = if !from_host(&conn) {
+            Err("queue maintenance requires a pinned host peer".to_owned())
+        } else {
+            transport
+                .strict
+                .as_mut()
+                .ok_or_else(|| "strict network not active".to_owned())
+                .and_then(|strict| strict.maintenance_rotate())
+        };
+        let reply = match result {
+            Ok(()) => "REQUEUED\n".to_owned(),
+            Err(e) => format!("REFUSED {}\n", one_line(&e)),
+        };
+        let _ = (&conn).write_all(reply.as_bytes());
+        return;
+    }
     if line.starts_with("REGISTER ") || line.starts_with("DIAGNOSTIC ") {
         let result = (|| {
             let core = std::env::current_exe().map_err(|e| e.to_string())?;

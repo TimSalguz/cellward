@@ -288,6 +288,9 @@ fn main() -> ExitCode {
             }
         },
         Some("doctor-probe") => ExitCode::from(vpn_zone::doctor::probe_main(&args[1..])),
+        Some("user-launch-handoff") => {
+            ExitCode::from(vpn_zone::user_launch::handoff_main(&args[1..]))
+        }
         // The relay between a container instance's tap and the passt of its
         // zone (`relay`): `--tap-fd N --stream-fd M`, both inherited. Not in
         // the usage: an instance's holder is what starts it — and as of stage
