@@ -282,6 +282,7 @@ enum Msg {
     /// A permission's choice for the container chosen: the row, the choice.
     Perm(usize, usize),
     FrameNumber(usize, u32),
+    FrameTab(bool),
     Name(String),
     Launch,
     Cancel,
@@ -311,6 +312,7 @@ struct Window {
     /// The request's offers ticked, one each.
     offered: Vec<bool>,
     show_offers: bool,
+    frame_fullscreen_tab: bool,
     /// The permissions changed: `(container tag, key) → value`.
     changed: std::collections::HashMap<(String, String), String>,
     name: String,
@@ -362,6 +364,7 @@ impl Window {
             rule: false,
             offered: vec![false; req.offers.len()],
             show_offers: false,
+            frame_fullscreen_tab: false,
             changed: std::collections::HashMap::new(),
             pane: Pane::Net,
             net,
@@ -637,6 +640,7 @@ impl Window {
         }
         match msg {
             Msg::Appearance => {}
+            Msg::FrameTab(fullscreen) => self.frame_fullscreen_tab = fullscreen,
             Msg::Action(i) => {
                 if let Some((tag, _, _)) = self.req.actions.get(i).filter(|_| !self.heading(i)) {
                     println!("action\t{tag}");
@@ -1200,7 +1204,19 @@ impl Window {
             && self.perms_only()
             && matches!(
                 key,
-                "width" | "radius" | "outer-radius" | "hover-edge" | "resize-corner"
+                "width"
+                    | "radius"
+                    | "outer-radius"
+                    | "hover-edge"
+                    | "resize-corner"
+                    | "style"
+                    | "title"
+                    | "buttons"
+                    | "fullscreen-button"
+                    | "double-click"
+                    | "fullscreen-width"
+                    | "fullscreen-title"
+                    | "fullscreen-notice"
             )
         {
             use std::io::Write;
@@ -1228,7 +1244,36 @@ impl Window {
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         ]
         .spacing(4);
+        if self.req.frame_preview {
+            block = block.push(
+                row![
+                    button("Обычное окно")
+                        .style(if self.frame_fullscreen_tab {
+                            button::secondary
+                        } else {
+                            button::primary
+                        })
+                        .on_press(Msg::FrameTab(false)),
+                    button("Полноэкранный режим")
+                        .style(if self.frame_fullscreen_tab {
+                            button::primary
+                        } else {
+                            button::secondary
+                        })
+                        .on_press(Msg::FrameTab(true)),
+                ]
+                .spacing(8),
+            );
+        }
         for (row_at, perm) in self.req.perms.iter().enumerate() {
+            if self.req.frame_preview
+                && matches!(
+                    perm.key.as_str(),
+                    "fullscreen-width" | "fullscreen-title" | "fullscreen-notice"
+                ) != self.frame_fullscreen_tab
+            {
+                continue;
+            }
             let (now, fixed) = self.perm_value(&perm.key);
             let mut choices = row![].spacing(4);
             for (choice_at, (value, label)) in perm.choices.iter().enumerate() {
@@ -1887,6 +1932,20 @@ mod tests {
             Window::new(parse_request(&request.replace("frame-preview\t1\n", "")));
         let _ = permissions.update(Msg::FrameNumber(0, 7));
         assert!(permissions.perms_answer().is_empty());
+    }
+
+    #[test]
+    fn frame_tabs_preserve_both_sets_of_unsaved_values() {
+        let request = "mode\tperms\nframe-preview\t1\nperm\ttitle\tTitle\talways:Always;off:Off\nperm\tfullscreen-title\tTitle\thover:Hover;off:Off\npermof\tthis\tFrame\ttitle=always,fullscreen-title=hover\n";
+        let mut w = Window::new(parse_request(request));
+        let _ = w.update(Msg::Perm(0, 1));
+        let _ = w.update(Msg::FrameTab(true));
+        assert!(w.frame_fullscreen_tab);
+        let _ = w.update(Msg::Perm(1, 1));
+        let _ = w.update(Msg::FrameTab(false));
+        assert_eq!(w.perm_value("title").0, "off");
+        assert_eq!(w.perm_value("fullscreen-title").0, "off");
+        assert!(w.perms_answer().contains("perm\tfullscreen-title\toff\n"));
     }
 
     /// A menu's headings are lines, not choices: the highlight starts on the

@@ -137,7 +137,8 @@ def main():
                     move_click(app_x, app_y)
                     wait_for(lambda: reports().count(b"\x1b[<") >= 2)
                     baseline = reports()
-                    menu_x = right + 1 - safe - 84
+                    # Five cells: menu, network, maximize, fullscreen, close.
+                    menu_x = right + 1 - safe - 108
                     for outside, point in [("app", (app_x, app_y)), ("frame", (left + 100, top + width + 10))]:
                         pointer.write(f"move {(left + right) // 2} {top + width}\n")
                         time.sleep(0.2)

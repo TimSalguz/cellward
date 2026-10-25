@@ -359,9 +359,9 @@ let
       title = 20
       ink = (0x14, 0x14, 0x14)
       # The row of buttons at the strip's right end (wl_title::LOOK and the
-      # fullscreen button, `frame fullscreen-button one`): four of 24 —
+      # maximize and fullscreen buttons): five of 24 —
       # their glyphs are not the title's text.
-      buttons = 4 * 24
+      buttons = 5 * 24
 
       def view(app_id):
           """Where sway shows a window's contents, in logical pixels."""

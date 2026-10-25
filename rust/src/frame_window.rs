@@ -55,6 +55,9 @@ fn setting_row(
         "double-click" => crate::frame::DOUBLE_CLICK_SETTING,
         "hover-edge" => crate::frame::HOVER_EDGE_SETTING,
         "resize-corner" => crate::frame::RESIZE_CORNER_SETTING,
+        "fullscreen-width" => crate::frame::FULLSCREEN_WIDTH_SETTING,
+        "fullscreen-title" => crate::frame::FULLSCREEN_TITLE_SETTING,
+        "fullscreen-notice" => crate::frame::FULLSCREEN_NOTICE_SETTING,
         _ => name,
     };
     let reset = if crate::declared::declares(config, file) {
@@ -213,6 +216,43 @@ pub fn rows(
         outer,
         false,
     );
+    for (key, label, choices, now) in [
+        (
+            "fullscreen-width",
+            "Толщина рамки",
+            vec![
+                ("same", "как в окне"),
+                ("0", "без рамки"),
+                ("1", "1"),
+                ("2", "2"),
+                ("4", "4"),
+            ],
+            crate::frame::fullscreen_width_word(crate::frame::fullscreen_width(c).0),
+        ),
+        (
+            "fullscreen-title",
+            "Заголовок",
+            vec![
+                ("always", "всегда"),
+                ("hover", "при наведении"),
+                ("off", "скрыт"),
+            ],
+            crate::frame::fullscreen_title(c).0.as_str().to_owned(),
+        ),
+        (
+            "fullscreen-notice",
+            "Показать имя при входе",
+            vec![
+                ("0", "не показывать"),
+                ("1", "1 с"),
+                ("3", "3 с"),
+                ("5", "5 с"),
+            ],
+            crate::frame::fullscreen_notice(c).0.to_string(),
+        ),
+    ] {
+        push(setting_row(c, key, label, &choices), now, false);
+    }
     let (button, _) = crate::frame::fullscreen_button(c);
     push(
         setting_row(
@@ -314,7 +354,7 @@ pub fn request(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Strin
     let (perms, values) = rows(tools, zone, record);
     let of = PermOf {
         tag: "this".to_owned(),
-        scope: "Вид — для всех окон; цвет сети — для её окон, цвет контейнера — только для него. Толщина, радиусы и области hover/resize имеют живой предпросмотр; отмена возвращает прежние значения, «Сохранить» закрепляет их поверх Nix. Толщина resize — сама рамка; угловой участок задаёт длину вдоль её краёв. Верхние 2 px доступны приложению. Закрепление в Nix — отдельно в stillconf."
+        scope: "Вид — для всех окон. Геометрия, стиль, кнопки и режимы заголовка меняются сразу; отмена возвращает прежнее, «Сохранить» закрепляет поверх Nix. Цвет сети/контейнера и общий выключатель — пока по сохранению. Полноэкранная вкладка независимо задаёт толщину, заголовок и показ имени при входе. Верхние 2 px доступны приложению. Закрепление в Nix — отдельно в stillconf."
             .to_owned(),
         values,
     };
@@ -331,6 +371,29 @@ fn preview_value(tools: &Tools, key: &str, value: &str) -> Option<(&'static str,
         "width" => (f::WIDTH_SETTING, f::DEFAULT_WIDTH.to_string()),
         "radius" => (f::RADIUS_SETTING, f::DEFAULT_RADIUS.word()),
         "outer-radius" => (f::OUTER_RADIUS_SETTING, f::DEFAULT_OUTER_RADIUS.word()),
+        "style" => (f::STYLE_SETTING, f::DEFAULT_STYLE.as_str().to_owned()),
+        "title" => (f::TITLE_SETTING, f::DEFAULT_TITLE.as_str().to_owned()),
+        "buttons" => (f::BUTTONS_SETTING, f::DEFAULT_BUTTONS.as_str().to_owned()),
+        "fullscreen-button" => (
+            f::FULLSCREEN_BUTTON_SETTING,
+            f::DEFAULT_FULLSCREEN_BUTTON.as_str().to_owned(),
+        ),
+        "double-click" => (
+            f::DOUBLE_CLICK_SETTING,
+            f::DEFAULT_DOUBLE_CLICK.as_str().to_owned(),
+        ),
+        "fullscreen-width" => (
+            f::FULLSCREEN_WIDTH_SETTING,
+            f::fullscreen_width_word(f::DEFAULT_FULLSCREEN.width),
+        ),
+        "fullscreen-title" => (
+            f::FULLSCREEN_TITLE_SETTING,
+            f::DEFAULT_FULLSCREEN.title.as_str().to_owned(),
+        ),
+        "fullscreen-notice" => (
+            f::FULLSCREEN_NOTICE_SETTING,
+            f::DEFAULT_FULLSCREEN.notice.to_string(),
+        ),
         "hover-edge" => (
             f::HOVER_EDGE_SETTING,
             f::DEFAULT_INTERACTION.hover_edge.to_string(),
@@ -352,6 +415,13 @@ fn preview_value(tools: &Tools, key: &str, value: &str) -> Option<(&'static str,
         "radius" => f::parse_radius(&value).is_some(),
         "hover-edge" => f::parse_hover_edge(&value).is_some(),
         "resize-corner" => f::parse_resize_corner(&value).is_some(),
+        "style" => f::Style::parse(&value).is_some(),
+        "title" | "fullscreen-title" => f::TitleMode::parse(&value).is_some(),
+        "buttons" => f::ButtonStyle::parse(&value).is_some(),
+        "fullscreen-button" => f::FullscreenButton::parse(&value).is_some(),
+        "double-click" => f::DoubleClick::parse(&value).is_some(),
+        "fullscreen-width" => f::parse_fullscreen_width(&value).is_some(),
+        "fullscreen-notice" => f::parse_notice(&value).is_some(),
         _ => f::parse_outer_radius(&value).is_some(),
     };
     valid.then_some((name, value))
@@ -450,6 +520,13 @@ pub fn apply(
                     continue;
                 }
                 vec![if value == "off" { "hide" } else { "show" }.into()]
+            }
+            "fullscreen-width" | "fullscreen-title" | "fullscreen-notice" => {
+                vec![
+                    "fullscreen".into(),
+                    key.trim_start_matches("fullscreen-").into(),
+                    value.into(),
+                ]
             }
             "width" | "style" | "title" | "buttons" | "radius" | "outer-radius"
             | "fullscreen-button" | "double-click" | "hover-edge" | "resize-corner" => {

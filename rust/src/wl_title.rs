@@ -176,6 +176,8 @@ pub const MENU_MAX_SCALE: u32 = 240;
 /// it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
+    /// Maximize/restore without telling the application it is fullscreen.
+    Maximize,
     /// The launch's window menu: `cellward window-menu --pid`, which the
     /// supervisor starts.
     Menu,
@@ -272,7 +274,7 @@ pub struct ButtonLook {
 }
 
 /// The most buttons a row has: menu, network, both fullscreens, close.
-pub const MAX_BUTTONS: usize = 5;
+pub const MAX_BUTTONS: usize = 6;
 
 /// What an unused place of a [`Row`] holds.
 const NO_BUTTON: ButtonLook = button(Button::Close, ' ', Paint::Frame, Paint::Frame, Paint::Frame);
@@ -362,10 +364,12 @@ impl ButtonsLook {
     /// buttons stays without.
     pub fn with_fullscreen(self, fs: FullscreenButton) -> Self {
         let add: &[(Button, char)] = match fs {
-            FullscreenButton::One | FullscreenButton::Menu => {
-                &[(Button::Fullscreen, FULLSCREEN_GLYPH)]
-            }
+            FullscreenButton::One | FullscreenButton::Menu => &[
+                (Button::Maximize, '▢'),
+                (Button::Fullscreen, FULLSCREEN_GLYPH),
+            ],
             FullscreenButton::Two => &[
+                (Button::Maximize, '▢'),
                 (Button::InWindow, IN_WINDOW_GLYPH),
                 (Button::Fullscreen, FULLSCREEN_GLYPH),
             ],
@@ -2839,12 +2843,13 @@ mod tests {
             [
                 Button::Menu,
                 Button::Network,
+                Button::Maximize,
                 Button::Fullscreen,
                 Button::Close
             ]
         );
-        assert_eq!((one.width_all(), one.variants()), (96, 9));
-        let (square, menu) = (one.order[2], CELLWARD.order[0]);
+        assert_eq!((one.width_all(), one.variants()), (120, 11));
+        let (square, menu) = (one.order[3], CELLWARD.order[0]);
         assert_eq!(
             (square.glyph, square.rest, square.hover, square.press),
             ('□', menu.rest, menu.hover, menu.press)
@@ -2855,13 +2860,14 @@ mod tests {
             [
                 Button::Menu,
                 Button::Network,
+                Button::Maximize,
                 Button::InWindow,
                 Button::Fullscreen,
                 Button::Close
             ]
         );
         assert_eq!(two.order.len(), MAX_BUTTONS);
-        assert_eq!(two.order[2].glyph, '▣');
+        assert_eq!(two.order[3].glyph, '▣');
         let mac = MACOS.with_fullscreen(FullscreenButton::Two);
         assert_eq!(
             order(&mac),
@@ -2869,6 +2875,7 @@ mod tests {
                 Button::Close,
                 Button::Menu,
                 Button::Network,
+                Button::Maximize,
                 Button::InWindow,
                 Button::Fullscreen
             ]
@@ -2982,7 +2989,7 @@ mod tests {
                                 // they show: at rest there is no glyph.
                                 let square = matches!(
                                     row.order[i].button,
-                                    Button::Fullscreen | Button::InWindow
+                                    Button::Fullscreen | Button::InWindow | Button::Maximize
                                 );
                                 if !(square && row.glyphs == Glyphs::Lit && v > 0) {
                                     let n = count(v, i, bg);

@@ -2984,6 +2984,7 @@ impl Window {
             return;
         }
         match button {
+            Button::Maximize => self.toggle_maximized(),
             // What a server-side decoration's "close" is: the program's own
             // close event; it may ask whether to save.
             Button::Close => {
@@ -3001,6 +3002,19 @@ impl Window {
             Button::Network => f.asks.push(Ask::Network),
             Button::Fullscreen => self.toggle_fullscreen(),
             Button::InWindow => self.toggle_in_window(f),
+        }
+    }
+
+    fn toggle_maximized(&self) {
+        if let Some(toplevel) = self.toplevel.as_ref().and_then(Weak::upgrade) {
+            if self.next_fullscreen {
+                toplevel.send_unset_fullscreen();
+            }
+            if self.maximized {
+                toplevel.send_unset_maximized();
+            } else {
+                toplevel.send_set_maximized();
+            }
         }
     }
 

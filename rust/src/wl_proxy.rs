@@ -5446,8 +5446,8 @@ mod tests {
         let on_title: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == title).collect();
         assert_eq!(on_title.len(), 2, "{subs:?}");
         let (buttons_sub, buttons) = (on_title[1].args[0], on_title[1].args[1]);
-        // Four of 24 at the strip's right end: ≡ ⇄ □ ×.
-        assert_eq!(placed(&got, buttons_sub), Some(vec![300 - 96, 0]));
+        // Five of 24: menu, network, maximize, fullscreen, close.
+        assert_eq!(placed(&got, buttons_sub), Some(vec![300 - 120, 0]));
 
         request(&mut client, 6, 0, &10u32.to_ne_bytes());
         let pointer = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 0)
@@ -5498,11 +5498,25 @@ mod tests {
                 .2
         };
 
+        // The maximize button does not ask for application fullscreen.
+        send(
+            &mut compositor,
+            &[
+                enter(37, buttons, 60, 10),
+                press(38, 800, 0x110, true),
+                press(39, 850, 0x110, false),
+            ],
+        );
+        let got = asked(&log, 9);
+        assert!(!got
+            .iter()
+            .any(|m| m.iface == "xdg_toplevel" && m.opcode == 11));
+
         // □, left: the compositor asked for fullscreen.
         send(
             &mut compositor,
             &[
-                enter(40, buttons, 60, 10),
+                enter(40, buttons, 84, 10),
                 press(41, 1000, 0x110, true),
                 press(42, 1050, 0x110, false),
             ],
@@ -7212,10 +7226,37 @@ mod tests {
             live.changed().expect("radius movement").0.outer,
             crate::frame::Radius::Px(16)
         );
+        preview.set(crate::frame::TITLE_SETTING, "hover").unwrap();
+        assert_eq!(
+            live.changed().expect("live title choice").0.title,
+            TitleMode::Hover
+        );
+        preview
+            .set(crate::frame::FULLSCREEN_WIDTH_SETTING, "0")
+            .unwrap();
+        let (frame, _, _) = live.changed().expect("live fullscreen border choice");
+        assert_eq!(
+            frame.width, 1,
+            "fullscreen width does not replace ordinary width"
+        );
+        assert_eq!(frame.fullscreen.width, Some(0));
+        preview
+            .set(crate::frame::FULLSCREEN_TITLE_SETTING, "off")
+            .unwrap();
+        assert_eq!(
+            live.changed()
+                .expect("live fullscreen title choice")
+                .0
+                .fullscreen
+                .title,
+            TitleMode::Off
+        );
         drop(preview);
         let (frame, _, _) = live.changed().expect("Cancel restores both values");
         assert_eq!(frame.width, 5);
         assert_eq!(frame.outer, crate::frame::Radius::Px(12));
+        assert_eq!(frame.title, crate::frame::DEFAULT_TITLE);
+        assert_eq!(frame.fullscreen, crate::frame::DEFAULT_FULLSCREEN);
         let _ = fs::remove_dir_all(&root);
     }
 

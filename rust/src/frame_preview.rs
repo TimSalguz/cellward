@@ -86,10 +86,18 @@ impl Session {
                 | crate::frame::OUTER_RADIUS_SETTING
                 | crate::frame::HOVER_EDGE_SETTING
                 | crate::frame::RESIZE_CORNER_SETTING
+                | crate::frame::STYLE_SETTING
+                | crate::frame::TITLE_SETTING
+                | crate::frame::BUTTONS_SETTING
+                | crate::frame::FULLSCREEN_BUTTON_SETTING
+                | crate::frame::DOUBLE_CLICK_SETTING
+                | crate::frame::FULLSCREEN_WIDTH_SETTING
+                | crate::frame::FULLSCREEN_TITLE_SETTING
+                | crate::frame::FULLSCREEN_NOTICE_SETTING
         ) || value.len() > 64
             || value.chars().any(char::is_control)
         {
-            return Err(io::Error::other("not a numeric frame preview"));
+            return Err(io::Error::other("not a supported frame preview"));
         }
         self.serial += 1;
         let tmp = self.dir.join(format!(
@@ -146,9 +154,40 @@ mod tests {
         let mut first = Session::new(&base).unwrap();
         first.set(crate::frame::WIDTH_SETTING, "1").unwrap();
         assert_eq!(crate::frame::width(&base).0, 1);
+        first.set(crate::frame::TITLE_SETTING, "off").unwrap();
+        first.set(crate::frame::BUTTONS_SETTING, "none").unwrap();
+        first
+            .set(crate::frame::FULLSCREEN_WIDTH_SETTING, "0")
+            .unwrap();
+        first
+            .set(crate::frame::FULLSCREEN_TITLE_SETTING, "hover")
+            .unwrap();
+        first
+            .set(crate::frame::FULLSCREEN_NOTICE_SETTING, "0")
+            .unwrap();
+        assert_eq!(
+            crate::frame::title_mode(&base).0,
+            crate::frame::TitleMode::Off
+        );
+        assert_eq!(
+            crate::frame::fullscreen(&base),
+            crate::frame::Fullscreen {
+                width: Some(0),
+                title: crate::frame::TitleMode::Hover,
+                notice: 0,
+            }
+        );
         let mut other = Session::new(&base).unwrap();
         other.set(crate::frame::WIDTH_SETTING, "2").unwrap();
         drop(first);
+        assert_eq!(
+            crate::frame::title_mode(&base).0,
+            crate::frame::DEFAULT_TITLE
+        );
+        assert_eq!(
+            crate::frame::fullscreen(&base),
+            crate::frame::DEFAULT_FULLSCREEN
+        );
         assert_eq!(
             crate::frame::width(&base).0,
             2,

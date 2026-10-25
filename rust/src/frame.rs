@@ -421,6 +421,9 @@ impl TitleMode {
 /// mode is skipped, as if it were not there.
 pub fn title_mode(config: &Path) -> (TitleMode, Source) {
     let file = |text: Option<String>| text.as_deref().and_then(TitleMode::parse);
+    if let Some(mode) = file(crate::frame_preview::read(config, TITLE_SETTING)) {
+        return (mode, Source::Local);
+    }
     if let Some(mode) = file(read_setting(&override_path(config, TITLE_SETTING))) {
         return (mode, Source::Local);
     }
