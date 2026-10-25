@@ -1040,7 +1040,7 @@ in
         strictNetwork = lib.mkOption {
           type = lib.types.nullOr lib.types.bool;
           default = null;
-          description = "Строгая идентификация исходящих пакетов: регистрация запуска до exec, cgroup и NFQUEUE без отката к поиску процесса. Требует перезапуска экземпляров контейнеров; неподдерживаемое ядро или отсутствие делегированной cgroup останавливает запуск. null — локальное cellward defaults set strict-network on|off.";
+          description = "Строгая идентификация исходящих пакетов: регистрация запуска до exec, cgroup и NFQUEUE без отката к поиску процесса. По умолчанию включена. Требует перезапуска существующих экземпляров; неподдерживаемое ядро или отсутствие делегированной cgroup останавливает запуск. false — явный режим совместимости. null — локальное cellward defaults set strict-network on|off, иначе true.";
         };
       };
     };

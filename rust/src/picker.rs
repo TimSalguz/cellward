@@ -1779,7 +1779,15 @@ fn show_window(tools: &Tools, req: &window::Request) -> Option<Option<window::Re
     let mut child = Command::new(&tools.window)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(
+            if std::env::var_os("CELLWARD_TRACE_STARTUP").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+            {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            },
+        )
         .spawn()
         .ok()?;
     startup.mark("dialog process spawned (not first frame)");

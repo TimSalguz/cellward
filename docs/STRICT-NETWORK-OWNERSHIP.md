@@ -1,10 +1,11 @@
 # Strict egress ownership
 
-Status (2026-10-25): **live opt-in backend implemented and focused VM integration
-passed**. Enable for NEW instances with `cellward defaults set strict-network
-on`, or `programs.cellward.defaults.permissions.strictNetwork = true`. Running
+Status (2026-10-26): **strict ownership is the default for new instances**.
+No extra enable option is needed. Running
 legacy instances must be stopped/restarted: they cannot acquire strict identity
-retroactively. Explicit `off` retains the legacy backend; a failed strict startup
+retroactively. Explicit `cellward defaults set strict-network off` or
+`programs.cellward.defaults.permissions.strictNetwork = false` selects the
+legacy compatibility backend; a failed strict startup
 never selects it automatically. Do not stop somebody's active apps implicitly.
 
 Requirements: Linux 6.5+ (`SO_PEERPIDFD`), delegated launch cgroups,
@@ -173,6 +174,14 @@ granting a running process access, subsequent revocation/re-grant, diagnostic
 registration, and host/offline/host network transitions. This is a focused
 headless integration test, not a complete browser/GUI or protocol stress suite.
 
+The expanded 2026-10-26 default-path run passed in 166 seconds, without an
+explicit `strictNetwork = true`: private DNS, 2.4 MB TCP download/upload,
+57 KB UDP echo, a fresh queue capped by `rmem_max = 212992`, distinct program
+allow/deny rules within one container, and two queue rotations with a running
+client and a real PTY CLI handoff were added to the scenarios above.
+The native IPv4/IPv6 failure suites
+and nft preflight also passed. Neither test writes the real host firewall.
+
 Queue/barrier/header unit tests cover token reservation/activation, stale sessions,
 policies/epochs, replay/wrap, bounded capacity, malformed messages and byte
 orders. They can be compiled without rebuilding the rest of core:
@@ -232,8 +241,9 @@ Compile and run sequentially beneath `tests/run-memory-guard.py`.
    `tests/vm-strict-network.nix` exercises actual supervisor registration,
    registered/unregistered egress, permission changes on a running process,
    doctor and host/offline/host transitions; that focused run passed as recorded
-   above. The broader adversarial matrix remains outstanding before enabling
-   strict mode by default for every installation.
+   above, with default selection, DNS, large transfers, constrained buffers and
+   queue rotation covered too. The broader adversarial matrix remains ongoing
+   regression work, not a claim that every protocol/browser is proven correct.
 4. Preserve the distinction between a launch identity (including terminal
    descendants) and an exact currently executing binary. The legacy monitor's
    tuple/procfs display is not a strict authorization source. Host Unix services

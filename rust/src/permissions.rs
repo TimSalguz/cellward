@@ -29,10 +29,11 @@ use crate::tools::Tools;
 pub const FILE: &str = "defaults.conf";
 /// The switches (`yes|no|ask`), built-in `ask`.
 pub const SWITCHES: [&str; 3] = ["microphone", "screencast", "network"];
-/// The flags (`on|off`, kept `true|false` as a container's), built-in off:
+/// The flags (`on|off`, kept `true|false` as a container's):
 /// the host's raw PipeWire (the audio manager), an X server of the
 /// container's own (`x11`, the network's until 2026-10-15). The cameras
-/// were one; now a mode of four words ([`camera`]).
+/// were one; now a mode of four words ([`camera`]). Strict network ownership
+/// defaults on; raw audio manager and X11 default off.
 pub const FLAGS: [&str; 3] = ["audio_manager", "x11", "strict_network"];
 /// The requests for a way around the network (`hermetic::BYPASS_KEYS`, 2c
 /// of §11.15), kept `true|false` as a container's own; their safe values
@@ -75,13 +76,21 @@ pub fn switch(config: &Path, key: &str) -> (Setting, Source) {
     }
 }
 
-/// The template's on/off flag `key`: off where nobody said, and for a word
-/// that is neither, or a file that cannot be read.
+/// Strict ownership defaults on, including malformed/unreadable settings:
+/// only an explicit false/off selects legacy attribution. Other flags default off.
 pub fn flag(config: &Path, key: &str) -> (bool, Source) {
+    let safe = key == crate::strict_network::FLAG;
     match word(config, key) {
-        Ok(Some((w, source))) => (matches!(w.as_str(), "true" | "on"), source),
-        Ok(None) => (false, Source::Default),
-        Err(source) => (false, source),
+        Ok(Some((w, source))) => (
+            match w.as_str() {
+                "true" | "on" => true,
+                "false" | "off" => false,
+                _ => safe,
+            },
+            source,
+        ),
+        Ok(None) => (safe, Source::Default),
+        Err(source) => (safe, source),
     }
 }
 
@@ -670,6 +679,18 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         assert_eq!(switch(&root, "microphone"), (Setting::Ask, Source::Default));
+        assert_eq!(flag(&root, "strict_network"), (true, Source::Default));
+        assert_eq!(flag(&root, "x11"), (false, Source::Default));
+        for (word, expected) in [
+            ("off", false),
+            ("false", false),
+            ("on", true),
+            ("true", true),
+            ("maybe", true),
+        ] {
+            fs::write(root.join(FILE), format!("strict_network = {word}\n")).unwrap();
+            assert_eq!(flag(&root, "strict_network"), (expected, Source::Local));
+        }
         fs::write(root.join(FILE), "microphone = no\nscreencast = sometimes\n").unwrap();
         assert_eq!(switch(&root, "microphone"), (Setting::No, Source::Local));
         assert_eq!(switch(&root, "screencast"), (Setting::No, Source::Local));

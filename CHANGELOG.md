@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Security
+- Strict launch-bound network ownership is now the default for new container
+  instances. Missing prerequisites fail closed; only an explicit off selects
+  legacy compatibility. Existing instances are not silently restarted.
 - Active-selection model and IPC buffers erase their full allocated capacity,
   not only visible bytes, covering truncated secret tails. The new scoped
   transport is internal groundwork, not yet the desktop clipboard path.
@@ -20,6 +23,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Migration tests and a real isolated mount-namespace test exercise this fix.
 
 ### Added
+- Opt-in startup tracing (`CELLWARD_TRACE_STARTUP=1`) and a disposable Wayland
+  VM benchmark distinguish picker preparation from GUI mapping latency.
+
 - Internal nonblocking socket-pair transport for the private active-selection
   broker: immutable instance scopes, separate CLIPBOARD/PRIMARY, revision-pinned
   reads, bounded I/O and timeouts, and explicit controller-only transfers.
@@ -103,6 +109,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- The GUI's bounded font configuration no longer includes system or user font
+  directories indirectly. This prevents loading a large desktop font collection
+  for every new dialog while retaining text, monospace and emoji fallbacks.
 - A windowless X11 copier that has never received keyboard focus can now
   publish CLIPBOARD text/images to native readers of its own launch through
   Cellward's patched private Satellite. The fallback is launch-local, not

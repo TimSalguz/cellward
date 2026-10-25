@@ -6,7 +6,7 @@
   lib,
   rustPlatform,
   patchelf,
-  makeFontsConf,
+  writeText,
   dejavu_fonts,
   noto-fonts-color-emoji,
   wayland,
@@ -37,12 +37,22 @@ let
   # (владелец, 2026-09-26). Основной шрифт встроен (Fira Sans: латиница,
   # кириллица); отсюда — только запасные для знаков (● ○ ▸ ⚠ ⓘ) и значков
   # (🔒 🗑 ➕).
-  fontsConf = makeFontsConf {
-    fontDirectories = [
-      dejavu_fonts
-      noto-fonts-color-emoji
-    ];
-  };
+  # makeFontsConf also includes /etc/fonts/conf.d, XDG fonts and profiles by
+  # default (even impureFontDirectories=[] retains the XDG directory). That
+  # silently brings the whole desktop collection back into each fresh dialog.
+  # fontdb reads this file directly: use only explicit store directories and
+  # preserve generic family aliases, including the clipboard's monospace text.
+  fontsConf = writeText "cellward-window-fonts.conf" ''
+    <?xml version="1.0"?>
+    <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+    <fontconfig>
+      <dir>${dejavu_fonts}/share/fonts</dir>
+      <dir>${noto-fonts-color-emoji}/share/fonts</dir>
+      <alias><family>sans-serif</family><prefer><family>DejaVu Sans</family></prefer></alias>
+      <alias><family>serif</family><prefer><family>DejaVu Serif</family></prefer></alias>
+      <alias><family>monospace</family><prefer><family>DejaVu Sans Mono</family></prefer></alias>
+    </fontconfig>
+  '';
 in
 rustPlatform.buildRustPackage {
   pname = "vpn-zone-window";
@@ -71,6 +81,7 @@ rustPlatform.buildRustPackage {
   # бы `.vpn-zone-window-wrapped`, и его не находил бы никто, кто ищет окно
   # по имени (VM-тест, pgrep).
   VPN_ZONE_WINDOW_FONTS = fontsConf;
+  passthru.fontsConf = fontsConf;
 
   nativeBuildInputs = [ patchelf ];
 

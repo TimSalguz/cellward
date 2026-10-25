@@ -1397,6 +1397,17 @@ fn fitted_size(req: &Request) -> Size {
 const EXIT_NOT_SHOWN: i32 = 3;
 
 fn main() -> iced::Result {
+    let started = std::time::Instant::now();
+    let trace =
+        std::env::var_os("CELLWARD_TRACE_STARTUP").as_deref() == Some(std::ffi::OsStr::new("1"));
+    let milestone = |stage: &str| {
+        if trace {
+            eprintln!(
+                "cellward window startup: {stage}: {} ms",
+                started.elapsed().as_millis()
+            );
+        }
+    };
     // The fonts of this window: a short list of its own (package.nix), not
     // every font of the system — iced reads all it is given at each start,
     // over a thousand on a desktop, seconds under load. Set before anything
@@ -1444,6 +1455,7 @@ fn main() -> iced::Result {
         std::process::exit(1);
     }
     let req = parse_request(&input);
+    milestone("request read and parsed");
     // Nothing to choose from is not a window: the caller falls back.
     let empty = match req.mode.as_str() {
         "menu" => req.actions.is_empty(),
@@ -1454,6 +1466,7 @@ fn main() -> iced::Result {
         std::process::exit(1);
     }
     let size = fitted_size(&req);
+    milestone("fonts and initial layout ready");
     let title = if req.title.is_empty() {
         tr(req.language, UiKey::Launch).to_owned()
     } else {

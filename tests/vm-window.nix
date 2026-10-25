@@ -16,6 +16,8 @@
   screenshotsOnly ? false,
   # Isolate the VPN login form without the preceding window/frame scenarios.
   loginOnly ? false,
+  # Only measure cold/warm picker mapping on a real compositor.
+  startupOnly ? false,
 }:
 
 let
@@ -25,6 +27,7 @@ let
     config = { };
     overlays = [ ];
   };
+  windowFonts = (pkgs.callPackage ../window/package.nix { }).fontsConf;
 
   test = pkgs.testers.runNixOSTest {
     name = "cellward-vm-window";
@@ -78,6 +81,8 @@ let
           pkgs.grim
           pkgs.wtype
           pkgs.foot
+          pkgs.python3
+          pkgs.fontconfig
           # A gateway that asks a password (tests/vm-window-login.py).
           pkgs.ocserv
           pkgs.openssl
@@ -137,7 +142,20 @@ let
       json = __import__("json")
       swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock | head -1").strip()
       exec(open("${./vm-window-login.py}").read())
-    '' + pkgs.lib.optionalString (!loginOnly) (''
+    '' + pkgs.lib.optionalString startupOnly ''
+      swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock | head -1").strip()
+      # A large user font collection must not re-enter the supposedly bounded
+      # GUI font configuration. All entries are private disposable VM fixtures.
+      result = alice(f"WAYLAND_DISPLAY={display} SWAYSOCK={swaysock} python3 ${./vm-window-startup.py} ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf")
+      print(result)
+      font_files = alice("FONTCONFIG_FILE=${windowFonts} fc-list --format='%{file}\\n'").splitlines()
+      allowed_fonts = ("${pkgs.dejavu_fonts}/", "${pkgs.noto-fonts-color-emoji}/")
+      assert 0 < len(font_files) <= 32, font_files
+      assert all(path.startswith(allowed_fonts) for path in font_files), font_files
+      machine.copy_from_vm("/tmp/cellward-startup.json", "")
+      machine.copy_from_vm("/tmp/cellward-startup.trace", "")
+      machine.fail("test -e /tmp/startup-must-not-run")
+    '' + pkgs.lib.optionalString (!loginOnly && !startupOnly) (''
       with subtest("the launch window comes up, stays up, and closed starts nothing"):
           alice(
               f"systemd-run --user --unit=vmpick --setenv=WAYLAND_DISPLAY={display} "
