@@ -36,6 +36,9 @@ pub struct Driver<T: Transport> {
 }
 
 impl<T: Transport> Driver<T> {
+    pub fn has_ready(&self) -> bool {
+        !self.ready.is_empty()
+    }
     /// Bind is acknowledged before this constructor succeeds. Ownership of
     /// the socket transfers even on failure, so a half-bound queue is closed.
     pub fn bind(transport: T, id: u128, queue: u16, epoch: u64, revision: u64) -> io::Result<Self> {
@@ -51,7 +54,7 @@ impl<T: Transport> Driver<T> {
         };
         let result = (|| {
             let sequence = driver.next_sequence()?;
-            let binding = wire::bind(queue, sequence, MAX_PENDING as u32)
+            let binding = wire::bind_headers(queue, sequence, MAX_PENDING as u32)
                 .map_err(|e| io::Error::other(format!("network queue binding: {e:?}")))?;
             driver.send(sequence, &binding)?;
             driver.flush()?;
@@ -223,6 +226,12 @@ impl<T: Transport> Driver<T> {
             }
         }
         Ok(())
+    }
+}
+
+impl Driver<Socket> {
+    pub fn fd(&self) -> Option<std::os::fd::RawFd> {
+        self.transport.as_ref().map(Socket::fd)
     }
 }
 

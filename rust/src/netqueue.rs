@@ -41,7 +41,7 @@ pub struct Launch {
     pub epoch: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Ticket {
     session: u128,
     epoch: u64,
@@ -79,6 +79,7 @@ impl Ticket {
 pub struct Held {
     pub ticket: Ticket,
     pub launch: Arc<Launch>,
+    pub destination: Option<wire::Destination>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +239,7 @@ impl Session {
                 token,
             },
             launch: Arc::clone(launch),
+            destination: packet.destination(),
         };
         self.next_nonce += 1;
         self.pending.insert(packet.id(), (held.clone(), token));

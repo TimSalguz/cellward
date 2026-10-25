@@ -385,6 +385,37 @@ fn cloexec_from_three() -> io::Result<()> {
     Ok(())
 }
 
+/// Higher descriptors are closed on exec. Standard descriptors must not
+/// carry an already-connected host IP/packet/control socket into strict mode.
+fn strict_stdio() -> io::Result<()> {
+    for fd in 0..=2 {
+        let mut domain = 0i32;
+        let mut len = std::mem::size_of_val(&domain) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_DOMAIN,
+                std::ptr::from_mut(&mut domain).cast(),
+                &mut len,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            if matches!(error.raw_os_error(), Some(libc::ENOTSOCK | libc::EBADF)) {
+                continue;
+            }
+            return Err(error);
+        }
+        if domain != libc::AF_UNIX {
+            return Err(io::Error::other(format!(
+                "strict network refuses an inherited network socket on standard descriptor {fd}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The child: the instance's mount namespace, a copy of it of its own, the
 /// capabilities kept, the command. Returns only when something failed —
 /// what, for the waiter to say.
@@ -624,6 +655,35 @@ pub fn run(args: &Args) -> u8 {
             args.instance, args.instance
         );
     }
+    // Connect with host credentials BEFORE entering the instance userns.
+    // This is a private inherited connection, never a public token chosen by
+    // the application. The sticky required marker survives collector failure.
+    let required = dir.join(crate::strict_network::REQUIRED).exists()
+        || crate::permissions::flag(&home.join(".config/vpn-zones"), crate::strict_network::FLAG).0;
+    let mut strict = if required {
+        let prepared = (|| -> io::Result<_> {
+            let word = std::fs::read_to_string(dir.join(crate::strict_network::READY))?;
+            let session = u128::from_str_radix(word.trim(), 16)
+                .ok()
+                .filter(|n| *n != 0)
+                .ok_or_else(|| io::Error::other("strict controller not ready"))?;
+            let conn = std::os::unix::net::UnixStream::connect(dir.join(crate::instance::CONTROL))?;
+            conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+            conn.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
+            let (supervisor, child) =
+                crate::netqueue::gate::pair(std::time::Duration::from_secs(10))?;
+            Ok((conn, session, supervisor, child))
+        })();
+        match prepared {
+            Ok(prepared) => Some(prepared),
+            Err(e) => {
+                eprintln!("container-enter: strict network not ready ({e}); restart the instance; no legacy fallback");
+                return EXIT_NOT_STARTED;
+            }
+        }
+    } else {
+        None
+    };
     if let Err(e) = setns(&space, flags) {
         eprintln!(
             "контейнер {}: не войти в его пространство ({e}) — запуск остановлен",
@@ -642,7 +702,7 @@ pub fn run(args: &Args) -> u8 {
     let leaf = crate::sys::start_time(waiter)
         .map(|start| crate::epoch::leaf_name(waiter, start))
         .map(|leaf| {
-            if args.denied {
+            if args.denied && !required {
                 crate::epoch::denied_leaf(&leaf)
             } else {
                 leaf
@@ -675,10 +735,30 @@ pub fn run(args: &Args) -> u8 {
         drop(said_r);
         drop(status_r);
         drop(lock);
-        if let Some(epoch) = &epoch {
-            place(&args.instance, epoch, leaf.as_deref());
-        }
-        let why = become_the_launch(&space, &args.cmd, &status_w);
+        let placement = if let Some((conn, _, supervisor, child_gate)) = strict.take() {
+            drop(conn);
+            drop(supervisor);
+            (|| {
+                strict_stdio()?;
+                let epoch = epoch
+                    .as_ref()
+                    .ok_or_else(|| io::Error::other("strict launch has no epoch"))?;
+                let leaf = leaf
+                    .as_deref()
+                    .ok_or_else(|| io::Error::other("strict launch has no generation"))?;
+                epoch.place_launch_strict(leaf)?;
+                child_gate.placed_then_wait()
+            })()
+        } else {
+            if let Some(epoch) = &epoch {
+                place(&args.instance, epoch, leaf.as_deref());
+            }
+            Ok(())
+        };
+        let why = match placement {
+            Ok(()) => become_the_launch(&space, &args.cmd, &status_w),
+            Err(e) => format!("strict launch registration failed ({e}); program not executed"),
+        };
         let _ = File::from(said_w).write_all(why.as_bytes());
         // SAFETY: _exit never returns and touches nothing of ours.
         unsafe { libc::_exit(libc::c_int::from(EXIT_NOT_STARTED)) };
@@ -699,6 +779,31 @@ pub fn run(args: &Args) -> u8 {
     }
     // Nothing left to do in the instance's namespace that needs them.
     drop_capabilities();
+    if let Some((mut conn, session, supervisor, child_gate)) = strict.take() {
+        drop(child_gate);
+        let registered = (|| -> io::Result<()> {
+            let prepared = supervisor.prepared()?;
+            let diagnostic = std::env::current_exe()
+                .ok()
+                .is_some_and(|core| args.cmd.first() == Some(&core.into_os_string()))
+                && args.cmd.get(1).is_some_and(|arg| arg == "doctor-probe");
+            let kind = if diagnostic { "DIAGNOSTIC" } else { "REGISTER" };
+            writeln!(conn, "{kind} {session:032x} {child}")?;
+            use std::io::BufRead;
+            let mut reply = String::new();
+            std::io::BufReader::new((&conn).take(512)).read_line(&mut reply)?;
+            if reply != "REGISTERED\n" {
+                return Err(io::Error::other(format!(
+                    "strict controller: {}",
+                    reply.trim()
+                )));
+            }
+            prepared.release()
+        })();
+        if let Err(e) = registered {
+            eprintln!("container-enter: {e}; program not executed");
+        }
+    }
     let mut said = String::new();
     let _ = File::from(said_r).read_to_string(&mut said);
     // The program is in, or will not be: the lock goes, the keeper looks.

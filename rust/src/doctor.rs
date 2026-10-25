@@ -2287,11 +2287,15 @@ pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u
         &running.network,
     ));
     checks.push(live_switch_check(crate::epoch::read_live(&running.dir)));
-    checks.push(owner_check(
+    checks.push(if crate::strict_network::mode(&running.dir) == "strict" {
+        Check::new("network-owner", Level::Ok, "строгий режим: регистрация до exec, cgroup и очередь ядра; без подбора процесса по сокету")
+    } else if crate::strict_network::mode(&running.dir) == "strict-failed" {
+        Check::new("network-owner", Level::Fail, "строгий обработчик недоступен: сеть закрыта, нужен перезапуск экземпляра")
+    } else { owner_check(
         fs::read_to_string(running.dir.join(crate::owners::STATUS))
             .ok()
             .as_deref(),
-    ));
+    ) });
     checks.push(match crate::epoch::read(&running.dir) {
         Some(epoch) => inherited_check(&inherited_sockets(running.pid, uid, &epoch)),
         None => Check::new(

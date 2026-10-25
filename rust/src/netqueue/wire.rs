@@ -16,6 +16,15 @@ pub struct Packet {
     pub(super) id: u32,
     pub(super) mark: u32,
     pub(super) family: u8,
+    destination: Option<Destination>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Destination {
+    pub protocol: u8,
+    pub local_port: u16,
+    pub address: std::net::IpAddr,
+    pub port: u16,
 }
 
 impl Packet {
@@ -30,6 +39,9 @@ impl Packet {
     }
     pub fn family(&self) -> u8 {
         self.family
+    }
+    pub fn destination(&self) -> Option<Destination> {
+        self.destination
     }
 }
 
@@ -85,7 +97,7 @@ pub fn parse(data: &[u8], sender_port: u32, truncated: bool) -> Result<Vec<Messa
             return Err(Error::Length);
         }
         let len = u32::from_ne_bytes(rest[..4].try_into().unwrap()) as usize;
-        if len < HEADER || len > rest.len() || align(len) > rest.len() {
+        if len < HEADER || len > rest.len() || (align(len) > rest.len() && len != rest.len()) {
             return Err(Error::Length);
         }
         let kind = u16::from_ne_bytes(rest[4..6].try_into().unwrap());
@@ -113,7 +125,7 @@ pub fn parse(data: &[u8], sender_port: u32, truncated: bool) -> Result<Vec<Messa
             4 => return Err(Error::Overrun),
             _ => return Err(Error::Type),
         }
-        rest = &rest[align(len)..];
+        rest = &rest[align(len).min(rest.len())..];
     }
     Ok(out)
 }
@@ -132,13 +144,15 @@ fn packet(body: &[u8]) -> Result<Packet, Error> {
     let queue = u16::from_be_bytes(body[2..4].try_into().unwrap());
     let mut attrs = &body[NFGEN..];
     let (mut id, mut mark) = (None, None);
+    let mut destination = None;
+    let mut payload_seen = false;
     while !attrs.is_empty() {
         if attrs.len() < 4 {
             return Err(Error::Attribute);
         }
         let len = usize::from(u16::from_ne_bytes(attrs[..2].try_into().unwrap()));
         let raw_kind = u16::from_ne_bytes(attrs[2..4].try_into().unwrap());
-        if len < 4 || len > attrs.len() || align(len) > attrs.len() {
+        if len < 4 || len > attrs.len() || (align(len) > attrs.len() && len != attrs.len()) {
             return Err(Error::Attribute);
         }
         let kind = raw_kind & 0x3fff;
@@ -169,16 +183,70 @@ fn packet(body: &[u8]) -> Result<Packet, Error> {
                 }
                 mark = Some(be32(value));
             }
-            // Payload and other metadata are deliberately not retained.
+            10 => {
+                if payload_seen {
+                    return Err(Error::Duplicate);
+                }
+                payload_seen = true;
+                if raw_kind & 0x8000 != 0 {
+                    return Err(Error::Attribute);
+                }
+                destination = header_destination(family, value);
+            }
+            // Only header fields survive; payload bytes are never retained.
             _ => {}
         }
-        attrs = &attrs[align(len)..];
+        attrs = &attrs[align(len).min(attrs.len())..];
     }
     Ok(Packet {
         queue,
         id: id.ok_or(Error::MissingHeader)?,
         mark: mark.unwrap_or(0),
         family,
+        destination,
+    })
+}
+
+/// Unsupported fragments/extension headers have no destination and must be
+/// dropped by the live controller, never bypass destination restrictions.
+fn header_destination(family: u8, b: &[u8]) -> Option<Destination> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let (protocol, address, offset) = match family {
+        2 if b.len() >= 20 && b[0] >> 4 == 4 => {
+            let offset = usize::from(b[0] & 15) * 4;
+            if offset < 20 || offset > b.len() || u16::from_be_bytes([b[6], b[7]]) & 0x3fff != 0 {
+                return None;
+            }
+            (
+                b[9],
+                IpAddr::V4(Ipv4Addr::new(b[16], b[17], b[18], b[19])),
+                offset,
+            )
+        }
+        10 if b.len() >= 40 && b[0] >> 4 == 6 => (
+            b[6],
+            IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&b[24..40]).ok()?)),
+            40,
+        ),
+        _ => return None,
+    };
+    let transport = b.get(offset..)?;
+    let (local_port, port) = match protocol {
+        6 | 17 if transport.len() >= if protocol == 6 { 20 } else { 8 } => (
+            u16::from_be_bytes([transport[0], transport[1]]),
+            u16::from_be_bytes([transport[2], transport[3]]),
+        ),
+        1 | 58 if transport.len() >= 8 && transport[0] == if protocol == 1 { 8 } else { 128 } => (
+            u16::from_be_bytes([transport[4], transport[5]]),
+            u16::from(transport[0]),
+        ),
+        _ => return None,
+    };
+    Some(Destination {
+        protocol,
+        local_port,
+        address,
+        port,
     })
 }
 
@@ -207,13 +275,21 @@ fn request(kind: u16, queue: u16, sequence: u32, attrs: Vec<u8>) -> Vec<u8> {
 /// and FAIL_OPEN explicitly cleared. Requires matching ACKs before nft
 /// routing/launch activation. Does not perform any system call.
 pub fn bind(queue: u16, sequence: u32, max_pending: u32) -> Result<Vec<u8>, Error> {
+    binding(queue, sequence, max_pending, false)
+}
+
+pub fn bind_headers(queue: u16, sequence: u32, max_pending: u32) -> Result<Vec<u8>, Error> {
+    binding(queue, sequence, max_pending, true)
+}
+
+fn binding(queue: u16, sequence: u32, max_pending: u32, headers: bool) -> Result<Vec<u8>, Error> {
     if max_pending == 0 || max_pending > 1024 {
         return Err(Error::TooLarge);
     }
     let mut attrs = Vec::new();
     attr(&mut attrs, 1, &[1, 0, 0, 0]); // BIND
-    let mut params = 0u32.to_be_bytes().to_vec();
-    params.push(1); // COPY_META, no payload collection
+    let mut params = (if headers { 128u32 } else { 0 }).to_be_bytes().to_vec();
+    params.push(if headers { 2 } else { 1 });
     attr(&mut attrs, 2, &params);
     attr(&mut attrs, 3, &max_pending.to_be_bytes());
     attr(&mut attrs, 4, &1u32.to_be_bytes()); // mask FAIL_OPEN
@@ -252,6 +328,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kernel_may_omit_padding_only_after_the_final_attribute_and_message() {
+        let mut packet = fixture(4, 2, 3);
+        let mut udp = vec![0; 29];
+        udp[0] = 0x45;
+        udp[9] = 17;
+        udp[16..20].copy_from_slice(&[198, 51, 100, 1]);
+        udp[20..24].copy_from_slice(&[0x12, 0x34, 0x01, 0xbb]);
+        attr(&mut packet, 10, &udp);
+        packet.truncate(packet.len() - 3);
+        let len = packet.len() as u32;
+        packet[..4].copy_from_slice(&len.to_ne_bytes());
+        let parsed = parse(&packet, 0, false).unwrap();
+        let Message::Packet(p) = &parsed[0] else {
+            panic!()
+        };
+        assert_eq!(p.destination.unwrap().port, 443);
+        // Extra bytes do not excuse incomplete inter-message alignment.
+        packet.push(0);
+        assert_eq!(parse(&packet, 0, false), Err(Error::Length));
+    }
+
+    #[test]
+    fn copied_headers_provide_a_destination_without_retaining_payload() {
+        let mut b = vec![0; 128];
+        b[0] = 0x45;
+        b[9] = 17;
+        b[16..20].copy_from_slice(&[198, 51, 100, 1]);
+        b[20..24].copy_from_slice(&[0x12, 0x34, 0x01, 0xbb]);
+        let got = header_destination(2, &b).unwrap();
+        assert_eq!(got.local_port, 0x1234);
+        assert_eq!(got.port, 443);
+        assert_eq!(got.address.to_string(), "198.51.100.1");
+        b[6] = 0x20;
+        assert!(header_destination(2, &b).is_none(), "fragment accepted");
+        b.fill(0);
+        b[0] = 0x60;
+        b[6] = 17;
+        b[24..40].copy_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+        b[40..44].copy_from_slice(&[0x12, 0x34, 0x01, 0xbb]);
+        assert_eq!(header_destination(10, &b).unwrap().port, 443);
+        b[6] = 44;
+        assert!(
+            header_destination(10, &b).is_none(),
+            "unparsed extension header accepted"
+        );
+        assert!(header_destination(10, &b[..39]).is_none());
+    }
+
+    #[test]
     fn kernel_packet_id_mark_and_queue_have_the_correct_byte_orders() {
         let out = parse(&fixture(0x1234, 0x11223344, 0x55667788), 0, false).unwrap();
         assert_eq!(
@@ -260,7 +385,8 @@ mod tests {
                 queue: 0x1234,
                 id: 0x11223344,
                 mark: 0x55667788,
-                family: 2
+                family: 2,
+                destination: None
             })]
         );
     }

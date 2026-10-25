@@ -33,7 +33,7 @@ pub const SWITCHES: [&str; 3] = ["microphone", "screencast", "network"];
 /// the host's raw PipeWire (the audio manager), an X server of the
 /// container's own (`x11`, the network's until 2026-10-15). The cameras
 /// were one; now a mode of four words ([`camera`]).
-pub const FLAGS: [&str; 2] = ["audio_manager", "x11"];
+pub const FLAGS: [&str; 3] = ["audio_manager", "x11", "strict_network"];
 /// The requests for a way around the network (`hermetic::BYPASS_KEYS`, 2c
 /// of §11.15), kept `true|false` as a container's own; their safe values
 /// where nobody said. A request opens nothing by itself: only where the
@@ -131,6 +131,7 @@ fn key_of(word: &str) -> Option<(&'static str, Option<(&'static str, &'static st
         "camera" => ("camera", None),
         "audio-manager" | "audio_manager" => ("audio_manager", Some(("on", "off"))),
         "x11" => ("x11", Some(("on", "off"))),
+        "strict-network" | "strict_network" => ("strict_network", Some(("on", "off"))),
         "hermetic" => ("hermetic", Some(("on", "off"))),
         "nix-daemon" | "nix_daemon" => ("nix_daemon", Some(("on", "off"))),
         "host-files" | "host_files_writable" => {
@@ -153,6 +154,7 @@ const USAGE: &str = "cellward defaults — разрешения контейне
                      cellward defaults set microphone|screencast|network yes|no|ask|default\n\
                      cellward defaults set camera no|black|ask|yes|default\n\
                      cellward defaults set audio-manager|x11 on|off|default\n\
+                     cellward defaults set strict-network on|off|default\n\
                      cellward defaults set hermetic|nix-daemon on|off|default\n\
                      cellward defaults set host-files read-only|writable|default";
 

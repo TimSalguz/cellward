@@ -1,9 +1,23 @@
-# Strict egress ownership: kernel-queue foundation
+# Strict egress ownership
 
-Status (2026-10-25): **implemented and kernel-probed foundation, not enabled
-for application launches**. There is no new user setting that silently turns
-this on. The existing relay/firewall remains unchanged. This is the next stage
-after [the procfs-independent lookup fix](NETWORK-OWNERSHIP.md).
+Status (2026-10-25): **live opt-in backend implemented and focused VM integration
+passed**. Enable for NEW instances with `cellward defaults set strict-network
+on`, or `programs.cellward.defaults.permissions.strictNetwork = true`. Running
+legacy instances must be stopped/restarted: they cannot acquire strict identity
+retroactively. Explicit `off` retains the legacy backend; a failed strict startup
+never selects it automatically. Do not stop somebody's active apps implicitly.
+
+Requirements: Linux 6.5+ (`SO_PEERPIDFD`), delegated launch cgroups,
+`nft socket cgroupv2`, NFQUEUE and a host-managed launch with a live registry
+generation. Unsupported/missing prerequisites refuse startup. `status --json`
+reports `network_ownership`; `doctor` reports strict availability. After collector
+failure its sticky required marker prevents an unregistered fallback launch.
+Launches must originate below the delegated user manager. A root-created `su`
+login session cannot migrate through its root-owned common cgroup ancestor;
+strict mode refuses that launch rather than silently sharing an identity.
+For such a CLI session, use `systemd-run --user --wait --pipe --collect
+cellward run …` to launch through the user manager.
+This extends [the procfs-independent lookup fix](NETWORK-OWNERSHIP.md).
 
 ## Invariant and mechanism
 
@@ -63,12 +77,14 @@ information is display/logging data, not the identity.
 - `rust/src/netqueue/wire.rs`: bounded, atomic netlink/NLA parser; kernel sender
   checks, truncation/overrun refusal, critical-attribute validation, native vs
   network byte-order handling, individual ACCEPT/DROP verdicts, and bounded
-  COPY_META queue configuration with FAIL_OPEN explicitly disabled. Attribution
+  metadata-only or bounded-header queue configuration with FAIL_OPEN explicitly disabled. Attribution
   marks are cleared in verdicts rather than leaked into routing decisions.
 - `rust/src/netqueue/socket.rs`: explicit nonblocking, close-on-exec
   NETLINK_NETFILTER adapter. The peer identity comes from recvmsg sockaddr_nl,
   not a user-supplied nlmsg header. No firewall rule is installed by opening it.
-  Metadata only is retained; packet payloads are not archived.
+  The live driver transiently copies at most 128 packet-prefix bytes to decode
+  addresses/protocol/ports; only those fields survive parsing. Payload bytes are
+  not archived. The metadata-only codec remains available for kernel probes.
 - `rust/src/netqueue/driver.rs`: socket-owning runtime adapter. Binding and
   individual verdicts require exact outstanding sequence ACKs; unexpected,
   failed or missing ACKs close the actual transport and invalidate the model.
@@ -81,12 +97,15 @@ information is display/logging data, not the identity.
 - `rust/src/netqueue/gate.rs`: inherited CLOEXEC socketpair pre-exec barrier,
   with consuming prepared/release transitions. EOF, timeout or malformed replies
   abort the child's wait, never authorize execution. No public socket pathname.
-  This primitive is **not yet wired into `enter::run`**; its caller must drop
-  the other fork endpoint and validate dedicated membership/mapping ACKs.
+  `enter::run` uses it in strict mode and drops opposite fork endpoints before
+  waiting. The trusted controller checks child membership before registration.
 - `epoch::Epoch::place_launch_strict`: dedicated, newly created launch cgroup
   placement with no fallback to a shared epoch or denied group. Existing
   cgroups are refused rather than silently reusing identity. The legacy
-  `place_launch` caller is unchanged until trusted registration is connected.
+  `place_launch` remains for explicitly selected legacy mode only. Strict mode
+  also refuses host IP/packet/control sockets inherited through standard I/O;
+  higher descriptors are close-on-exec. Existing Unix logging/IPC channels are
+  not claimed as isolated IP traffic.
 - `netask::Asker<netqueue::Ticket>`: typed UI adapter using the actual packet
   ticket, never reconstructing a verdict target from destination tuples.
   Question/session allowances are scoped to queue session, network epoch,
@@ -103,8 +122,27 @@ information is display/logging data, not the identity.
   sequence (not the previous wrapping 8-bit value). Fragmented replies are
   buffered up to their bounded frame length and cannot consume the next control
   opcode. High generation bits survive question, reply and cancellation.
-  The existing legacy relay uses `Asker<flows::Key>` and is not silently promoted
-  to strict mode by this change.
+  The explicitly selected legacy relay uses `Asker<flows::Key>`. In strict
+  instances its tuple-based authorization gate is disabled, avoiding both an
+  accidental second allowance source and duplicate permission questions.
+- `strict_network::Runtime`: owns the live driver, registered cgroup mappings,
+  typed question queue and policy/epoch transitions. Registration authenticates
+  the kernel-pinned Unix peer, global `.running/.started` generation, unique
+  launcher key, direct-child relation and exact epoch-root launch cgroup. It
+  does NOT depend on ptrace-protected namespace symlinks hidden by non-dumpable
+  waiters. Apps cannot create an epoch-root sibling: cgroupfs is covered and a
+  cgroup namespace they can mount is rooted below their own launch group.
+  Diagnostic launches have an explicit always-IP-denied registration, not a
+  guessed application or automatic network permission.
+- A distinct nft table clears application marks, classifies registered socket
+  birth cgroups, queues them, and drops unmatched egress. Loopback and the
+  existing link-only NDP infrastructure exemption are preserved. Registration
+  appends one rule and waits for nft's kernel transaction success before token
+  activation/releasing exec. It never re-resolves swept archived directories;
+  existing rules retain their kernel identities. Network renewal happens while
+  fenced/frozen, drains old tickets and registers new cgroups before attachment.
+  Supervisor lock acquisition is nonblocking: a switch cannot deadlock against
+  an entering launch that is waiting for registration while holding LOCK shared.
 
 None of these APIs makes UI-provided tokens/generations authoritative. They
 are trusted-controller building blocks. A `Decision` is preliminary until the
@@ -115,7 +153,19 @@ operational error. There must be no bypass/default allow fallback.
 
 ## Verification performed
 
-35 queue/barrier unit tests pass, including token reservation/activation, stale sessions,
+The clean commit tree passed **1087 core unit tests** (six explicit platform/
+kernel tests ignored by the ordinary run). The working tree, including separate
+clipboard work, passed 1099. The production nft classifier's explicit native
+preflight and both IPv4/IPv6 queue smoke suites passed as well.
+
+`tests/vm-strict-network.nix` passed in two disposable NixOS VMs under QEMU TCG
+(Linux 6.18.56). It checks real registered HTTP egress, refusal of an unregistered
+process in the same network namespace, an observed connection denial before
+granting a running process access, subsequent revocation/re-grant, diagnostic
+registration, and host/offline/host network transitions. This is a focused
+headless integration test, not a complete browser/GUI or protocol stress suite.
+
+Queue/barrier/header unit tests cover token reservation/activation, stale sessions,
 policies/epochs, replay/wrap, bounded capacity, malformed messages and byte
 orders. They can be compiled without rebuilding the rest of core:
 
@@ -156,42 +206,29 @@ failure behaviour, **not** multi-application production integration. Peak
 sampled userspace RSS was about 25 MiB; kernel resources were small and bounded.
 Compile and run sequentially beneath `tests/run-memory-guard.py`.
 
-## Required before strict mode can be offered
+## Limits and remaining coverage
 
-1. Trusted registration IPC: resolve the launch in the host supervisor, pin its
-   instance/process generations and its dedicated cgroup, reserve the token,
-   install the mapping atomically, verify the precise kernel ACK, activate it,
-   then release exec. Lost registration, parent death/EOF and failed cgroup
-   placement must stop startup, not execute in an unregistered fallback group.
-   Fix lock ordering explicitly: the current enter path holds the instance's
-   shared lock, so a registration handler must not deadlock waiting for it
-   exclusively before answering.
-2. A production classification table whose unmatched packets DROP. The probe's
-   narrow UDP rule and otherwise-accepting loopback test table are **not** this
-   policy. Use dedicated per-launch cgroups, correct cgroup-namespace levels and
-   proper nft string escaping for systemd's literal backslashes. Preserve the
-   existing epoch/deny wall after queue reinjection. Never trust SO_MARK alone.
-3. Handle DNS, trusted infrastructure traffic, kernel-generated ICMP/NDP,
-   fragments/GSO, inherited and transferred sockets explicitly. Do not add a
-   broad exemption for traffic whose identity was missing. Keep isolated
-   application namespaces distinct from “without isolation”; do not apply an
-   experimental policy to the host network namespace.
-4. Wire the tested collector lifecycle/ACK adapter and pre-exec barrier into
-   the live supervisor and its typed UI adapter. Packet/request quotas and
-   cancellation are implemented; the integrating supervisor must cancel UI
-   requests before policy/epoch changes and consume only current tickets.
-   Inner panel sequences no longer wrap, but this does not replace registering
-   launches before exec or draining kernel-held packets on transitions. Queue
-   configuration currently copies metadata only: destination display needs
-   separately designed bounded header/conntrack metadata, not guessed tuple
-   ownership or indiscriminate payload archiving. Tie approvals to token/session
-   generations and handle policy/network switches before releasing old traffic.
-5. Implement safe session rotation before token, record or packet-ID exhaustion.
+1. The bounded header decoder supports ordinary IPv4/IPv6 TCP, UDP and echo
+   requests. Unparsed extension/fragment headers and unsupported protocols DROP,
+   not an ownerless permission question or allow. Broader protocol coverage and
+   GSO/fragment stress still need dedicated tests. DNS forwarding policy retains
+   the existing `netrules::Rules::of_flow` semantics; this is not a new promise
+   of destination-level or DNS-request approval.
+2. Implement safe automatic session rotation before token, record or packet-ID exhaustion.
    No tombstone may be deleted while delayed kernel messages, held packets or
    old UI replies could refer to it. Restarts do not reuse a live queue's old
    identity. Capacity/unsupported-kernel conditions are startup/operational
    failures, not an “unknown application, allow?” modal per connection.
-6. Multi-launch namespace/VM regression tests: two actual birth cgroups, same
+3. Expand multi-launch namespace/VM regression tests: two actual birth cgroups, same
    tuples/reuseport, rapid UDP, TCP/QUIC, DNS, passed FDs, network switches,
-   policy changes, startup races and collector crashes. Existing mode remains
-   the default until these pass. Do not label this foundation a finished fix.
+   policy changes, startup races and collector crashes. The focused
+   `tests/vm-strict-network.nix` exercises actual supervisor registration,
+   registered/unregistered egress, permission changes on a running process,
+   doctor and host/offline/host transitions; that focused run passed as recorded
+   above. The broader adversarial matrix remains outstanding before enabling
+   strict mode by default for every installation.
+4. Preserve the distinction between a launch identity (including terminal
+   descendants) and an exact currently executing binary. The legacy monitor's
+   tuple/procfs display is not a strict authorization source. Host Unix services
+   and cooperating processes in the same container remain outside this IP-egress
+   identity boundary. This backend is never applied to the real host namespace.

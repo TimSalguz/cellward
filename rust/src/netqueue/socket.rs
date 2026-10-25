@@ -11,6 +11,39 @@ pub struct Socket {
 }
 
 impl Socket {
+    /// Only for a descriptor handed back by the trusted namespace helper.
+    pub fn from_owned(fd: OwnedFd) -> io::Result<Self> {
+        for (option, expected) in [
+            (libc::SO_DOMAIN, libc::AF_NETLINK),
+            (libc::SO_PROTOCOL, libc::NETLINK_NETFILTER),
+            (libc::SO_TYPE, libc::SOCK_RAW),
+        ] {
+            let mut value = 0i32;
+            let mut len = std::mem::size_of_val(&value) as libc::socklen_t;
+            if unsafe {
+                libc::getsockopt(
+                    fd.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    option,
+                    std::ptr::from_mut(&mut value).cast(),
+                    &mut len,
+                )
+            } != 0
+                || value != expected
+            {
+                return Err(io::Error::other("not an NFNETLINK queue socket"));
+            }
+        }
+        let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+            || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { fd })
+    }
+
     pub fn open_here() -> io::Result<Self> {
         // SAFETY: socket takes integers; ownership is taken exactly once.
         let raw = unsafe {

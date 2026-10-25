@@ -1037,6 +1037,11 @@ in
           default = null;
           description = "Есть ли сеть у программы контейнера без своего правила (docs/FIREWALL.md §9): yes, no или ask — спросить при первом соединении программы, до ответа сети у неё нет. Правило контейнера (containers.<к>.firewall) важнее. null — не задавать из Nix (cellward defaults set network …, иначе ask).";
         };
+        strictNetwork = lib.mkOption {
+          type = lib.types.nullOr lib.types.bool;
+          default = null;
+          description = "Строгая идентификация исходящих пакетов: регистрация запуска до exec, cgroup и NFQUEUE без отката к поиску процесса. Требует перезапуска экземпляров контейнеров; неподдерживаемое ядро или отсутствие делегированной cgroup останавливает запуск. null — локальное cellward defaults set strict-network on|off.";
+        };
       };
     };
 
@@ -1856,6 +1861,7 @@ in
         ++ lib.optional (cfg.defaults.permissions.nixDaemon != null) "nix_daemon = ${lib.boolToString cfg.defaults.permissions.nixDaemon}\n"
         ++ lib.optional (cfg.defaults.permissions.hostFilesWritable != null) "host_files_writable = ${lib.boolToString cfg.defaults.permissions.hostFilesWritable}\n"
         ++ lib.optional (cfg.defaults.permissions.network != null) "network = ${cfg.defaults.permissions.network}\n"
+        ++ lib.optional (cfg.defaults.permissions.strictNetwork != null) "strict_network = ${lib.boolToString cfg.defaults.permissions.strictNetwork}\n"
       );
     })
     (lib.mkIf (cfg.protect != [ ]) {

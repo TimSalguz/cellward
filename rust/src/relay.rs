@@ -1521,6 +1521,54 @@ fn diag_socket_main(args: &[OsString]) -> u8 {
     }
 }
 
+fn owner_socket_main(args: &[OsString]) -> u8 {
+    let Some(fd) = args
+        .first()
+        .and_then(|a| a.to_str())
+        .and_then(|a| a.parse::<RawFd>().ok())
+        .filter(|fd| *fd > 2 && args.len() == 1)
+    else {
+        return 2;
+    };
+    let socket = match crate::netqueue::socket::Socket::open_here() {
+        Ok(socket) => socket,
+        Err(e) => {
+            eprintln!("strict network queue: {e}");
+            return 1;
+        }
+    };
+    match crate::sys::send_with_fds(fd, b"q", &[socket.fd()]) {
+        Ok(()) => 0,
+        Err(_) => 1,
+    }
+}
+
+fn owner_rules_main(args: &[OsString]) -> u8 {
+    let [nft] = args else {
+        return 2;
+    };
+    let Ok(nft) = absolute(nft) else {
+        return 2;
+    };
+    use std::io::Read;
+    let mut rules = String::new();
+    if std::io::stdin()
+        .take(1024 * 1024 + 1)
+        .read_to_string(&mut rules)
+        .is_err()
+        || rules.len() > 1024 * 1024
+    {
+        return 2;
+    }
+    match crate::zone::feed_nft(&nft, &rules) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("strict network rules: {e}");
+            1
+        }
+    }
+}
+
 /// `frame-relay --who --nft P --a4 A [--leaf PATH]…`: the instance's counts
 /// by launch (`zone::who_ruleset`) loaded anew, for the launches' cgroups
 /// given — as its keeper sees them when they change. Counts only: the
@@ -1614,6 +1662,8 @@ pub fn main(args: &[OsString]) -> u8 {
         Some("--seal") => return seal_main(&args[1..]),
         Some("--who") => return who_main(&args[1..]),
         Some("--diag-socket") => return diag_socket_main(&args[1..]),
+        Some("--owner-socket") => return owner_socket_main(&args[1..]),
+        Some("--owner-rules") => return owner_rules_main(&args[1..]),
         _ => {}
     }
     let (tap, stream) = match parse_args(args) {

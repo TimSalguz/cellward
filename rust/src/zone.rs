@@ -2583,6 +2583,15 @@ fn keep(
         let mut fds: Vec<libc::pollfd> = Vec::with_capacity(members.len() + 5);
         fds.push(pollin(wake_r.as_raw_fd()));
         fds.push(pollin(doorbell.as_ref().map_or(-1, AsRawFd::as_raw_fd)));
+        let strict_fd = transport.strict.as_ref().and_then(|s| s.queue_fd());
+        fds.push(pollin(strict_fd.unwrap_or(-1)));
+        fds.push(pollin(
+            transport
+                .strict
+                .as_ref()
+                .filter(|_| strict_fd.is_some())
+                .map_or(-1, |s| s.ui_fd()),
+        ));
         let way = fds.len();
         fds.extend(transport.polled());
         let first_member = fds.len();
@@ -2595,7 +2604,9 @@ fn keep(
         }));
         // A child's end whose word an attach's wait took from the pipe:
         // looked at now, not waited for.
-        let timeout = if CHILD_ENDED.load(Ordering::SeqCst) {
+        let timeout = if CHILD_ENDED.load(Ordering::SeqCst)
+            || transport.strict.as_ref().is_some_and(|s| s.ready())
+        {
             0
         } else {
             -1
@@ -2644,6 +2655,16 @@ fn keep(
                 } else {
                     Ending::Broken
                 };
+            }
+        }
+        if fds[2].revents != 0
+            || fds[3].revents != 0
+            || transport.strict.as_ref().is_some_and(|s| s.ready())
+        {
+            if let Some(strict) = &mut transport.strict {
+                if let Err(e) = strict.handle() {
+                    eprintln!("instance {}: strict network closed: {e}", transport.id);
+                }
             }
         }
         transport.handle(&fds[way..first_member], wake_r.as_raw_fd());
@@ -2844,6 +2865,28 @@ fn answer_request(
     wake: RawFd,
 ) {
     let _ = conn.set_nonblocking(false);
+    let _ = conn.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+    if line.starts_with("REGISTER ") || line.starts_with("DIAGNOSTIC ") {
+        let result = (|| {
+            let core = std::env::current_exe().map_err(|e| e.to_string())?;
+            let space = transport.space_pidfd().ok_or("instance exited")?;
+            let epoch = transport.epochs.now.as_ref().ok_or("no delegated epoch")?;
+            let registry = transport.state.join(".running").join(
+                crate::instance::container_of(&transport.id).unwrap_or(crate::registry::MAIN),
+            );
+            let strict = transport
+                .strict
+                .as_mut()
+                .ok_or("strict network not active; restart the instance")?;
+            strict.register(&conn, line, epoch, &registry, &core, &transport.nft, &space)
+        })();
+        let reply = match result {
+            Ok(()) => "REGISTERED\n".to_owned(),
+            Err(e) => format!("REFUSED {}\n", one_line(&e)),
+        };
+        let _ = (&conn).write_all(reply.as_bytes());
+        return;
+    }
     let reply = match crate::switch::parse_request(line) {
         None => "REFUSED request not a request this socket takes\n".to_owned(),
         Some(to) => {
@@ -3147,6 +3190,10 @@ struct Transport {
     /// The firewall's question, for the flows its rules ask about
     /// (`crate::netask`); none without a gate — nothing to hold them.
     asker: Option<crate::netask::Asker>,
+    strict_requested: bool,
+    strict: Option<crate::strict_network::Runtime>,
+    strict_window: PathBuf,
+    strict_runtime: PathBuf,
 }
 
 /// The record an instance's network rules are in (`crate::netrules`): its
@@ -3241,6 +3288,8 @@ impl Transport {
         } else {
             (None, None, None)
         };
+        let strict_requested =
+            crate::permissions::flag(&zone.home.join(CONFIG_SUBDIR), crate::strict_network::FLAG).0;
         Self {
             id: plan.id.clone(),
             network: plan.network.clone(),
@@ -3279,7 +3328,7 @@ impl Transport {
                     _ => None,
                 },
             ),
-            asker: gate.as_ref().and_then(|_| {
+            asker: gate.as_ref().filter(|_| !strict_requested).and_then(|_| {
                 crate::netask::Asker::new(
                     &zone.tools.window,
                     &zone.home.join(CONFIG_SUBDIR),
@@ -3299,6 +3348,10 @@ impl Transport {
             verdicts,
             decisions,
             gate,
+            strict_requested,
+            strict: None,
+            strict_window: zone.tools.window.clone(),
+            strict_runtime: host_runtime_dir(zone),
         }
     }
 
@@ -3358,22 +3411,30 @@ impl Transport {
         }
     }
 
-    /// `f` with the instance's lock taken exclusively, as long as that
-    /// takes: a launch holds it shared only until its program is placed.
-    fn with_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+    /// `f` only if the exclusive instance lock is immediately available.
+    /// Entering launches hold it shared while waiting for this keeper's
+    /// registration reply, so blocking here would deadlock the barrier.
+    fn with_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
         let fd = self.lock.as_ref().map(AsRawFd::as_raw_fd);
         if let Some(fd) = fd {
             // SAFETY: flock(2) on a descriptor we hold.
-            while unsafe { libc::flock(fd, libc::LOCK_EX) } != 0
-                && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
-            {}
+            loop {
+                if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    return None;
+                }
+            }
+        } else {
+            return None;
         }
         let out = f(self);
         if let Some(fd) = fd {
             // SAFETY: flock(2) on a descriptor we hold.
             unsafe { libc::flock(fd, libc::LOCK_UN) };
         }
-        out
+        Some(out)
     }
 
     fn offline(&self) -> bool {
@@ -3476,8 +3537,16 @@ impl Transport {
             tally: self.tally.as_ref().map(AsRawFd::as_raw_fd),
             flows: self.flows.as_ref().map(AsRawFd::as_raw_fd),
             news: self.news.as_ref().map(|(_, w)| w.as_raw_fd()),
-            verdicts: self.verdicts.as_ref().map(AsRawFd::as_raw_fd),
-            gate: self.gate.as_ref().map(|(r, _)| r.as_raw_fd()),
+            verdicts: self
+                .verdicts
+                .as_ref()
+                .filter(|_| !self.strict_requested)
+                .map(AsRawFd::as_raw_fd),
+            gate: self
+                .gate
+                .as_ref()
+                .filter(|_| !self.strict_requested)
+                .map(|(r, _)| r.as_raw_fd()),
         };
         let stop = || ASKED_TO_STOP.load(Ordering::SeqCst);
         // The denied launches' cgroup is there for the rules to name: an
@@ -3518,6 +3587,39 @@ impl Transport {
     /// Its first way out, as the instance comes up: none for an offline
     /// one; through its zone, or the instance does not come up.
     fn first(&mut self) -> Result<(), String> {
+        let _ = fs::remove_file(self.dir.join(crate::strict_network::READY));
+        let _ = fs::remove_file(self.dir.join(crate::strict_network::REQUIRED));
+        if self.strict_requested {
+            fs::write(self.dir.join(crate::strict_network::REQUIRED), b"1\n")
+                .map_err(|e| e.to_string())?;
+            let core = std::env::current_exe().map_err(|e| e.to_string())?;
+            let space = self
+                .space_pidfd()
+                .ok_or("strict network: instance vanished")?;
+            let epoch = self
+                .epochs
+                .now
+                .as_ref()
+                .ok_or("strict network requires a delegated cgroup; no legacy fallback")?;
+            let asker = crate::netask::Asker::new(
+                &self.strict_window,
+                &self.config,
+                &self.state,
+                &self.strict_runtime,
+                record_of(&self.id),
+            )
+            .map_err(|e| e.to_string())?;
+            self.strict = Some(crate::strict_network::Runtime::start(
+                &core,
+                &self.nft,
+                &space,
+                epoch,
+                &self.config,
+                &self.dir,
+                asker,
+                record_of(&self.id),
+            )?);
+        }
         if self.offline() {
             self.why = "offline";
             self.note();
@@ -3711,11 +3813,23 @@ impl Transport {
         if let Err(e) = crate::epoch::write(&self.dir, &next) {
             eprintln!("instance {}: cannot note its epoch ({e})", self.id);
         }
-        let sealed = match (std::env::current_exe(), self.space_pidfd()) {
+        let mut sealed = match (std::env::current_exe(), self.space_pidfd()) {
             (Ok(core), Some(space)) => crate::bridge::seal(&core, &self.nft, &space),
             (Err(e), _) => Err(format!("cannot find our own binary: {e}")),
             (_, None) => Err("its space is gone".to_owned()),
         };
+        if sealed.is_ok() && self.strict_requested {
+            let context = std::env::current_exe().ok().zip(self.space_pidfd());
+            let strict_result = match (self.strict.as_mut(), context) {
+                (Some(strict), Some((core, space))) => {
+                    strict.renew(&next, &core, &self.nft, &space)
+                }
+                _ => Err("strict controller unavailable".into()),
+            };
+            if let Err(e) = strict_result {
+                sealed = Err(e);
+            }
+        }
         thaw(&next);
         self.epochs.now = Some(next);
         let tally = sealed.map_err(|e| (Phase::Seal, e))?;
@@ -3746,13 +3860,19 @@ impl Transport {
     /// failed leaves it cut.
     fn renew_and_attach(&mut self, wake: RawFd, expect: Option<u64>) {
         use crate::bridge::NoLink;
-        let done = self.with_lock(|t| {
-            let tally = t
-                .renew(wake)
-                .map_err(|(phase, why)| NoLink::Failed(format!("{}: {why}", phase.word())))?;
-            t.attach(expect, Some(wake))?;
-            Ok::<_, NoLink>(tally)
-        });
+        let done = self
+            .with_lock(|t| {
+                let tally = t
+                    .renew(wake)
+                    .map_err(|(phase, why)| NoLink::Failed(format!("{}: {why}", phase.word())))?;
+                t.attach(expect, Some(wake))?;
+                Ok::<_, NoLink>(tally)
+            })
+            .unwrap_or_else(|| {
+                Err(NoLink::Failed(
+                    "a launch is entering; retry reattach after registration".into(),
+                ))
+            });
         match done {
             Ok(tally) => {
                 let epoch = self.epochs.now.as_ref().map_or(0, |e| e.n).to_string();
@@ -3896,6 +4016,13 @@ impl Transport {
             return Switched::Refused(refusal);
         }
         self.with_lock(|t| t.switch_taken(to, &from, container.as_deref(), wake))
+            .unwrap_or_else(|| {
+                Switched::Refused(crate::switch::Refusal {
+                    code: "launching",
+                    text: "a launch is entering; retry the network switch after registration"
+                        .into(),
+                })
+            })
     }
 
     /// The switch, its preconditions met and the lock held (§5.3 of the
@@ -4089,6 +4216,9 @@ impl Transport {
         let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
         let registry = self.state.join(".running").join(container);
         let fresh = self.owners.fresh(&self.dir);
+        if self.strict_requested {
+            return;
+        }
         if fresh.is_empty() {
             return;
         }
@@ -4324,6 +4454,9 @@ impl Transport {
 
     /// At the instance's end: its link dropped.
     fn close(&mut self) {
+        if let Some(strict) = &mut self.strict {
+            strict.fail();
+        }
         if let Some(link) = self.link.take() {
             link.close();
         }

@@ -1365,6 +1365,58 @@ pub fn diag_socket(core: &Path, space: &OwnedFd) -> Option<OwnedFd> {
     }
 }
 
+pub fn owner_socket(
+    core: &Path,
+    space: &OwnedFd,
+) -> Result<crate::netqueue::socket::Socket, String> {
+    let (mine, theirs) = std::os::unix::net::UnixStream::pair().map_err(|e| e.to_string())?;
+    let status = in_instance(core, space, &[theirs.as_raw_fd()])
+        .arg("frame-relay")
+        .arg("--owner-socket")
+        .arg(theirs.as_raw_fd().to_string())
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| e.to_string())?;
+    drop(theirs);
+    if !status.success() {
+        return Err("strict queue helper failed".into());
+    }
+    let mut byte = [0];
+    match crate::sys::recv_into_with_fds(mine.as_raw_fd(), &mut byte, 1) {
+        Ok((1, mut fds, false)) if byte == [b'q'] && fds.len() == 1 => {
+            crate::netqueue::socket::Socket::from_owned(fds.pop().unwrap())
+                .map_err(|e| e.to_string())
+        }
+        _ => Err("strict queue descriptor missing".into()),
+    }
+}
+
+pub fn owner_rules(core: &Path, nft: &Path, space: &OwnedFd, rules: &str) -> Result<(), String> {
+    let mut child = in_instance(core, space, &[])
+        .arg("frame-relay")
+        .arg("--owner-rules")
+        .arg(nft)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let fed = child
+        .stdin
+        .take()
+        .ok_or("no rule input")
+        .and_then(|mut input| {
+            input
+                .write_all(rules.as_bytes())
+                .map_err(|_| "cannot send strict rules")
+        });
+    let status = child.wait().map_err(|e| e.to_string())?;
+    fed?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("kernel refused strict classification rules".into())
+    }
+}
+
 /// `frame-relay --seal` in the instance (stage 4, a switch's break): the
 /// tally of what it destroyed, or why it did not seal.
 pub fn seal(core: &Path, nft: &Path, space: &OwnedFd) -> Result<crate::sockdiag::Tally, String> {
