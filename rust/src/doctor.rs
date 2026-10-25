@@ -2239,6 +2239,38 @@ pub fn lock_check(locked: bool, tenants: &[(String, bool)]) -> Option<Check> {
 /// build, its root (J3), the probe — run in it as a launch runs, through
 /// `container-enter` (the same namespaces, the same capabilities to shed) —
 /// and its PipeWire.
+pub fn owner_check(status: Option<&str>) -> Check {
+    let Some(status) = status.filter(|s| s.len() <= 4096) else {
+        return Check::new(
+            "network-owner",
+            Level::Skip,
+            "данных определения программ ещё нет (или экземпляр старой сборки)",
+        );
+    };
+    let values: HashMap<_, _> = status
+        .split_whitespace()
+        .filter_map(|s| s.split_once('='))
+        .collect();
+    let count = |key| values.get(key).and_then(|v| v.parse::<u64>().ok());
+    let (Some(proc), Some(diag), Some(open), Some(origins), Some(flows), Some(unresolved)) = (
+        count("proc"),
+        count("diag"),
+        count("diag-open"),
+        count("origins"),
+        count("flows"),
+        count("unresolved"),
+    ) else {
+        return Check::new(
+            "network-owner",
+            Level::Skip,
+            "не удалось прочитать диагностику определения программ",
+        );
+    };
+    let errors = count("diag-errors").unwrap_or(0);
+    Check::new("network-owner", if unresolved == 0 && errors == 0 { Level::Ok } else { Level::Warn },
+        format!("последняя проверка: соединений {flows}, без программы {unresolved}; сокетов procfs {proc}, sock_diag {diag}; канал ядра {}, ошибок запросов {errors}, сохранённых источников {origins}. Это диагностика, не гарантия полного учёта создания сокетов", if open != 0 { "есть" } else { "нет" }))
+}
+
 pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u32) -> Vec<Check> {
     let mut checks = vec![build_check(crate::build::age(
         &running.dir,
@@ -2255,6 +2287,11 @@ pub fn instance_checks(tools: &Tools, running: &crate::instance::Running, uid: u
         &running.network,
     ));
     checks.push(live_switch_check(crate::epoch::read_live(&running.dir)));
+    checks.push(owner_check(
+        fs::read_to_string(running.dir.join(crate::owners::STATUS))
+            .ok()
+            .as_deref(),
+    ));
     checks.push(match crate::epoch::read(&running.dir) {
         Some(epoch) => inherited_check(&inherited_sockets(running.pid, uid, &epoch)),
         None => Check::new(
@@ -2780,6 +2817,22 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn network_owner_diagnostics_do_not_claim_success_for_missing_or_failed_evidence() {
+        use super::{owner_check, Level};
+        assert_eq!(owner_check(None).level, Level::Skip);
+        assert_eq!(owner_check(Some("partial write")).level, Level::Skip);
+        let good = "proc=0 diag=7 diag-open=1 diag-errors=0 origins=2 flows=3 unresolved=0";
+        assert_eq!(owner_check(Some(good)).level, Level::Ok);
+        assert_eq!(
+            owner_check(Some(&good.replace("unresolved=0", "unresolved=1"))).level,
+            Level::Warn
+        );
+        assert_eq!(
+            owner_check(Some(&good.replace("diag-errors=0", "diag-errors=1"))).level,
+            Level::Warn
+        );
+    }
 
     /// A socket of a program is its namespace's when a table there has its
     /// inode; one held past the standard descriptors and in no table is

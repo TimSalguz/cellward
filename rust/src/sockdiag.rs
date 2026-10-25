@@ -396,15 +396,35 @@ pub fn open_here() -> io::Result<OwnedFd> {
 /// but listeners, and UDP, both families. What a dump cannot give is left
 /// out.
 pub fn cgroups(fd: &OwnedFd) -> std::collections::HashMap<u32, u64> {
-    let mut out = std::collections::HashMap::new();
+    ownership(fd)
+        .sockets
+        .into_iter()
+        .filter_map(|(_, socket)| Some((socket.inode, socket.cgroup?)))
+        .filter(|(inode, _)| *inode != 0)
+        .collect()
+}
+
+/// Socket endpoints and their birth cgroups, independently of procfs. The
+/// socket already belongs to the instance's netns: no /proc/<pid>/net or
+/// readable process descriptor is needed to match a flow to this evidence.
+#[derive(Debug, Default)]
+pub struct Ownership {
+    pub sockets: Vec<(u8, Socket)>,
+    /// Failed family/protocol dumps, not a successful empty snapshot.
+    pub errors: Vec<(u8, u8, Option<i32>)>,
+}
+
+pub fn ownership(fd: &OwnedFd) -> Ownership {
+    let mut out = Ownership::default();
     let mut seq: u32 = 1;
     for (protocol, states) in [(IPPROTO_TCP, STATES_BUT_LISTEN), (IPPROTO_UDP, ALL_STATES)] {
         for family in [AF_INET, AF_INET6] {
             seq = seq.wrapping_add(1);
-            for socket in dump(fd, family, protocol, states, seq).unwrap_or_default() {
-                if let (Some(cgroup), true) = (socket.cgroup, socket.inode != 0) {
-                    out.insert(socket.inode, cgroup);
-                }
+            match dump(fd, family, protocol, states, seq) {
+                Ok(sockets) => out
+                    .sockets
+                    .extend(sockets.into_iter().map(|s| (protocol, s))),
+                Err(e) => out.errors.push((family, protocol, e.raw_os_error())),
             }
         }
     }

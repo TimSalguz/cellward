@@ -3214,6 +3214,7 @@ impl Transport {
             .ok();
         // The owners its keeper finds, anew with the table (`crate::owners`).
         let _ = fs::remove_file(zone.dir.join(crate::owners::FILE));
+        let _ = fs::remove_file(zone.dir.join(crate::owners::STATUS));
         let news = flows.as_ref().and_then(|_| sys::pipe_nonblocking().ok());
         // Once, the programs that already went out keep the network when
         // "ask" becomes the default (`crate::netrules::grandfather`).

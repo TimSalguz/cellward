@@ -48,6 +48,23 @@ class GuardTests(unittest.TestCase):
                 guard.main()
             start.assert_not_called()
 
+    def test_reserve_cannot_be_disabled(self):
+        for reserve in ['0', '2047', '8193']:
+            with patch.object(sys, 'argv', ['guard', '--reserve-mib', reserve, '--', 'true']), \
+                 patch.object(guard.subprocess, 'Popen') as start, \
+                 contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    guard.main()
+                start.assert_not_called()
+
+    def test_explicit_smaller_reserve_still_stops_low_memory(self):
+        with patch.object(sys, 'argv', ['guard', '--reserve-mib', '2048', '--', 'true']), \
+             patch.object(guard, 'available', return_value=2048 * 1024 ** 2 - 1), \
+             patch.object(guard.subprocess, 'Popen') as start:
+            with self.assertRaises(SystemExit):
+                guard.main()
+            start.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

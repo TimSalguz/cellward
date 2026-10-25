@@ -146,26 +146,32 @@ pub fn socket_of<'a>(socks: &'a [Sock], flow: &Flow) -> Option<&'a Sock> {
     let k = &flow.key;
     let ping = k.proto == ICMP || k.proto == ICMP6;
     let ours = |s: &&Sock| s.proto == k.proto && s.lport == k.lport && k.lport != 0;
-    socks
+    let mut exact = socks
         .iter()
         .filter(ours)
-        .find(|s| s.remote == plain(k.remote) && (s.rport == k.rport || ping))
-        .or_else(|| {
-            socks
-                .iter()
-                .filter(ours)
-                .find(|s| (s.proto == UDP || ping) && s.remote.is_unspecified() && s.rport == 0)
-        })
-        // A raw socket of the flow's protocol: a ping that has the
-        // capability to send its own (iputils', with cap_net_raw) — the one
-        // there is, or none said where two could be it.
-        .or_else(|| {
-            let mut raw = socks
-                .iter()
-                .filter(|s| s.proto == RAW && s.lport == u16::from(k.proto));
-            let one = raw.next();
-            raw.next().is_none().then_some(one).flatten()
-        })
+        .filter(|s| s.remote == plain(k.remote) && (s.rport == k.rport || ping));
+    // SO_REUSEPORT/local addresses absent from the relay's key may leave
+    // several candidates. Never assign the first one to an arbitrary app.
+    if let Some(first) = exact.next() {
+        return (first.inode != 0 && exact.all(|s| s.inode == first.inode)).then_some(first);
+    }
+    let mut wildcard = socks
+        .iter()
+        .filter(ours)
+        .filter(|s| (s.proto == UDP || ping) && s.remote.is_unspecified() && s.rport == 0);
+    if let Some(first) = wildcard.next() {
+        return (first.inode != 0 && wildcard.all(|s| s.inode == first.inode)).then_some(first);
+    }
+    // A raw socket of the flow's protocol: a ping that has the
+    // capability to send its own (iputils', with cap_net_raw) — the one
+    // there is, or none said where two could be it.
+    {
+        let mut raw = socks
+            .iter()
+            .filter(|s| s.proto == RAW && s.lport == u16::from(k.proto));
+        let one = raw.next();
+        raw.next().is_none().then_some(one).flatten()
+    }
 }
 
 /// The processes the user may look at, each with its network namespace:
@@ -329,21 +335,6 @@ pub fn of(space: i32, registry: &Path, flows: &[Flow], procs: &Procs) -> Vec<Opt
     owned(&socks, &holders, &closed, registry, flows)
 }
 
-/// The process to name for a socket none of the readable processes holds:
-/// it is one of `closed`, whose descriptors cannot be read — and when every
-/// one of them is of the same launch (by its cgroup), the socket is that
-/// launch's for sure. Not one guessed among launches: two of them with
-/// such processes, or one of no launch, and the owner stays unknown.
-fn closed_holder(closed: &[i32], launches: &HashMap<i32, String>) -> Option<i32> {
-    let mut of_launch = closed
-        .iter()
-        .map(|pid| launch_by_cgroup(*pid, launches).map(|(_, launch)| (launch, *pid)));
-    let (launch, first) = of_launch.next()??;
-    of_launch
-        .all(|other| other.is_some_and(|(l, _)| l == launch))
-        .then_some(first)
-}
-
 /// The launches' cgroups of the instance's current epoch (`crate::epoch`)
 /// by their ids — the inode of each one's directory, as sock_diag names a
 /// socket's cgroup.
@@ -415,7 +406,7 @@ fn comm(pid: i32) -> String {
 fn owned(
     socks: &[Sock],
     holders: &HashMap<u64, i32>,
-    closed: &[i32],
+    _closed: &[i32],
     registry: &Path,
     flows: &[Flow],
 ) -> Vec<Option<Owner>> {
@@ -424,10 +415,10 @@ fn owned(
         .iter()
         .map(|f| {
             let inode = socket_of(socks, f)?.inode;
-            let pid = match holders.get(&inode) {
-                Some(pid) => *pid,
-                None => closed_holder(closed, &launches)?,
-            };
+            // One unreadable process is not proof that it owns every
+            // otherwise-unheld socket. Only the kernel birth-cgroup path
+            // below can resolve such a socket without guessing.
+            let pid = *holders.get(&inode)?;
             // The container's own word: nothing of it said to a terminal as
             // a control character.
             let process = fs::read_to_string(format!("/proc/{pid}/comm"))
@@ -449,12 +440,56 @@ fn owned(
         .collect()
 }
 
+/// Add kernel endpoint evidence even if procfs is entirely inaccessible.
+/// A socket appears once, not once per lookup source.
+fn add_diag_sockets(socks: &mut Vec<Sock>, diagnosed: &[(u8, crate::sockdiag::Socket)]) {
+    let mut present: HashSet<_> = socks.iter().map(|s| (s.proto, s.inode)).collect();
+    for (proto, socket) in diagnosed {
+        if socket.inode == 0 || !present.insert((*proto, u64::from(socket.inode))) {
+            continue;
+        }
+        socks.push(Sock {
+            proto: *proto,
+            lport: socket.sport,
+            remote: plain(socket.dst),
+            rport: socket.dport,
+            inode: u64::from(socket.inode),
+        });
+    }
+}
+
+fn archived_owner(found: &HashMap<Seen, Owner>, flow: &Flow) -> Option<Owner> {
+    let mut owner = found.get(&(flow.key, flow.first))?.clone();
+    // Historical attribution remains valid; a historical numeric PID is
+    // not authority to attach a new question to a possibly reused window.
+    owner.launch = None;
+    Some(owner)
+}
+
+struct Origin {
+    owner: Owner,
+    waiter: i32,
+    start: u64,
+}
+
+impl Origin {
+    fn owner(&self) -> Owner {
+        let mut owner = self.owner.clone();
+        if crate::sys::start_time(self.waiter) != Some(self.start) {
+            owner.launch = None;
+        }
+        owner
+    }
+}
+
 // --- AT THE FIRST PACKET ----------------------------------------------------
 
 /// The owners' file in an instance's directory: a line per flow whose owner
 /// its keeper found — `<proto>⇥<own port>⇥<remote>⇥<remote port>⇥<first
 /// seen>⇥<pid>⇥<process>⇥<program or ->`.
 pub const FILE: &str = "owners";
+/// Last attribution round, counts only (no destinations or payloads).
+pub const STATUS: &str = "owner-status";
 
 /// A flow as the owners' file names it: its key, and when it was first seen
 /// (ports are used again).
@@ -518,6 +553,10 @@ pub struct Keeper {
     /// its launch's for sure, whatever process holds it and whether it lets
     /// its descriptors be read.
     diag: Option<std::os::fd::OwnedFd>,
+    /// Kernel birth-cgroup id -> proven launch. Kept while sockets of that
+    /// cgroup exist, including after the launcher/holder exits. Flow records
+    /// retain their own copy for the flow's lifetime.
+    origins: HashMap<u64, Origin>,
 }
 
 impl Keeper {
@@ -570,7 +609,15 @@ impl Keeper {
         if fresh.is_empty() {
             return Vec::new();
         }
-        let socks = sockets(space);
+        let snapshot = self
+            .diag
+            .as_ref()
+            .map(crate::sockdiag::ownership)
+            .unwrap_or_default();
+        let diagnosed = snapshot.sockets;
+        let mut socks = sockets(space);
+        let proc_sockets = socks.len();
+        add_diag_sockets(&mut socks, &diagnosed);
         let (mut holders, mut closed) = holders_of(&self.procs.in_netns(space));
         // A socket no process known to hold: a process new since the last
         // look — every process looked at again, once.
@@ -581,23 +628,68 @@ impl Keeper {
             self.procs = Procs::scan();
             (holders, closed) = holders_of(&self.procs.in_netns(space));
         }
-        let mut owners = owned(&socks, &holders, &closed, registry, fresh);
-        // Those no process was found for: by the cgroup their socket was
-        // made in, where the kernel says it.
-        if owners.iter().any(Option::is_none) {
-            if let Some(diag) = &self.diag {
-                let made_in = crate::sockdiag::cgroups(diag);
-                let leaves = leaves_by_id(dir);
-                let launches = launches(registry);
-                for (owner, f) in owners.iter_mut().zip(fresh) {
-                    if owner.is_none() {
-                        *owner = socket_of(&socks, f)
-                            .and_then(|s| made_in.get(&(s.inode as u32)))
-                            .and_then(|id| leaves.get(id))
-                            .and_then(|leaf| by_leaf(leaf, &launches));
-                    }
+        let observed = owned(&socks, &holders, &closed, registry, fresh);
+        let leaves = leaves_by_id(dir);
+        let launches = launches(registry);
+        let made_in: HashMap<u64, u64> = diagnosed
+            .iter()
+            .filter_map(|(_, s)| Some((u64::from(s.inode), s.cgroup?)))
+            .filter(|(inode, _)| *inode != 0)
+            .collect();
+        // Snapshot proven cgroup identities while the launch is still alive.
+        // Never overwrite an established origin based on a reused PID.
+        for (id, leaf) in &leaves {
+            if !self.origins.contains_key(id) && self.origins.len() < 2 * crate::flows::SLOTS {
+                if let (Some(owner), Some((waiter, start))) =
+                    (by_leaf(leaf, &launches), crate::epoch::leaf_of(&leaf.1))
+                {
+                    self.origins.insert(
+                        *id,
+                        Origin {
+                            owner,
+                            waiter,
+                            start,
+                        },
+                    );
                 }
             }
+        }
+        let active: HashSet<_> = made_in
+            .values()
+            .copied()
+            .chain(leaves.keys().copied())
+            .collect();
+        // A failed/partial dump is not evidence that a socket disappeared.
+        if snapshot.errors.is_empty() {
+            self.origins.retain(|id, _| active.contains(id));
+        }
+        let owners: Vec<_> = fresh
+            .iter()
+            .zip(observed)
+            .map(|(f, observed)| {
+                archived_owner(&self.found, f)
+                    .or_else(|| {
+                        socket_of(&socks, f)
+                            .and_then(|s| made_in.get(&s.inode))
+                            .and_then(|id| self.origins.get(id))
+                            .map(Origin::owner)
+                    })
+                    .or(observed)
+            })
+            .collect();
+        let unresolved = owners
+            .iter()
+            .filter(|o| o.as_ref().and_then(|o| o.program.as_ref()).is_none())
+            .count();
+        if let Ok(mut status) = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(dir.join(STATUS))
+        {
+            let _ = writeln!(status, "proc={proc_sockets} diag={} diag-open={} diag-errors={} origins={} flows={} unresolved={unresolved}", diagnosed.len(), usize::from(self.diag.is_some()), snapshot.errors.len(), self.origins.len(), fresh.len());
         }
         let mut text = String::new();
         for (f, owner) in fresh.iter().zip(&owners) {
@@ -657,6 +749,126 @@ fn append(dir: &Path, text: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::flows::Key;
+
+    fn sample_flow(port: u16) -> Flow {
+        Flow {
+            key: Key {
+                proto: UDP,
+                lport: port,
+                remote: "1.1.1.1".parse().unwrap(),
+                rport: 443,
+            },
+            first: 100,
+            last: 100,
+            out_bytes: 0,
+            in_bytes: 0,
+            out_packets: 0,
+            in_packets: 0,
+        }
+    }
+
+    fn sample_owner() -> Owner {
+        Owner {
+            pid: 42,
+            process: "network-service".into(),
+            program: Some("helium".into()),
+            launch: Some(42),
+        }
+    }
+
+    #[test]
+    fn kernel_endpoints_work_without_any_procfs_socket_table() {
+        let diagnosed = vec![(
+            UDP,
+            crate::sockdiag::Socket {
+                family: crate::sockdiag::AF_INET,
+                state: 7,
+                src: "0.0.0.0".parse().unwrap(),
+                sport: 5000,
+                dst: "0.0.0.0".parse().unwrap(),
+                dport: 0,
+                interface: 0,
+                cookie: 99,
+                uid: 1000,
+                inode: 123,
+                cgroup: Some(456),
+                id: [0; crate::sockdiag::SOCKID_LEN],
+            },
+        )];
+        let mut socks = Vec::new();
+        add_diag_sockets(&mut socks, &diagnosed);
+        let matched = socket_of(&socks, &sample_flow(5000)).unwrap();
+        assert_eq!(matched.inode, 123);
+        add_diag_sockets(&mut socks, &diagnosed);
+        assert_eq!(
+            socks.len(),
+            1,
+            "two lookup sources must not duplicate a socket"
+        );
+    }
+
+    #[test]
+    fn reuseport_candidates_are_not_arbitrarily_assigned() {
+        for (remote, rport) in [("0.0.0.0", 0), ("1.1.1.1", 443)] {
+            let one = Sock {
+                proto: UDP,
+                lport: 5000,
+                remote: remote.parse().unwrap(),
+                rport,
+                inode: 10,
+            };
+            let other = Sock {
+                inode: 11,
+                ..one.clone()
+            };
+            assert_eq!(socket_of(&[one, other], &sample_flow(5000)), None);
+        }
+    }
+
+    #[test]
+    fn saved_flow_identity_survives_the_process_but_not_port_reuse() {
+        let flow = sample_flow(5000);
+        let mut found = HashMap::new();
+        found.insert((flow.key, flow.first), sample_owner());
+        let saved = archived_owner(&found, &flow).unwrap();
+        assert_eq!(saved.program.as_deref(), Some("helium"));
+        assert_eq!(
+            saved.launch, None,
+            "never address an archived numeric pid's window"
+        );
+        assert_eq!(archived_owner(&found, &Flow { first: 101, ..flow }), None);
+    }
+
+    #[test]
+    fn saved_kernel_origin_survives_a_dead_waiter_without_reusing_its_window() {
+        let origin = Origin {
+            owner: sample_owner(),
+            waiter: -1,
+            start: 123,
+        };
+        let saved = origin.owner();
+        assert_eq!(saved.program.as_deref(), Some("helium"));
+        assert_eq!(saved.launch, None);
+    }
+
+    #[test]
+    fn one_unreadable_process_is_not_proof_it_owns_an_unheld_socket() {
+        let sock = Sock {
+            proto: UDP,
+            lport: 5000,
+            remote: "0.0.0.0".parse().unwrap(),
+            rport: 0,
+            inode: 123,
+        };
+        let owners = owned(
+            &[sock],
+            &HashMap::new(),
+            &[std::process::id() as i32],
+            Path::new("/nonexistent-cellward-registry"),
+            &[sample_flow(5000)],
+        );
+        assert_eq!(owners, [None]);
+    }
 
     #[test]
     fn proc_net_lines_are_read() {
@@ -794,9 +1006,7 @@ mod tests {
     #[test]
     fn a_closed_holder_is_named_only_when_its_launch_is_sure() {
         let launches = HashMap::new();
-        assert_eq!(closed_holder(&[], &launches), None);
         // This process: in no launch's cgroup.
-        assert_eq!(closed_holder(&[std::process::id() as i32], &launches), None);
         assert_eq!(launch_by_cgroup(std::process::id() as i32, &launches), None);
     }
 
@@ -848,6 +1058,14 @@ mod tests {
         let text = fs::read_to_string(dir.join(FILE)).unwrap();
         assert_eq!(text.lines().count(), 1, "{text}");
         drop(socket);
+        // Even with no live socket and no readable namespace, a previously
+        // proven flow keeps its program. This is not a new pid lookup.
+        let archived = keeper.resolve(&dir, -1, &dir.join("registry"), &table.flows());
+        assert_eq!(
+            archived[0].as_ref().unwrap().program.as_deref(),
+            Some("tester")
+        );
+        assert_eq!(archived[0].as_ref().unwrap().launch, None);
         table.close();
         let _ = fs::remove_dir_all(&dir);
     }

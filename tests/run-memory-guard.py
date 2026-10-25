@@ -6,6 +6,8 @@ By default each process inherits 3 GiB address and 1 GiB data limits. A 5 ms
 watchdog kills the private process group at 1.5 GiB summed RSS, below 3 GiB
 host MemAvailable, or after 10 minutes. CPU affinity is one logical CPU.
 An explicit --budget-mib can adjust the limits, never above 5120 MiB RSS.
+An explicit --reserve-mib can choose a 2048..8192 MiB host reserve; the
+default remains 3072 MiB and is never lowered automatically.
 The RSS threshold is sampled, not a hard ceiling, and cannot disable swap.
 Use only trusted offline compilation or tests which keep all children in
 this process group; never Nix builds or VM tests.
@@ -55,17 +57,22 @@ def group_rss(group):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--budget-mib', type=int, default=1536)
+    parser.add_argument('--reserve-mib', type=int, default=3072,
+                        help='host MemAvailable reserve, 2048..8192 MiB (default: 3072)')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if not 128 <= args.budget_mib <= 5120:
         parser.error('budget must be 128..5120 MiB; never raise automatically')
+    if not 2048 <= args.reserve_mib <= 8192:
+        parser.error('host reserve must be 2048..8192 MiB; never lower automatically')
+    reserve = args.reserve_mib * 1024 ** 2
     command = args.command
     if command[:1] == ['--']:
         command = command[1:]
     if not command:
         raise SystemExit('command required')
-    if available() < 3 * 1024 ** 3:
-        raise SystemExit('Not starting: less than 3 GiB MemAvailable')
+    if available() < reserve:
+        raise SystemExit(f'Not starting: less than {args.reserve_mib} MiB MemAvailable')
     def interrupted(signum, frame):
         raise KeyboardInterrupt
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -78,7 +85,7 @@ def main():
         while child.poll() is None:
             rss = group_rss(child.pid)
             peak = max(peak, rss)
-            if rss > args.budget_mib * 1024 ** 2 or available() < 3 * 1024 ** 3 or time.monotonic() - started > 600:
+            if rss > args.budget_mib * 1024 ** 2 or available() < reserve or time.monotonic() - started > 600:
                 print('Memory/time guard: stopping this build process group', file=sys.stderr)
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
