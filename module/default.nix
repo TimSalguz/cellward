@@ -1283,7 +1283,7 @@ in
     clipboard.history = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "История буфера обмена по контейнерам (docs/CLIPBOARD.md): у каждого контейнера своя, у хоста своя, зашифрованы на диске (~/.local/state/cellward-clip). Служба cellward-clip показывает значок в трее и открывает менеджер с вкладками; сеть ей не нужна, только сокеты Unix. cellward-clip histories / list <история>.";
+      description = "История буфера обмена по контейнерам (docs/CLIPBOARD.md): у каждого контейнера своя, у хоста своя, зашифрованы на диске в закрытом для контейнеров ~/.local/state/vpn-zones/.clipboard. Старое хранилище переносится без копирования ключа при перезапуске службы. Служба cellward-clip показывает значок в трее и открывает менеджер с вкладками; сеть ей не нужна, только сокеты Unix. cellward-clip histories / list <история>.";
     };
     clipboard.window.textLines = lib.mkOption {
       type = lib.types.ints.between 1 10;

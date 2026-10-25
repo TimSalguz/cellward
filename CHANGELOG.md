@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Security
+- Move clipboard history, favourites, passwords and their master key into
+  `~/.local/state/vpn-zones/.clipboard`, covered by the existing container
+  mount boundary even for real-home containers. The old store outside that
+  boundary could expose both encrypted history and its key to those programs;
+  mode 0600 did not isolate processes sharing the host uid. The daemon migrates
+  the whole old store with atomic no-replace rename, keeps the key unchanged,
+  and refuses conflicting stores, unsafe paths or cross-filesystem migration.
+  Restart the updated host daemon to migrate; existing backups are not covered.
+  Migration tests and a real isolated mount-namespace test exercise this fix.
+
 ### Added
 - Frame settings now expose the hover trigger depth (1–12 logical px) and
   diagonal resize-corner span (0–64 px), with live cosmetic previews and Nix
@@ -83,6 +94,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `cellward frame fullscreen title off` still disables hover explicitly.
 
 ### Fixed
+- Live-switch compatibility refusals distinguish frozen host service/file
+  channels from VPN permissions, list their actual or unknown launch values
+  and configuration provenance, and keep the previous network explicit in a
+  persistent frame dialog. No policy is silently widened or app restarted.
+- A nested-niri pointer regression test covers frame-menu dismissal over
+  the app and frame, checking that the closing click is consumed and the
+  next app click arrives, with thin/thick and always/hover headers.
 - Launch permissions have one authoritative control each: camera, microphone,
   screen capture and home access no longer reappear as later-applied preset
   checkboxes. The supplementary page is labelled Files and other resources;

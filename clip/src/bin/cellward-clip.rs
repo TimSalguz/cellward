@@ -6,8 +6,8 @@
 //! cellward-clip list <history> [N]      its last N entries (20)
 //! ```
 //!
-//! The histories live below `$XDG_STATE_HOME/cellward-clip` (one directory
-//! each, `clipstore`), with the key that seals them, `key`, beside them.
+//! The histories live below `$HOME/.local/state/vpn-zones/.clipboard`,
+//! hidden by the container mount policy; old XDG storage is migrated there.
 //!
 //! **The recorder** follows the compositor's selection through data-control
 //! (ext-data-control-v1, else wlr-data-control) — a protocol of the host's
@@ -50,11 +50,11 @@ const OWN_MARK: &str = "application/x-cellward-clip-recorder";
 const READ_WITHIN: Duration = Duration::from_secs(3);
 
 fn state_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_STATE_HOME")
+    let home = std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))?;
-    Some(base.join("cellward-clip"))
+        .map(PathBuf::from)?;
+    home.is_absolute()
+        .then(|| clipstore::storage::directory(&home))
 }
 
 fn main() -> ExitCode {
@@ -952,6 +952,28 @@ fn now_ms() -> i64 {
 }
 
 fn daemon(dir: &Path) -> ExitCode {
+    // Do not migrate under a still-running older daemon, or steal its socket.
+    if std::os::unix::net::UnixStream::connect(socket_path()).is_ok() {
+        eprintln!("cellward-clip: служба уже запущена — сначала останови её");
+        return ExitCode::from(1);
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return ExitCode::from(1);
+    };
+    let state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+    let legacy = clipstore::storage::legacy_directory(&home, state_home.as_deref());
+    let prepared = match clipstore::storage::prepare(&home, &legacy) {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            eprintln!("cellward-clip: не подготовить защищённое хранилище: {e}; данные не объединены и не перезаписаны");
+            return ExitCode::from(1);
+        }
+    };
+    if prepared.dir != dir {
+        eprintln!("cellward-clip: путь хранилища изменился через ссылку — запуск отменён");
+        return ExitCode::from(1);
+    }
+    // `prepared` holds the exclusive store lock through the daemon loop.
     let Some(key) = key(dir) else {
         return ExitCode::from(1);
     };

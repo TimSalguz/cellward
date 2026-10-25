@@ -10590,6 +10590,45 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
 
+    /// Run the test binary under `unshare -Ur -m --propagation private`.
+    /// This exercises the actual keeper mount routine, not a mock.
+    #[test]
+    #[ignore = "requires a private user and mount namespace"]
+    fn clipboard_store_is_hidden_by_the_real_state_mount_policy() {
+        let home =
+            std::env::temp_dir().join(format!("cellward-clipboard-mount-{}", std::process::id()));
+        let state = home.join(STATE_SUBDIR);
+        let clipboard = state.join(".clipboard");
+        fs::create_dir_all(clipboard.join(".secrets/other-container")).unwrap();
+        fs::create_dir_all(state.join(".running")).unwrap();
+        fs::write(clipboard.join("key"), b"synthetic-key").unwrap();
+        fs::write(
+            clipboard.join(".secrets/other-container/manifest"),
+            b"synthetic-ciphertext",
+        )
+        .unwrap();
+        seal_project_state(&state, &home, &[(".running", false)]).unwrap();
+        assert!(
+            !clipboard.join("key").exists(),
+            "real-home processes must not see the host key"
+        );
+        assert!(!clipboard.join(".secrets/other-container/manifest").exists());
+        assert!(
+            state.join(".running").is_dir(),
+            "ordinary keeper allowlist still works"
+        );
+        // SAFETY: detach only the mount created on this test's unique
+        // temporary directory in the caller's private mount namespace.
+        let path = std::ffi::CString::new(state.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::umount2(path.as_ptr(), libc::MNT_DETACH) }, 0);
+        assert_eq!(
+            fs::read(clipboard.join("key")).unwrap(),
+            b"synthetic-key",
+            "host data was covered, not removed"
+        );
+        fs::remove_dir_all(home).unwrap();
+    }
+
     /// An endpoint's address kept reads back; a line of another shape is none.
     #[test]
     fn an_endpoints_address_is_kept() {

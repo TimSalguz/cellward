@@ -52,6 +52,17 @@ History separation is **not** independent active clipboard storage.
 
 ## Correct direction, not implemented here
 
+Implementation progress: `clip/src/broker.rs` now supplies the bounded volatile
+selection model (independent CLIPBOARD/PRIMARY, per-instance scopes, revisions,
+explicit transfer, and payload erasure on replacement/drop). Unit tests cover
+the model, **not** compositor integration. No Wayland/X11 transport uses it yet;
+the active desktop clipboard and CopyQ behaviour are therefore unchanged.
+
+History file exposure was addressed separately: see the storage section of
+`CLIPBOARD.md`. Restarting the updated daemon migrates the old store and key into
+the existing container-masked state. This does not itself fix active clipboard
+compatibility.
+
 Provide an instance-scoped clipboard broker with private active CLIPBOARD and
 PRIMARY selections, including MIME payloads and images. X11 and native Wayland
 clients of that instance must see the same selections. Import/export with the

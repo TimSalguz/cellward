@@ -92,6 +92,10 @@ mod segment;
 
 /// What the recorder decides of a selection (`cellward-clip daemon`).
 pub mod recorder;
+/// History paths protected by the container mount boundary and their migration.
+pub mod storage;
+/// Volatile active-selection model; Wayland/X11 transport is not wired yet.
+pub mod broker;
 
 /// The daemon's socket of questions: requests and answers.
 pub mod protocol;

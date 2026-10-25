@@ -85,6 +85,49 @@ for separate selections.
 
 ## The history
 
+### Storage and the container boundary
+
+The host daemon stores history in
+`$HOME/.local/state/vpn-zones/.clipboard/`:
+
+- `key` — the common master key, mode 0600;
+- `<container>/` and `host/` — encrypted ordinary histories;
+- `.favorites/<container>/` — encrypted favourites;
+- `.secrets/<container>/` — encrypted password shelves.
+
+The store's top-level directory is 0700. More importantly, the **whole
+`vpn-zones` state directory is covered by the container's mount policy**;
+the allowlist does not bind `.clipboard` back. This applies to real-home
+containers too, not just private homes. Sharing the host uid makes 0600
+alone insufficient. The history's host socket remains
+`$XDG_RUNTIME_DIR/cellward-clip.sock`; it must not be mounted into containers.
+An unconfined host program is trusted and can still read this user's files.
+
+Before this change, history and its key lived together in
+`$XDG_STATE_HOME/cellward-clip` (default `~/.local/state/cellward-clip`). A
+real-home container could read both: encrypted-at-rest did **not** prevent
+cross-container history access in that mode. No claim is made that anybody
+actually read them.
+
+After updating, stop the old daemon and start the new one (normally the
+user service restart does this). The daemon moves the **entire** old directory
+to the protected location using an atomic no-replace rename; it does not
+copy, merge, erase, or regenerate the key. It refuses to start if both stores
+exist, if paths are unsafe, or if a cross-filesystem rename would be required.
+Custom XDG state locations are migration sources only: a new arbitrary path
+would bypass the fixed container mount protection. Check the daemon's journal
+if migration fails. The running old binary does not gain protection merely
+because source code was updated.
+Restart affected containers as well to close any descriptors opened before
+migration. Moving the store cannot revoke previously opened files or erase
+copies already made elsewhere.
+
+The migration and locking have library tests; the actual keeper cover is
+tested by `zone::tests::clipboard_store_is_hidden_by_the_real_state_mount_policy`
+in a private user/mount namespace, using synthetic data. This is not a full VM
+or a test of every explicit file grant. User-created backups or copies outside
+the protected state are not covered automatically.
+
 The store and search (`clip/`, crate `clipstore`; its format, its measurements
 and what its index leaks are in its `lib.rs`) and the recorder are built:
 `programs.cellward.clipboard.history = true` runs `cellward-clip daemon`, the
