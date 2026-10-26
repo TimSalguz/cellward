@@ -6,7 +6,6 @@ screenshots and logs stay in the printed temporary directory.
 """
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 import signal
@@ -70,7 +69,7 @@ def main():
         logs.append(pointer)
         time.sleep(0.2)
         niri = root / "niri.kdl"
-        niri.write_text('output "winit" { scale 1.0; }\nlayout { gaps 30; focus-ring { off; }; border { off; }; default-column-width { fixed 640; }; }\nprefer-no-csd\nanimations { off; }\nhotkey-overlay { skip-at-startup; }\nwindow-rule { geometry-corner-radius 32; clip-to-geometry true; }\n')
+        niri.write_text('output "winit" { scale 1.0; }\nlayout { gaps 30; focus-ring { off; }; border { off; }; default-column-width { fixed 640; }; }\nprefer-no-csd\nanimations { off; }\nhotkey-overlay { skip-at-startup; }\nwindow-rule { geometry-corner-radius 32; clip-to-geometry true; opacity 0.65; }\n')
         env["NIRI_CONFIG"] = str(niri)
         start([args.niri, "-c", str(niri)], "niri")
         env["NIRI_SOCKET"] = str(wait_for(lambda: next(runtime.glob("niri.*.sock"), None)))
@@ -92,6 +91,7 @@ def main():
                     raw = subprocess.check_output([args.niri, "msg", "-j", "windows"], env=env)
                     return any(w.get("app_id") == name for w in json.loads(raw))
                 wait_for(mapped)
+                subprocess.run([args.niri, "msg", "action", "toggle-window-rule-opacity"], env=env, check=True, stdout=subprocess.DEVNULL)
                 time.sleep(0.5)
                 subprocess.run([args.grim, str(root / f"{name}.png")], env=env, check=True)
                 ppm = subprocess.check_output([args.grim, "-t", "ppm", "-"], env=env)
@@ -117,7 +117,8 @@ def main():
                 # edge of the close cell (outside the old radius-sized inset).
                 pointer.write(f"move {(left + right) // 2} {top + width + args.hover_edge - 1}\n")
                 time.sleep(0.2)
-                safe = math.ceil(32 - math.sqrt(32 * 32 - (32 - width) ** 2))
+                # Radius clips the row's pixels, not its anchor.
+                safe = 0
                 if args.menu:
                     def move_click(x, y):
                         pointer.write(f"move {x} {y}\n")
@@ -156,10 +157,23 @@ def main():
                     print(f"{name}: menu dismisses without leaking clicks; next app click works", flush=True)
                     pointer.write(f"move {(left + right) // 2} {top + width}\n")
                     time.sleep(0.2)
-                x, y = right + 1 - safe - 2, top + width + 10
+                x, y = right + 1 - safe - 12, top + width + 10
+                if mode == "hover":
+                    pointer.write(f"move {(left + right) // 2} {top + width + 10}\n")
+                    time.sleep(0.2)
+                    pointer.write("press\nrelease\n")
+                    time.sleep(0.1)
+                    raw = subprocess.check_output([args.grim, "-t", "ppm", "-"], env=env).split(b"\n", 3)[3]
+                    band_y = top + width + 18
+                    count = sum(raw[(band_y * sw + xx) * 3:(band_y * sw + xx) * 3 + 3] == bytes((255, 0, 255)) for xx in range(left + 80, right - 160))
+                    assert count > 100, "first title click must not hide the hover panel"
+                    subprocess.run([args.grim, str(root / f"{name}-after-title-click.png")], env=env, check=True)
                 pointer.write(f"move {x} {y}\n")
                 time.sleep(0.3)
                 subprocess.run([args.grim, str(root / f"{name}-close-hover.png")], env=env, check=True)
+                subprocess.run([args.niri, "msg", "action", "toggle-window-rule-opacity"], env=env, check=True, stdout=subprocess.DEVNULL)
+                time.sleep(0.3)
+                subprocess.run([args.grim, str(root / f"{name}-opacity.png")], env=env, check=True)
                 pointer.write("press\nrelease\n")
                 terminal.wait(timeout=10)
                 print(f"{name}: frame drawn, new button position accepts real click; screenshots saved", flush=True)

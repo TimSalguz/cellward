@@ -55,6 +55,8 @@
 
 #![forbid(unsafe_code)]
 
+pub(crate) mod top;
+
 use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -2005,6 +2007,11 @@ impl Prepared {
             + self.menu_bytes_as(look))
             * SLOTS
             + Self::prompt_bytes() * PROMPT_SLOTS
+            + if look.outer > 0 {
+                top::slot_bytes() * top::TOP_SLOTS
+            } else {
+                0
+            }
     }
 
     /// A memfd for any look the frame may be given on the fly (step 6 of
@@ -2034,7 +2041,7 @@ impl Prepared {
         // radius or border, the top ones down past the title strip.
         let widest = MAX_OUTER_RADIUS.max(MAX_BORDER);
         let outer = Self::outer_bytes_of(widest, widest + HEIGHT) * SLOTS;
-        2 * (most + outer)
+        2 * (most + outer + top::slot_bytes() * top::TOP_SLOTS)
     }
 }
 
@@ -2115,6 +2122,8 @@ pub struct Text {
     menu: Regions,
     /// The questions' panels', last: drawn anew for each question.
     prompt: Regions,
+    top: Regions,
+    top_keys: RefCell<Vec<Option<(top::TopSpec, u32)>>>,
     clock: Cell<u64>,
 }
 
@@ -2188,6 +2197,15 @@ impl Text {
         let outer = Regions::new(corners.end(), prepared.outer_bytes());
         let menu = Regions::new(outer.end(), prepared.menu_bytes());
         let prompt = Regions::with_slots(menu.end(), Prepared::prompt_bytes(), PROMPT_SLOTS);
+        let top = Regions::with_slots(
+            prompt.end(),
+            if prepared.look.outer > 0 {
+                top::slot_bytes()
+            } else {
+                0
+            },
+            top::TOP_SLOTS,
+        );
         Self {
             font: prepared.font,
             line: prepared.line,
@@ -2205,6 +2223,8 @@ impl Text {
             outer,
             menu,
             prompt,
+            top,
+            top_keys: RefCell::new(vec![None; top::TOP_SLOTS]),
             clock: Cell::new(0),
         }
     }
@@ -2272,6 +2292,47 @@ impl Text {
     pub fn buttons_at(&self, scale: u32) -> Option<Drawn> {
         self.region_at(&self.buttons, scale, |scale| {
             render_buttons(&self.font, &self.glyphs, &self.look.buttons, scale, self.bg)
+        })
+    }
+
+    pub(crate) fn top_at(&self, scale: u32, spec: top::TopSpec) -> Option<Drawn> {
+        if !(1..=top::MAX_WIDTH).contains(&spec.width)
+            || !(1..=top::MAX_HEIGHT).contains(&spec.height)
+            || self.top.slot_bytes == 0
+        {
+            return None;
+        }
+        let scale = clamp_scale(scale);
+        let key = (spec, scale);
+        let mut slots = self.top.slots.borrow_mut();
+        let mut keys = self.top_keys.borrow_mut();
+        let cached = keys.iter().position(|k| *k == Some(key));
+        let at = cached.or_else(|| {
+            (0..slots.len())
+                .filter(|&i| slots[i].leases.get() == 0)
+                .min_by_key(|&i| slots[i].used)
+        })?;
+        if cached.is_none() {
+            keys[at] = None;
+            let (w, h, pixels) = top::render_top(self, spec, scale);
+            let offset = self.top.base + at * self.top.slot_bytes;
+            if pixels.len() > self.top.slot_bytes
+                || self.file.write_all_at(&pixels, offset as u64).is_err()
+            {
+                return None;
+            }
+            slots[at].size = (w, h);
+            keys[at] = Some(key);
+        }
+        let now = self.clock.get() + 1;
+        self.clock.set(now);
+        slots[at].used = now;
+        Some(Drawn {
+            offset: (self.top.base + at * self.top.slot_bytes) as i32,
+            width: slots[at].size.0,
+            height: slots[at].size.1,
+            scale,
+            lease: Lease::new(&slots[at].leases),
         })
     }
 
@@ -2470,6 +2531,95 @@ mod tests {
             eprintln!("VPN_ZONE_FRAME_FONT is not set at build time — no text to draw");
         }
         bytes
+    }
+
+    #[test]
+    fn unified_top_clips_without_moving_buttons_or_reusing_a_busy_size() {
+        let Some(font) = font() else { return };
+        let look = Look {
+            outer: 32,
+            border: 1,
+            radius_top: 31,
+            radius: 31,
+            buttons: CELLWARD.with_fullscreen(FullscreenButton::One),
+            ..LOOK
+        };
+        let prepared = Prepared::with_look(font, "test", look).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "cellward-top-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(prepared.memfd_size() as u64).unwrap();
+        let writer = OwnedFd::from(file.try_clone().unwrap());
+        std::fs::remove_file(path).unwrap();
+        let bg = Rgb(0x90, 0x60, 0x40);
+        let text = Text::new(prepared, bg, file.into(), writer);
+        let base = top::TopSpec {
+            width: 600,
+            height: 52,
+            border: 1,
+            radius: 32,
+            edge_height: 52,
+            content_y: Some(21),
+            visible: true,
+            lit: None,
+        };
+        for scale in [120, 150, 180, 240] {
+            let (w, _, pixels) = top::render_top(&text, base, scale);
+            let word = |x, y| {
+                let at = ((device(y, scale) * w + device(x, scale)) * 4) as usize;
+                u32::from_ne_bytes(pixels[at..at + 4].try_into().unwrap())
+            };
+            assert_eq!(word(0, 0), 0, "outside the arc stays transparent");
+            assert_eq!(word(300, 10), u32::from_ne_bytes(bg.xrgb8888()));
+            assert_eq!(
+                word(12, 11) >> 24,
+                255,
+                "hover fills the curved end, not a shortened rectangle"
+            );
+            for pixel in pixels.chunks_exact(4) {
+                let p = u32::from_ne_bytes(pixel.try_into().unwrap());
+                let a = p >> 24;
+                assert!((p & 255) <= a && ((p >> 8) & 255) <= a && ((p >> 16) & 255) <= a);
+            }
+        }
+        let one = text.top_at(120, base).unwrap();
+        for width in [1, 2, 3, 10] {
+            let (w, h, pixels) = top::render_top(&text, top::TopSpec { width, ..base }, 150);
+            assert_eq!(
+                pixels.len(),
+                (w * h * 4) as usize,
+                "narrow resize remains bounded"
+            );
+        }
+        let other = top::TopSpec { width: 700, ..base };
+        let two = text.top_at(120, other).unwrap();
+        assert_ne!(one.offset, two.offset);
+        assert_eq!(text.top_at(120, base).unwrap().offset, one.offset);
+        let third = top::TopSpec { width: 800, ..base };
+        assert!(
+            text.top_at(120, third).is_none(),
+            "never stretch a busy image of another width"
+        );
+        drop(one);
+        assert_eq!(text.top_at(120, third).unwrap().width, 800);
+        assert!(!base.input_at(0.5, 0.5));
+        assert!(base.input_at(300.0, 10.0));
+        assert!(!top::TopSpec {
+            visible: false,
+            ..base
+        }
+        .input_at(300.0, 10.0));
     }
 
     #[test]

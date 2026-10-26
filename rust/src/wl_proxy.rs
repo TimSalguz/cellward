@@ -5387,8 +5387,62 @@ mod tests {
         // The program still got its enter: the strip was not there yet.
         let events = events_until(&mut client, |o, op, _| o == 10 && op == 5);
         assert!(events.iter().any(|(o, op, _)| *o == 10 && *op == 0));
-        // Down into the content: in again.
+        // A compositor move grab can send leave after the first title
+        // click. The second click must still hit the title and maximize.
         let mut out = Vec::new();
+        event(&mut out, pointer, 1, |a| {
+            a.extend_from_slice(&words(&[12, root as i32]))
+        });
+        event(&mut out, pointer, 0, |a| {
+            a.extend_from_slice(&words(&[13, title as i32, fixed(50), fixed(10)]))
+        });
+        event(&mut out, pointer, 3, |a| {
+            a.extend_from_slice(&words(&[14, 1000, 0x110, 1]))
+        });
+        event(&mut out, pointer, 3, |a| {
+            a.extend_from_slice(&words(&[15, 1050, 0x110, 0]))
+        });
+        event(&mut out, pointer, 1, |a| {
+            a.extend_from_slice(&words(&[16, title as i32]))
+        });
+        event(&mut out, pointer, 0, |a| {
+            a.extend_from_slice(&words(&[17, root as i32, fixed(50), fixed(120)]))
+        });
+        event(&mut out, pointer, 5, |_| {});
+        compositor.write_all(&out).unwrap();
+        let first = log_until(&log, |m| m.iface == "xdg_toplevel" && m.opcode == 5);
+        assert!(!first.iter().any(|m| m.iface == "wl_surface"
+            && m.opcode == 1
+            && m.object == title
+            && m.args[0] == 0));
+        let mut out = Vec::new();
+        event(&mut out, pointer, 1, |a| {
+            a.extend_from_slice(&words(&[18, root as i32]))
+        });
+        event(&mut out, pointer, 0, |a| {
+            a.extend_from_slice(&words(&[19, title as i32, fixed(50), fixed(10)]))
+        });
+        event(&mut out, pointer, 3, |a| {
+            a.extend_from_slice(&words(&[20, 1200, 0x110, 1]))
+        });
+        event(&mut out, pointer, 3, |a| {
+            a.extend_from_slice(&words(&[21, 1250, 0x110, 0]))
+        });
+        event(&mut out, pointer, 5, |_| {});
+        compositor.write_all(&out).unwrap();
+        let second = log_until(&log, |m| m.iface == "xdg_toplevel" && m.opcode == 9);
+        assert!(!second.iter().any(|m| m.iface == "wl_surface"
+            && m.opcode == 1
+            && m.object == title
+            && m.args[0] == 0));
+        // Down into content: hide after the bounded click grace period.
+        let mut out = Vec::new();
+        event(&mut out, pointer, 1, |a| {
+            a.extend_from_slice(&words(&[22, title as i32]))
+        });
+        event(&mut out, pointer, 0, |a| {
+            a.extend_from_slice(&words(&[23, root as i32, fixed(50), fixed(120)]))
+        });
         event(&mut out, pointer, 2, |a| {
             a.extend_from_slice(&words(&[1, fixed(50), fixed(120)]))
         });
@@ -6659,33 +6713,36 @@ mod tests {
             assert_eq!(rig.finish(), 0);
             return;
         }
-        assert_eq!(on_root.len(), 8, "four strips, four corners: {subs:?}");
+        assert_eq!(
+            on_root.len(),
+            9,
+            "strips, corner holders and unified top: {subs:?}"
+        );
         // The program's geometry 10, 20, 300 × 200; the window 6, 16,
         // 308 × 208. The strips: top, bottom, left, right, short of them.
-        let strips: Vec<[i32; 4]> = on_root[..4].iter().map(|&p| laid(p)).collect();
+        assert!(
+            got.iter()
+                .rev()
+                .find(|m| m.iface == "wl_surface" && m.opcode == 1 && m.object == on_root[0].1)
+                .is_some_and(|m| m.args[0] == 0),
+            "no overlapping top strip"
+        );
+        let strips: Vec<[i32; 4]> = on_root[1..4].iter().map(|&p| laid(p)).collect();
         assert_eq!(
             strips,
-            [
-                [18, 16, 284, 4],
-                [18, 220, 284, 4],
-                [6, 40, 4, 172],
-                [310, 40, 4, 172]
-            ]
+            [[18, 220, 284, 4], [6, 40, 4, 172], [310, 40, 4, 172]]
         );
-        let pieces: Vec<[i32; 4]> = on_root[4..].iter().map(|&p| laid(p)).collect();
-        assert_eq!(
-            pieces,
-            [
-                [6, 16, 12, 24],
-                [302, 16, 12, 24],
-                [6, 212, 12, 12],
-                [302, 212, 12, 12]
-            ]
-        );
+        assert_eq!(attached(&got, on_root[4].1), Some(0));
+        assert_eq!(attached(&got, on_root[5].1), Some(0));
+        assert_eq!(laid(on_root[8]), [6, 16, 308, 24]);
+        let children = subs.iter().filter(|m| m.args[2] == on_root[8].1).count();
+        assert_eq!(children, 0, "text and buttons share the top's image");
+        let pieces: Vec<[i32; 4]> = on_root[6..8].iter().map(|&p| laid(p)).collect();
+        assert_eq!(pieces, [[6, 212, 12, 12], [302, 212, 12, 12]]);
         let mut offsets = Vec::new();
-        for (k, &(_, surface)) in on_root[4..].iter().enumerate() {
+        for (k, &(_, surface)) in on_root[6..8].iter().enumerate() {
             let buffer = made(&got, attached(&got, surface).expect("not drawn"));
-            let h = if k < 2 { 24 } else { 12 };
+            let h = 12;
             assert_eq!(buffer[1..], [12, h, 48, 0], "an ARGB image of its size");
             offsets.push((buffer[0], h));
             // Input on the border's band: the top one's top and side.
@@ -6699,10 +6756,7 @@ mod tests {
                 .filter(|m| m.iface == "wl_region" && m.opcode == 1 && m.object == region)
                 .map(|m| signed(&m.args))
                 .collect();
-            if k == 0 {
-                assert_eq!(adds, [vec![0, 0, 12, 4], vec![0, 0, 4, 24]]);
-            }
-            if k == 3 {
+            if k == 1 {
                 assert_eq!(adds, [vec![0, 8, 12, 4], vec![8, 0, 4, 12]]);
             }
         }

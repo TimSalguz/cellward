@@ -1224,10 +1224,18 @@ impl Frames {
             .filter_map(Weak::upgrade)
             .filter_map(|w| {
                 w.try_borrow().ok().and_then(|w| {
-                    [w.notice_until, w.prompt_arms_at(&self.questions)]
-                        .into_iter()
-                        .flatten()
-                        .min()
+                    [
+                        w.notice_until,
+                        w.hover_keep_until,
+                        w.title
+                            .as_ref()
+                            .and_then(|t| t.composite.as_ref())
+                            .and_then(|t| t.retry_at),
+                        w.prompt_arms_at(&self.questions),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .min()
                 })
             })
             .min()
@@ -1240,6 +1248,14 @@ impl Frames {
         for window in windows.iter().filter_map(Weak::upgrade) {
             if let Ok(mut window) = window.try_borrow_mut() {
                 window.notice_over(now);
+                if let Some(t) = &mut window.title {
+                    if let Some(top) = &mut t.composite {
+                        if top.retry_at.is_some_and(|at| now >= at) && top.draw(&t.surface, &t.view)
+                        {
+                            t.apply_now();
+                        }
+                    }
+                }
                 window.prompt_rearm(&self.questions);
             }
         }
@@ -1398,6 +1414,7 @@ impl Frames {
         root: &Rc<WlSurface>,
         top: &Rc<WlSurface>,
         me: &Weak<RefCell<Window>>,
+        unified: bool,
     ) -> Option<TitleParts> {
         let own = self.own.borrow();
         let (look, text) = (self.look(), self.text());
@@ -1441,7 +1458,12 @@ impl Frames {
         if !look.tag() || tag.is_some() {
             input_below_edge(&surface, tag.map_or(32768, |tag| tag.width));
         }
+        let composite_source = text
+            .as_ref()
+            .zip(own.text_pool.as_ref())
+            .map(|(text, pool)| (text.clone(), pool.clone()));
         let (text, buttons) = match (&text, &own.text_pool) {
+            (Some(_), Some(_)) if unified => (None, None),
             (Some(text), Some(pool)) => {
                 let text_surface = own_surface(Part::Text);
                 input_below_edge(&text_surface, 32768);
@@ -1507,12 +1529,44 @@ impl Frames {
         };
         Some(TitleParts {
             pixel: buffer.clone(),
-            surface,
+            surface: surface.clone(),
             sub,
             view,
             shown: false,
             text,
             buttons,
+            composite: if unified {
+                composite_source.map(|(text, pool)| TopParts {
+                    text,
+                    pool,
+                    compositor: compositor.clone(),
+                    scale: self.scale.get(),
+                    spec: crate::wl_title::top::TopSpec {
+                        width: 1,
+                        height: 1,
+                        border: 0,
+                        radius: 0,
+                        edge_height: 1,
+                        content_y: None,
+                        visible: false,
+                        lit: None,
+                    },
+                    current: None,
+                    retired: Vec::new(),
+                    retry_at: None,
+                    fraction: own.fractional.as_ref().map(|manager| {
+                        let fraction = manager.new_send_get_fractional_scale(&surface);
+                        quiet(&*fraction);
+                        fraction.set_handler(Scale {
+                            f: self.clone(),
+                            window: me.clone(),
+                        });
+                        fraction
+                    }),
+                })
+            } else {
+                None
+            },
         })
     }
 
@@ -1602,6 +1656,7 @@ impl Frames {
             fraction,
             scale: self.scale.get(),
             laid: false,
+            visible: [false; 4],
             current: Vec::new(),
             retired: Vec::new(),
         })
@@ -1803,12 +1858,16 @@ struct TitleParts {
     shown: bool,
     text: Option<TextParts>,
     buttons: Option<ButtonParts>,
+    composite: Option<TopParts>,
 }
 
 impl TitleParts {
     /// Attach the colour or nothing; the caller commits.
     fn show(&mut self, on: bool) {
-        if on {
+        if let Some(top) = &mut self.composite {
+            top.spec.visible = on;
+            top.draw(&self.surface, &self.view);
+        } else if on {
             attach_pixel(&self.surface, &self.pixel);
         } else {
             self.surface.send_attach(None, 0, 0);
@@ -1831,6 +1890,12 @@ impl TitleParts {
     }
 
     fn destroy(self) {
+        if let Some(mut top) = self.composite {
+            if let Some(fraction) = &top.fraction {
+                fraction.send_destroy();
+            }
+            destroy_buffers(top.current.take(), std::mem::take(&mut top.retired));
+        }
         if let Some(text) = self.text {
             text.destroy();
         }
@@ -1840,6 +1905,67 @@ impl TitleParts {
         self.view.send_destroy();
         self.sub.send_destroy();
         self.surface.send_destroy();
+    }
+}
+
+struct TopParts {
+    text: Rc<Text>,
+    pool: Rc<WlShmPool>,
+    compositor: Rc<WlCompositor>,
+    scale: u32,
+    spec: crate::wl_title::top::TopSpec,
+    current: Option<Rc<WlBuffer>>,
+    retired: Vec<Rc<WlBuffer>>,
+    fraction: Option<Rc<WpFractionalScaleV1>>,
+    retry_at: Option<Instant>,
+}
+
+impl TopParts {
+    fn draw(&mut self, surface: &Rc<WlSurface>, view: &Rc<WpViewport>) -> bool {
+        let Some(drawn) = self.text.top_at(self.scale, self.spec) else {
+            self.retry_at = Some(Instant::now() + Duration::from_millis(16));
+            return false;
+        };
+        self.retry_at = None;
+        let buffer = memfd_buffer(
+            &self.pool,
+            (drawn.width, drawn.height),
+            drawn.offset,
+            drawn.lease,
+            Pixels::Alpha,
+        );
+        attach_whole(surface, &buffer, drawn.width, drawn.height);
+        let zero = Fixed::from_i32_saturating(0);
+        view.send_set_source(
+            zero,
+            zero,
+            Fixed::from_i32_saturating(drawn.width),
+            Fixed::from_i32_saturating(drawn.height),
+        );
+        view.send_set_destination(self.spec.width, self.spec.height);
+        retire(&mut self.current, &mut self.retired);
+        self.current = Some(buffer);
+        let region = self.compositor.new_send_create_region();
+        quiet(&*region);
+        for y in 0..self.spec.height {
+            let mut start = None;
+            for x in 0..=self.spec.width {
+                let inside =
+                    x < self.spec.width && self.spec.input_at(x as f32 + 0.5, y as f32 + 0.5);
+                match (start, inside) {
+                    (None, true) => start = Some(x),
+                    (Some(at), false) => {
+                        region.send_add(at, y, x - at, 1);
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        surface.send_set_input_region(Some(&region));
+        region.send_destroy();
+        surface.send_commit();
+        true
     }
 }
 
@@ -2140,6 +2266,7 @@ struct CornerParts {
     scale: u32,
     /// Whether they are laid (not: a window too small for them).
     laid: bool,
+    visible: [bool; 4],
     /// The buffers attached, one a corner; none before the first layout.
     current: Vec<Rc<WlBuffer>>,
     retired: Vec<Rc<WlBuffer>>,
@@ -2171,8 +2298,8 @@ impl CornerParts {
         };
         let old = std::mem::take(&mut self.current);
         let mut offset = drawn.offset;
-        for (piece, (w, h)) in self.pieces.iter().zip(sizes) {
-            if w > 0 && h > 0 {
+        for (index, (piece, (w, h))) in self.pieces.iter().zip(sizes).enumerate() {
+            if self.visible[index] && w > 0 && h > 0 {
                 let buffer = memfd_buffer(
                     &self.pool,
                     (w, h),
@@ -2197,6 +2324,9 @@ impl CornerParts {
     /// drawn: the look's, the same for the window's life (a new look is
     /// new corners, `Window::swap`).
     fn lay(&mut self, rects: [Option<Rect>; 4]) {
+        let visible = rects.map(|r| r.is_some());
+        let changed = self.visible != visible;
+        self.visible = visible;
         if rects.iter().all(Option::is_none) {
             if !self.current.is_empty() {
                 for piece in &self.pieces {
@@ -2214,10 +2344,13 @@ impl CornerParts {
                 piece.sub.send_set_position(r.x, r.y);
                 piece.viewport.send_set_destination(r.w, r.h);
                 piece.surface.send_commit();
+            } else {
+                piece.surface.send_attach(None, 0, 0);
+                piece.surface.send_commit();
             }
         }
         self.laid = true;
-        if self.current.is_empty() {
+        if self.current.is_empty() || changed {
             self.draw();
         }
     }
@@ -2318,9 +2451,11 @@ struct Window {
     /// Maximized, as the compositor's last configure says: what a double
     /// click on the title turns ([`Window::double_clicked`]).
     maximized: bool,
+    unified_top: bool,
     /// When the title was last pressed, on the compositor's clock: the
     /// first press of a double click, maybe.
     title_pressed: Option<u32>,
+    hover_keep_until: Option<Instant>,
     /// What the frame is laid around now: the area, the insets, the strip.
     laid: Option<(Rect, Insets, Option<Rect>)>,
     /// The button the left pointer button went down on, until it comes up:
@@ -2382,7 +2517,9 @@ impl Window {
             notice_due: false,
             in_window: false,
             maximized: false,
+            unified_top: false,
             title_pressed: None,
+            hover_keep_until: None,
             laid: None,
             pressed: None,
             menu: None,
@@ -2479,6 +2616,10 @@ impl Window {
 
     /// The label's seconds are over at `now`: the strip as its mode says.
     fn notice_over(&mut self, now: Instant) {
+        if self.hover_keep_until.is_some_and(|until| now >= until) {
+            self.hover_keep_until = None;
+            self.show_title(true);
+        }
         if self.notice_until.is_some_and(|until| now >= until) {
             self.notice_until = None;
             self.show_title(true);
@@ -2552,6 +2693,31 @@ impl Window {
         if self.strips.is_none() || area.w <= 0 || area.h <= 0 {
             return;
         }
+        let unified = self.look.outer > 0
+            && !self.look.tag()
+            && f.text().is_some()
+            && geometry_up(area, i).w <= crate::wl_title::top::MAX_WIDTH;
+        if unified != self.unified_top && self.title.is_some() {
+            // Crossing the bounded renderer's width limit changes the
+            // surface topology; do not reuse a hidden legacy top strip.
+            self.drop_border();
+            if let Some(title) = self.title.take() {
+                title.destroy();
+            }
+            for corners in [self.corners.take(), self.outer.take()]
+                .into_iter()
+                .flatten()
+            {
+                corners.destroy();
+            }
+            self.strips = f.make_strips(root, top, &self.me, i.border);
+            if self.strips.is_some() {
+                self.counted = Some(Framed::new(&f.framed));
+            }
+            self.laid = None;
+            self.outer_laid = None;
+        }
+        self.unified_top = unified;
         // Where the title goes: in its room when the insets keep one, else
         // over the top of the content — in mode `hover`, and in `always`
         // while the program's state is fullscreen: laid there hidden, so
@@ -2559,7 +2725,8 @@ impl Window {
         // out of fullscreen before the program acks that
         // ([`Self::title_wanted`]); in fullscreen for its own mode, or the
         // label on the way in, too.
-        let over = self.mode != TitleMode::Off
+        let over = self.unified_top
+            || self.mode != TitleMode::Off
             || (self.fullscreen
                 && (self.full.title != TitleMode::Off || self.notice_until.is_some()));
         // The frame's own round corners, and what is laid short of them —
@@ -2575,7 +2742,13 @@ impl Window {
         let strip = if self.look.tag() {
             tag_row(area, i, over)
         } else {
-            title_strip(area, i, over).map(|r| rounded_title_span(r, pieces, self.look.outer))
+            title_strip(area, i, over).map(|r| {
+                if self.unified_top {
+                    r
+                } else {
+                    rounded_title_span(r, pieces, self.look.outer)
+                }
+            })
         };
         if self.laid == Some((area, i, strip)) {
             // Nothing moves; whether the strip shows may still change (the
@@ -2589,12 +2762,18 @@ impl Window {
             .into_iter()
             .map(|(w, _)| w)
             .collect();
-        for (s, r) in self
+        for (index, (s, r)) in self
             .strips
             .iter()
             .flatten()
             .zip(ring_strips(area, i, &widths))
+            .enumerate()
         {
+            if self.unified_top && index % 4 == Side::Top.index() {
+                s.surface.send_attach(None, 0, 0);
+                s.surface.send_commit();
+                continue;
+            }
             let r = trim(r, pieces);
             s.sub.send_set_position(r.x, r.y);
             s.viewport.send_set_destination(r.w, r.h);
@@ -2643,7 +2822,12 @@ impl Window {
             self.corners = f.make_corners(root, top, &self.me, !fractional, Round::Inner);
         }
         if let Some(corners) = &mut self.corners {
-            corners.lay(corner_rects(area, radii.0, radii.1));
+            let mut rects = corner_rects(area, radii.0, radii.1);
+            if self.unified_top {
+                rects[0] = None;
+                rects[1] = None;
+            }
+            corners.lay(rects);
         }
     }
 
@@ -2665,7 +2849,12 @@ impl Window {
     /// before the program's commit.
     fn lay_outer(&mut self, rects: Option<[Rect; 4]>) {
         if let Some(outer) = &mut self.outer {
-            outer.lay(rects.map_or([None; 4], |r| r.map(Some)));
+            let mut rects = rects.map_or([None; 4], |r| r.map(Some));
+            if self.unified_top {
+                rects[0] = None;
+                rects[1] = None;
+            }
+            outer.lay(rects);
         }
     }
 
@@ -2696,7 +2885,7 @@ impl Window {
         placed
             && match mode {
                 TitleMode::Always => true,
-                TitleMode::Hover => self.hover,
+                TitleMode::Hover => self.hover || self.hover_keep_until.is_some(),
                 TitleMode::Off => false,
             }
     }
@@ -2733,12 +2922,43 @@ impl Window {
             return;
         };
         if self.title.is_none() {
-            self.title = f.make_title(root, top, &self.me);
+            self.title = f.make_title(root, top, &self.me, self.unified_top);
         }
         let want = self.title_wanted();
         let Some(t) = &mut self.title else {
             return;
         };
+        if let Some(top) = &mut t.composite {
+            let Some((area, i, _)) = self.laid else {
+                return;
+            };
+            let whole = geometry_up(area, i);
+            let radius = if self.fullscreen { 0 } else { self.look.outer };
+            let height = self
+                .outer_laid
+                .as_ref()
+                .map_or(i.border + TITLE_HEIGHT, |p| p[0].h);
+            t.sub.send_set_position(whole.x, whole.y);
+            top.spec = crate::wl_title::top::TopSpec {
+                width: whole.w,
+                height: height
+                    .max(if self.fullscreen {
+                        0
+                    } else {
+                        i.border + i.title + self.look.corners().0
+                    })
+                    .min(whole.h.max(1)),
+                border: i.border,
+                radius,
+                edge_height: height,
+                content_y: (!self.fullscreen).then_some(i.border + i.title),
+                visible: want,
+                lit: top.spec.lit,
+            };
+            top.draw(&t.surface, &t.view);
+            t.shown = want;
+            return;
+        }
         t.sub.send_set_position(r.x, r.y);
         t.view.send_set_destination(r.w, r.h);
         if t.shown != want {
@@ -2776,6 +2996,10 @@ impl Window {
         let scale = crate::wl_title::clamp_scale(scale);
         if let Some(t) = &mut self.title {
             let mut drawn = false;
+            if let Some(top) = &mut t.composite {
+                top.scale = scale;
+                drawn |= top.draw(&t.surface, &t.view);
+            }
             if let Some(text) = &mut t.text {
                 if text.scale != scale || text.drawn.is_none() {
                     text.scale = scale;
@@ -2806,6 +3030,12 @@ impl Window {
             .is_some_and(|text| text.fraction.is_some())
             || self.corners.as_ref().is_some_and(|c| c.fraction.is_some())
             || self.outer.as_ref().is_some_and(|c| c.fraction.is_some());
+        let fractional = fractional
+            || self
+                .title
+                .as_ref()
+                .and_then(|t| t.composite.as_ref())
+                .is_some_and(|t| t.fraction.is_some());
         if !fractional {
             self.rescale(u32::try_from(factor.clamp(1, 4)).unwrap_or(1) * 120);
         }
@@ -2847,6 +3077,43 @@ impl Window {
         match part {
             Part::Buttons => self.look.buttons.at(x, y).map_or(Hit::Nothing, Hit::Button),
             Part::Corner | Part::Menu | Part::Prompt | Part::TypeTarget => Hit::Nothing,
+            Part::Title if self.title.as_ref().is_some_and(|t| t.composite.is_some()) => {
+                let top = self.title.as_ref().unwrap().composite.as_ref().unwrap();
+                let spec = top.spec;
+                if spec.depth(x as f32, y as f32) < spec.border as f32 {
+                    if self.next_fullscreen {
+                        return Hit::Nothing;
+                    }
+                    let side = if x < f64::from(spec.width) / 2.0 {
+                        EDGE_LEFT
+                    } else {
+                        EDGE_RIGHT
+                    };
+                    let edge_x = x.min(f64::from(spec.width) - x);
+                    let corner = self.look.interaction.resize_corner;
+                    let limit = f64::from(spec.border + corner);
+                    let edge = if corner > 0 && edge_x < limit && y < limit {
+                        EDGE_TOP | side
+                    } else if edge_x < y {
+                        side
+                    } else {
+                        EDGE_TOP
+                    };
+                    Hit::Edge(edge)
+                } else if spec.title_at(x as f32, y as f32) {
+                    let layout = title_layout(spec.width - 2 * spec.border, &self.look.buttons);
+                    layout
+                        .buttons
+                        .and_then(|at| {
+                            self.look
+                                .buttons
+                                .at(x - f64::from(spec.border + at), y - f64::from(spec.border))
+                        })
+                        .map_or(Hit::Title, Hit::Button)
+                } else {
+                    Hit::Nothing
+                }
+            }
             Part::Title | Part::Text => Hit::Title,
             _ if self.next_fullscreen => Hit::Nothing,
             Part::Border(side, ring) => {
@@ -2912,6 +3179,15 @@ impl Window {
         let Some(t) = &mut self.title else {
             return;
         };
+        if let Some(top) = &mut t.composite {
+            if top.spec.lit != lit {
+                top.spec.lit = lit;
+                if top.draw(&t.surface, &t.view) {
+                    t.apply_now();
+                }
+            }
+            return;
+        }
         if t.buttons.as_mut().is_some_and(|b| b.light(lit)) {
             t.apply_now();
         }
@@ -2944,6 +3220,17 @@ impl Window {
         let toplevel = self.toplevel.as_ref().and_then(Weak::upgrade);
         if down {
             self.pressed = None;
+            let hover_mode = if self.fullscreen_now() {
+                self.full.title
+            } else {
+                self.mode
+            };
+            if hit == Hit::Title && hover_mode == TitleMode::Hover {
+                // A compositor move grab can synthesize pointer-leave on
+                // the first press. Do not unmap the second click's target.
+                self.hover_keep_until =
+                    Some(Instant::now() + Duration::from_millis(u64::from(DOUBLE_CLICK_MS) + 100));
+            }
             // A press elsewhere between two on the title: no double click.
             if hit != Hit::Title {
                 self.title_pressed = None;
@@ -3040,9 +3327,9 @@ impl Window {
     /// buttons: on the one fullscreen button
     /// (`crate::frame::FullscreenButton::One`), fullscreen inside the
     /// window.
-    fn right_click(&mut self, f: &Frames, x: f64, y: f64) {
+    fn right_click(&mut self, f: &Frames, part: Part, x: f64, y: f64) {
         if self.look.buttons.fullscreen == FullscreenButton::One
-            && self.hit(Part::Buttons, x, y) == Hit::Button(Button::Fullscreen)
+            && self.hit(part, x, y) == Hit::Button(Button::Fullscreen)
         {
             self.toggle_in_window(f);
         }
@@ -3365,12 +3652,17 @@ impl Window {
         let (Some((_, _, Some(strip))), Some(geometry)) = (self.laid, self.sent_geometry) else {
             return false;
         };
-        let Some((at, scale)) = self
-            .title
-            .as_ref()
-            .and_then(|t| t.buttons.as_ref())
-            .and_then(|b| b.at.map(|at| (at, b.scale)))
-        else {
+        let Some((at, scale)) = self.title.as_ref().and_then(|t| {
+            if let Some(top) = &t.composite {
+                title_layout(strip.w, &self.look.buttons)
+                    .buttons
+                    .map(|at| (at, top.scale))
+            } else {
+                t.buttons
+                    .as_ref()
+                    .and_then(|b| b.at.map(|at| (at, b.scale)))
+            }
+        }) else {
             return false;
         };
         let Some(anchor) = menu_anchor(strip, at, geometry, &self.look.buttons) else {
@@ -5771,9 +6063,11 @@ impl Pointer {
             return;
         }
         if button == BTN_RIGHT {
-            if part == Part::Buttons && state == WlPointerButtonState::RELEASED {
+            if matches!(part, Part::Buttons | Part::Title)
+                && state == WlPointerButtonState::RELEASED
+            {
                 if let Ok(mut window) = window.try_borrow_mut() {
-                    window.right_click(&self.f, x, y);
+                    window.right_click(&self.f, part, x, y);
                 }
             }
             return;
@@ -5798,7 +6092,10 @@ impl Pointer {
         let seat = self.seat.upgrade();
         let down = state == WlPointerButtonState::PRESSED;
         if down && part == Part::Title {
-            if window.try_borrow().is_ok_and(|w| w.next_fullscreen) {
+            if window
+                .try_borrow()
+                .is_ok_and(|w| w.next_fullscreen && w.hit(part, x, y) == Hit::Title)
+            {
                 self.fullscreen_drag = Some((Rc::downgrade(&window), serial, x, y));
             }
         } else if !down {

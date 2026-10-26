@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- Rounded top frames keep buttons anchored to the window edge and clip their
+  pixels to the arc. Their border, corner caps, title and buttons share one
+  alpha image, removing overlapping top backgrounds exposed by opacity and
+  the inset rectangular ends of the hover title. A bounded legacy fallback
+  remains for windows wider than 8192 logical pixels or without a font.
+- A hover title stays available across the first click's compositor move
+  grab, so synthetic pointer-leave does not destroy the double-click target.
+  Its brief hold expires through the existing event-loop timer.
+
 ### Security
 - Strict launch-bound network ownership is now the default for new container
   instances. Missing prerequisites fail closed; only an explicit off selects
