@@ -138,6 +138,13 @@ def reader(output, control='no', primary='no'):
                     for interface, ident, version in [('wl_seat', 4, 1), (manager[0], 5, manager[1])]:
                         send(2, 0, struct.pack('=I', names[interface]) + wire.wl_string(interface) + struct.pack('=II', version, ident))
                     send(5, 1, struct.pack('=II', 6, 4))
+                    if not control:
+                        # Private windowless clients explicitly opt in only
+                        # after installing their data-device handlers.
+                        send(5, 0, struct.pack('=I', 7))
+                        send(7, 0, wire.wl_string('application/x-cellward-private-ready'))
+                        send(6, 0 if primary else 1, struct.pack('=II', 7, 0))
+                        send(7, 1)
                     bound = True
                     fixtures.report(output, {'types': [], 'bodies': {}})
                 if obj == 6 and op == 0:

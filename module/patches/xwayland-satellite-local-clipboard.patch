@@ -7,7 +7,21 @@ diff --git a/src/server/selection.rs b/src/server/selection.rs
 index bd32aaa..6fad0d5 100644
 --- a/src/server/selection.rs
 +++ b/src/server/selection.rs
-@@ -125,6 +125,7 @@ impl<S: X11Selection> InnerServerState<S> {
+@@ -44,2 +44,6 @@ impl<S: X11Selection> SelectionStates<S> {
+             c.device = Some(c.manager.get_data_device(qh, seat));
++            if std::env::var_os("CELLWARD_X11_CLIPBOARD_FALLBACK").as_deref() == Some(std::ffi::OsStr::new("1")) {
++                let ready = c.manager.create_copy_paste_source(qh, vec!["application/x-cellward-private-ready"]);
++                ready.set_selection(c.device.as_ref().unwrap(), 0);
++            }
+         }
+@@ -48,2 +52,6 @@ impl<S: X11Selection> SelectionStates<S> {
+             d.device = Some(d.manager.get_selection_device(qh, seat));
++            if std::env::var_os("CELLWARD_X11_CLIPBOARD_FALLBACK").as_deref() == Some(std::ffi::OsStr::new("1")) {
++                let ready = d.manager.create_selection_source(qh, vec!["application/x-cellward-private-ready"]);
++                ready.set_selection(d.device.as_ref().unwrap(), 0);
++            }
+         }
+@@ -125,6 +133,7 @@ impl<S: X11Selection> InnerServerState<S> {
                  .as_ref()
                  .map(|(_seat, serial)| serial)
                  .copied()
@@ -15,7 +29,7 @@ index bd32aaa..6fad0d5 100644
              {
                  T::set_selection(inner, state.device.as_ref().unwrap(), serial);
              }
-@@ -187,4 +188,10 @@ pub trait SelectionType: Sized {
+@@ -187,4 +196,10 @@ pub trait SelectionType: Sized {
  
      fn set_selection(source: &Self::Source, device: &Self::DataDevice, serial: u32);
  

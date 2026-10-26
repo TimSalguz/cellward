@@ -105,6 +105,7 @@ def main():
     env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), HOME=str(root),
                XDG_CONFIG_HOME=str(root / 'config'), XDG_STATE_HOME=str(root / 'state'),
                DBUS_SESSION_BUS_ADDRESS=f'unix:path={root}/no-bus',
+               CELLWARD_X11_CLIPBOARD_FALLBACK='1',
                WLR_BACKENDS='headless', WLR_RENDERER='pixman', WLR_LIBINPUT_NO_DEVICES='1',
                LP_NUM_THREADS='1', LIBGL_ALWAYS_SOFTWARE='1')
     for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'SWAYSOCK'):

@@ -287,3 +287,18 @@ targets. Each operation allows 32 KiB / 8192 characters and, in Unicode mode,
   `programs.cellward.clipboard.history = true`; keep the default unchanged.
 - A compositor-level separation of host and container selections; history
   tabs alone cannot provide that isolation.
+
+### Client readiness and Qt startup
+
+A newly registered Wayland data device receives no synthetic selection until
+its client is ready. A normal compositor selection/focus event establishes
+that boundary. Cellward consumes that event as readiness only: host data is
+never imported. Windowless readers, including the bundled Xwayland Satellite,
+explicitly signal readiness with `application/x-cellward-private-ready` after
+installing their handlers. This control MIME is never stored as clipboard data.
+
+This fixes AyuGram/Qt crashing during platform initialization: an immediate
+`selection(nil)` could reach Qt before its platform integration existed. The
+regression test starts the installed AyuGram on a private headless compositor,
+with empty and populated private buffers, and revokes the broker afterwards.
+Both CLIPBOARD and PRIMARY remain scoped to the same container instance.

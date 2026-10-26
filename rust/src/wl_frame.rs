@@ -6724,7 +6724,18 @@ impl WlDataDeviceHandler for DataDevice {
         source: Option<&Rc<WlDataSource>>,
         serial: u32,
     ) {
+        let readiness = source.is_some_and(|s| {
+            s.try_get_handler_ref::<Source>()
+                .is_ok_and(|h| h.types.len() == 1 && h.types[0] == private_clipboard::READY_MIME)
+        });
+        if readiness {
+            if private_clipboard::enabled() {
+                private_clipboard::ready(slf);
+            }
+            return;
+        }
         if private_clipboard::enabled() {
+            private_clipboard::ready(slf);
             let selected = source.and_then(|s| {
                 s.try_get_handler_ref::<Source>().ok().map(|h| {
                     (
@@ -6818,6 +6829,9 @@ impl WlDataDeviceHandler for DataDevice {
 
     fn handle_selection(&mut self, slf: &Rc<WlDataDevice>, id: Option<&Rc<WlDataOffer>>) {
         if private_clipboard::enabled() {
+            // A compositor selection is also its normal readiness/focus
+            // boundary. Its contents remain hidden; announce our scope only.
+            private_clipboard::ready(slf);
             return;
         }
         if clipboard_relay::selected(slf, id) {
@@ -6857,6 +6871,10 @@ impl WlDataSourceHandler for Source {
     }
 
     fn handle_offer(&mut self, slf: &Rc<WlDataSource>, mime_type: &str) {
+        if mime_type == private_clipboard::READY_MIME {
+            clipboard_relay::keep_type(&mut self.types, &mut self.relay_overflow, mime_type);
+            return;
+        }
         if !crate::clip::is_mark(mime_type) {
             clipboard_relay::keep_type(&mut self.types, &mut self.relay_overflow, mime_type);
             slf.send_offer(mime_type);
@@ -6985,7 +7003,19 @@ impl ZwpPrimarySelectionDeviceV1Handler for PrimaryDevice {
         source: Option<&Rc<ZwpPrimarySelectionSourceV1>>,
         serial: u32,
     ) {
+        let readiness = source.is_some_and(|s| {
+            s.try_get_handler_ref::<PrimarySource>().is_ok_and(|h| {
+                h.0.types.len() == 1 && h.0.types[0] == private_clipboard::READY_MIME
+            })
+        });
+        if readiness {
+            if private_clipboard::enabled() {
+                private_clipboard::ready_primary(slf);
+            }
+            return;
+        }
         if private_clipboard::enabled() {
+            private_clipboard::ready_primary(slf);
             let selected = source.and_then(|s| {
                 s.try_get_handler_ref::<PrimarySource>().ok().map(|h| {
                     (
@@ -7015,7 +7045,9 @@ impl ZwpPrimarySelectionDeviceV1Handler for PrimaryDevice {
         slf: &Rc<ZwpPrimarySelectionDeviceV1>,
         offer: Option<&Rc<ZwpPrimarySelectionOfferV1>>,
     ) {
-        if !private_clipboard::enabled() {
+        if private_clipboard::enabled() {
+            private_clipboard::ready_primary(slf);
+        } else {
             slf.send_selection(offer);
         }
     }
@@ -7043,6 +7075,10 @@ impl ZwpPrimarySelectionSourceV1Handler for PrimarySource {
         slf.send_cancelled();
     }
     fn handle_offer(&mut self, slf: &Rc<ZwpPrimarySelectionSourceV1>, mime_type: &str) {
+        if mime_type == private_clipboard::READY_MIME {
+            clipboard_relay::keep_type(&mut self.0.types, &mut self.0.relay_overflow, mime_type);
+            return;
+        }
         if !crate::clip::is_mark(mime_type) {
             clipboard_relay::keep_type(&mut self.0.types, &mut self.0.relay_overflow, mime_type);
             slf.send_offer(mime_type);

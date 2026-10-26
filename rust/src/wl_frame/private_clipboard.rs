@@ -10,6 +10,8 @@ use std::os::fd::{AsRawFd, RawFd};
 const LIMIT: usize = 64 << 20;
 const QUANTUM: usize = 64 << 10;
 const PENDING: usize = 64;
+/// Explicit opt-in for initialized windowless clients, never clipboard data.
+pub(super) const READY_MIME: &str = "application/x-cellward-private-ready";
 
 thread_local! { static STATE: RefCell<Option<State>> = const { RefCell::new(None) }; }
 fn index(which: Selection) -> usize {
@@ -118,10 +120,9 @@ pub(super) fn register(device: &Rc<WlDataDevice>) {
     STATE.with(|s| {
         if let Some(s) = &mut *s.borrow_mut() {
             s.devices
-                .retain(|d| d.upgrade().is_some_and(|d| !d.state().is_destroyed()));
+                .retain(|(d, _)| d.upgrade().is_some_and(|d| !d.state().is_destroyed()));
             if s.devices.len() < 128 {
-                s.devices.push(Rc::downgrade(device));
-                announce(device, s.selections[0].as_ref());
+                s.devices.push((Rc::downgrade(device), false));
             }
         }
     });
@@ -130,10 +131,42 @@ pub(super) fn register_primary(device: &Rc<ZwpPrimarySelectionDeviceV1>) {
     STATE.with(|s| {
         if let Some(s) = &mut *s.borrow_mut() {
             s.primary
-                .retain(|d| d.upgrade().is_some_and(|d| !d.state().is_destroyed()));
+                .retain(|(d, _)| d.upgrade().is_some_and(|d| !d.state().is_destroyed()));
             if s.primary.len() < 128 {
-                s.primary.push(Rc::downgrade(device));
-                announce_primary(device, s.selections[1].as_ref());
+                s.primary.push((Rc::downgrade(device), false));
+            }
+        }
+    });
+}
+
+pub(super) fn ready(device: &Rc<WlDataDevice>) {
+    STATE.with(|s| {
+        if let Some(s) = &mut *s.borrow_mut() {
+            if let Some((_, ready)) = s
+                .devices
+                .iter_mut()
+                .find(|(d, _)| d.upgrade().is_some_and(|d| Rc::ptr_eq(&d, device)))
+            {
+                if !*ready {
+                    *ready = true;
+                    announce(device, s.selections[0].as_ref());
+                }
+            }
+        }
+    });
+}
+pub(super) fn ready_primary(device: &Rc<ZwpPrimarySelectionDeviceV1>) {
+    STATE.with(|s| {
+        if let Some(s) = &mut *s.borrow_mut() {
+            if let Some((_, ready)) = s
+                .primary
+                .iter_mut()
+                .find(|(d, _)| d.upgrade().is_some_and(|d| Rc::ptr_eq(&d, device)))
+            {
+                if !*ready {
+                    *ready = true;
+                    announce_primary(device, s.selections[1].as_ref());
+                }
             }
         }
     });
@@ -158,7 +191,13 @@ impl SourceRef {
         }
     }
 }
-pub(super) fn set(which: Selection, source: Option<SourceRef>, types: Vec<String>, overflow: bool) {
+pub(super) fn set(
+    which: Selection,
+    source: Option<SourceRef>,
+    mut types: Vec<String>,
+    overflow: bool,
+) {
+    types.retain(|mime| mime != READY_MIME);
     STATE.with(|s| {
         if let Some(s) = &mut *s.borrow_mut() {
             if s.client.is_none() {
@@ -227,8 +266,8 @@ struct State {
     changed: File,
     operation: Option<Operation>,
     selections: [Option<Snapshot>; 2],
-    devices: Vec<Weak<WlDataDevice>>,
-    primary: Vec<Weak<ZwpPrimarySelectionDeviceV1>>,
+    devices: Vec<(Weak<WlDataDevice>, bool)>,
+    primary: Vec<(Weak<ZwpPrimarySelectionDeviceV1>, bool)>,
     refresh: [bool; 2],
     clear: [bool; 2],
     capture: Option<Capture>,
@@ -265,7 +304,8 @@ impl State {
             for device in self
                 .devices
                 .iter()
-                .filter_map(Weak::upgrade)
+                .filter(|(_, ready)| *ready)
+                .filter_map(|(d, _)| d.upgrade())
                 .filter(|d| !d.state().is_destroyed())
             {
                 announce(&device, self.selections[at].as_ref());
@@ -274,7 +314,8 @@ impl State {
             for device in self
                 .primary
                 .iter()
-                .filter_map(Weak::upgrade)
+                .filter(|(_, ready)| *ready)
+                .filter_map(|(d, _)| d.upgrade())
                 .filter(|d| !d.state().is_destroyed())
             {
                 announce_primary(&device, self.selections[at].as_ref());
