@@ -63,7 +63,7 @@ def owner(display, library, control):
     display = x.XOpenDisplay(display.encode())
     assert display, 'private X11 server unavailable'
     atom = lambda text: x.XInternAtom(display, text.encode(), 0)
-    clipboard, targets = atom('CLIPBOARD'), atom('TARGETS')
+    clipboard, targets = atom('PRIMARY' if os.environ.get('CELLWARD_TEST_PRIMARY') == '1' else 'CLIPBOARD'), atom('TARGETS')
     mimes = {atom('UTF8_STRING'): 'text', atom('text/plain'): 'text',
              atom('text/plain;charset=utf-8'): 'text', atom('image/png'): 'png'}
     epoch = None
@@ -102,9 +102,10 @@ def owner(display, library, control):
         time.sleep(.01)
 
 
-def reader(output, control='no'):
+def reader(output, control='no', primary='no'):
     """Ordinary wl_data_device, not data-control, and no visible surface."""
     control = control == 'yes'
+    primary = primary == 'yes' or (not control and os.environ.get('CELLWARD_TEST_PRIMARY') == '1')
     sock = socket.socket(socket.AF_UNIX)
     sock.connect(str(Path(os.environ['XDG_RUNTIME_DIR']) / os.environ['WAYLAND_DISPLAY']))
     send = lambda obj, op, data=b'', fd=None: wire.packet(sock, obj, op, data, fd)
@@ -132,7 +133,8 @@ def reader(output, control='no'):
                     name, length = struct.unpack_from('=II', data)
                     names[data[8:8 + length - 1].decode()] = name
                 if obj == 3 and op == 0 and not bound:
-                    manager = ('zwlr_data_control_manager_v1', 1) if control else ('wl_data_device_manager', 3)
+                    manager = (('zwlr_data_control_manager_v1', 2 if primary else 1) if control else
+                               ('zwp_primary_selection_device_manager_v1', 1) if primary else ('wl_data_device_manager', 3))
                     for interface, ident, version in [('wl_seat', 4, 1), (manager[0], 5, manager[1])]:
                         send(2, 0, struct.pack('=I', names[interface]) + wire.wl_string(interface) + struct.pack('=II', version, ident))
                     send(5, 1, struct.pack('=II', 6, 4))
@@ -143,13 +145,13 @@ def reader(output, control='no'):
                 if obj in offers and op == 0:
                     length = struct.unpack_from('=I', data)[0]
                     offers[obj].append(data[4:4 + length - 1].decode())
-                if obj == 6 and op == (1 if control else 5):
+                if obj == 6 and op == (3 if control and primary else 1 if control or primary else 5):
                     old = current
                     current = struct.unpack('=I', data)[0] or None
                     result = {'types': offers.get(current, []), 'bodies': {}}
                     fixtures.report(output, result)
                     if old is not None and old != current:
-                        send(old, 1 if control else 2)
+                        send(old, 1 if control or primary else 2)
                         offers.pop(old, None)
         for fd in list(pending):
             ident, mime, body, started = pending[fd]
@@ -169,7 +171,7 @@ def reader(output, control='no'):
             for mime in ('text/plain', 'image/png'):
                 if mime in offers[current]:
                     read, write = os.pipe2(os.O_CLOEXEC)
-                    send(current, 0 if control else 1, wire.wl_string(mime), write)
+                    send(current, 0 if control or primary else 1, wire.wl_string(mime), write)
                     os.close(write)
                     pending[read] = current, mime, b'', time.monotonic()
             last = time.monotonic()
@@ -202,7 +204,11 @@ def main():
     for tool in ('core', 'satellite', 'sway', 'swaymsg', 'foot', 'x11', 'xkbcommon', 'wl-copy'):
         parser.add_argument('--' + tool, required=True)
     parser.add_argument('--unframed', action='store_true')
+    parser.add_argument('--private-broker', help='exercise the instance-scoped controller instead of the legacy relay')
+    parser.add_argument('--primary', action='store_true', help='test X11 PRIMARY with the private controller')
     args = parser.parse_args()
+    if args.primary and not args.private_broker:
+        parser.error('--primary requires --private-broker')
     root = Path(tempfile.mkdtemp(prefix='cellward-clipboard-reverse-'))
     print('Artifacts:', root, flush=True)
     runtime = root / 'runtime'
@@ -212,6 +218,8 @@ def main():
                WLR_BACKENDS='headless', WLR_RENDERER='pixman', WLR_LIBINPUT_NO_DEVICES='1',
                LP_NUM_THREADS='1', LIBGL_ALWAYS_SOFTWARE='1', CELLWARD_X11_CLIPBOARD_FALLBACK='1',
                DBUS_SESSION_BUS_ADDRESS=f'unix:path={root}/no-bus')
+    if args.primary:
+        env['CELLWARD_TEST_PRIMARY'] = '1'
     for name in ('DISPLAY', 'WAYLAND_DISPLAY', 'WAYLAND_SOCKET', 'SWAYSOCK'):
         env.pop(name, None)
     config = root / 'sway.conf'
@@ -235,23 +243,34 @@ def main():
             return {'types': [], 'bodies': {}}
     def body(name, mime):
         return status(name)['bodies'].get(mime)
+    def binding(instance):
+        if not args.private_broker:
+            return []
+        stat = Path('/proc/self/stat').read_text()
+        stamp = stat[stat.rfind(')') + 1:].split()[19]
+        boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        return ['--clipboard-scope', instance, f'{os.getpid()}:{stamp} {boot}']
     try:
         start([args.sway, '--unsupported-gpu', '-c', str(config)], 'sway')
         env['WAYLAND_DISPLAY'] = wire.wait_for(lambda: next((p.name for p in runtime.glob('wayland-*') if not p.name.endswith('.lock')), None))
         env['SWAYSOCK'] = str(wire.wait_for(lambda: next(runtime.glob('sway-ipc*.sock'), None)))
         keyboard = wire.keyboard(env, args.xkbcommon)
+        if args.private_broker:
+            start([args.private_broker, 'broker'], 'broker')
+            wire.wait_for(lambda: (runtime / 'cellward-clipboard/control.sock').exists())
         # Trusted observer of the PRIVATE compositor, never the real desktop.
         # Confined readers below use only the ordinary wl_data_device path.
-        start([sys.executable, __file__, 'reader', str(root / 'host.json'), 'yes'], 'host-reader')
+        start([sys.executable, __file__, 'reader', str(root / 'host.json'), 'yes', 'yes' if args.primary else 'no'], 'host-reader')
         sentinel = b'synthetic private-compositor host sentinel'
-        start([args.wl_copy, '--foreground', '--type', 'text/plain'], 'host-owner', sentinel)
+        primary_args = ['--primary'] if args.primary else []
+        start([args.wl_copy, *primary_args, '--foreground', '--type', 'text/plain'], 'host-owner', sentinel)
         wire.wait_for(lambda: body('host.json', 'text/plain') == digest(sentinel))
         number = next(n for n in range(490, 590) if not Path(f'/tmp/.X11-unix/X{n}').exists() and not Path(f'/tmp/.X{n}-lock').exists())
         frame = [] if args.unframed else ['--frame', 'ff00ff:1:always']
-        start([args.core, 'wl-sandbox', 'reverse-main', *frame, '--',
+        start([args.core, 'wl-sandbox', 'reverse-main', *frame, *binding('reverse-main'), '--',
                sys.executable, __file__, 'launch', args.satellite, f':{number}', args.foot, str(root / 'local.json')], 'launch')
         wire.wait_for(lambda: Path(f'/tmp/.X11-unix/X{number}').exists())
-        other = start([args.core, 'wl-sandbox', 'reverse-other', '--', sys.executable, __file__, 'reader', str(root / 'other.json')], 'other-launch')
+        other = start([args.core, 'wl-sandbox', 'reverse-other', *binding('reverse-other'), '--', sys.executable, __file__, 'reader', str(root / 'other.json')], 'other-launch')
         wire.wait_for(lambda: (root / 'other.json').exists())
         def focused():
             tree = json.loads(subprocess.check_output([args.swaymsg, '-t', 'get_tree'], env=env))
@@ -280,18 +299,36 @@ def main():
                 wire.wait_for(lambda: body('late.json', 'image/png') == digest(png))
             print(f'epoch {epoch}: current text/PNG reach native reader; host/other launch unchanged', flush=True)
         fixtures.report(control, {'epoch': 0})
-        wire.wait_for(lambda: all(v['bytes'] == 0 for v in status('local.json')['bodies'].values()))
+        if args.private_broker:
+            # The eager broker owns accepted bytes independently of the X11
+            # selection owner, as a clipboard manager does. Owner disappearance
+            # must not erase a committed copy or reopen the host selection.
+            time.sleep(.2)
+            assert body('local.json', 'text/plain') == digest(payload(3)[0])
+        else:
+            wire.wait_for(lambda: all(v['bytes'] == 0 for v in status('local.json')['bodies'].values()))
         fixtures.report(control, {'epoch': 4})
         text, png = payload(4)
         wire.wait_for(lambda: body('local.json', 'text/plain') == digest(text))
         wire.wait_for(lambda: body('local.json', 'image/png') == digest(png))
         source.terminate()
         source.wait(timeout=3)
-        wire.wait_for(lambda: all(v['bytes'] == 0 for v in status('local.json')['bodies'].values()))
+        if args.private_broker:
+            time.sleep(.2)
+            assert body('local.json', 'text/plain') == digest(text)
+            assert body('local.json', 'image/png') == digest(png)
+        else:
+            wire.wait_for(lambda: all(v['bytes'] == 0 for v in status('local.json')['bodies'].values()))
         assert body('host.json', 'text/plain') == digest(sentinel)
         replacement = b'synthetic foreign replacement'
-        start([args.wl_copy, '--foreground', '--type', 'text/plain'], 'host-replacement', replacement)
+        start([args.wl_copy, *primary_args, '--foreground', '--type', 'text/plain'], 'host-replacement', replacement)
         wire.wait_for(lambda: body('host.json', 'text/plain') == digest(replacement))
+        if args.private_broker:
+            time.sleep(.3)
+            assert body('local.json', 'text/plain') == digest(text), 'host selection replaced private scope'
+            assert not status('other.json')['types'], 'host selection reached foreign scope'
+            print(f'private X11 {"PRIMARY" if args.primary else "CLIPBOARD"}: text/PNG, late reader, owner exit; host selection never imported or replaced', flush=True)
+            return
         wire.wait_for(lambda: 'text/plain' in status('local.json')['types'])
         time.sleep(2.2)
         assert body('local.json', 'text/plain')['bytes'] == 0, 'foreign background access bypassed paste gate'

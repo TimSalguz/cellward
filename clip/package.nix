@@ -18,6 +18,7 @@ rustPlatform.buildRustPackage {
       ./Cargo.lock
       ./src
       ../shared/clipboard_client.rs
+      ../shared/clipboard_endpoint.rs
     ];
   };
   sourceRoot = "source/clip";

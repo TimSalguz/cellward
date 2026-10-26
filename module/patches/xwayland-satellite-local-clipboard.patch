@@ -1,6 +1,6 @@
-Cellward-only, opt-in CLIPBOARD fallback for a windowless X11 client.
+Cellward-only, opt-in CLIPBOARD/PRIMARY fallback for a windowless X11 client.
 Serial zero is consumed by Cellward's launch-local relay, never authorized
-as a host compositor write. Existing keyboard serials and PRIMARY are unchanged.
+as a host compositor write. Existing keyboard serials are unchanged.
 Upstream source context: MPL-2.0, xwayland-satellite v0.8.3.
 
 diff --git a/src/server/selection.rs b/src/server/selection.rs
@@ -15,27 +15,14 @@ index bd32aaa..6fad0d5 100644
              {
                  T::set_selection(inner, state.device.as_ref().unwrap(), serial);
              }
-@@ -187,6 +188,10 @@ pub trait SelectionType: Sized {
+@@ -187,4 +188,10 @@ pub trait SelectionType: Sized {
  
      fn set_selection(source: &Self::Source, device: &Self::DataDevice, serial: u32);
  
-+    fn local_selection_serial() -> Option<u32> {
-+        None
-+    }
-+
-     fn get_events(world: &mut MyWorld) -> &mut SelectionEvents<Self::Offer>;
- 
-     fn receive_offer(offer: &Self::Offer, mime_type: String) -> std::io::Result<ReadPipe>;
-@@ -203,6 +208,12 @@ pub enum Primary {}
- 
- #[allow(private_bounds, private_interfaces)]
- impl SelectionType for Clipboard {
 +    fn local_selection_serial() -> Option<u32> {
 +        (std::env::var_os("CELLWARD_X11_CLIPBOARD_FALLBACK").as_deref()
 +            == Some(std::ffi::OsStr::new("1")))
 +        .then_some(0)
 +    }
 +
-     type Source = CopyPasteSource;
-     type Offer = WlSelectionOffer;
-     type Manager = DataDeviceManagerState;
+     fn get_events(world: &mut MyWorld) -> &mut SelectionEvents<Self::Offer>;

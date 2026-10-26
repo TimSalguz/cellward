@@ -12,6 +12,12 @@ const FRAME: usize = CONTENT + 32 * 1024;
 const QUANTUM: usize = 64 << 10;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+pub fn erase_slice(bytes: &mut [u8]) {
+    for byte in bytes {
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Selection {
     Clipboard,
@@ -31,6 +37,23 @@ pub struct Bytes(Vec<u8>);
 impl Bytes {
     pub fn as_slice(&self) -> &[u8] {
         &self.0
+    }
+    pub fn allocated(&self) -> usize {
+        self.0.capacity()
+    }
+    pub fn append(&mut self, bytes: &[u8], limit: usize) -> io::Result<()> {
+        let limit = limit.min(CONTENT);
+        if self.0.len().saturating_add(bytes.len()) > limit {
+            return Err(invalid());
+        }
+        self.0
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| io::Error::other("clipboard allocation limit"))?;
+        if self.0.capacity() > limit {
+            return Err(invalid());
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(())
     }
     fn clear(&mut self) {
         for at in 0..self.0.capacity() {

@@ -22,7 +22,7 @@ selection's revision does not grant access. The trusted controller has a
 separate `transfer_explicit` method, absent from the wire protocol.
 
 The adapter is nonblocking and fair per tick (64 KiB in/out per connection).
-It caps connections at 128, I/O buffers at 128 MiB globally and approximately
+It caps connections at 512, I/O buffers at 128 MiB globally and approximately
 64 MiB per instance; these budgets are separate from retained selections.
 Headers are checked before allocating, buffer capacity is charged, incomplete
 requests/blocked responses expire after 5 seconds. There can also be bounded
@@ -52,7 +52,55 @@ On 2026-10-25 the full library run passed 45 tests (one large benchmark ignored)
 plus 3 CLI tests; compilation and execution used one job/thread and peaked at
 approximately 0.5 GiB sampled process-group RSS.
 
-## Integration still required
+## Integrated implementation, 2026-10-26
+
+The controller now runs as `cellward-clipboard.service`, independently of
+history. Its host control endpoint authenticates SO_PEERCRED and SO_PEERPIDFD,
+compares live user/pid/mount namespaces, and accepts a holder pidfd rather than
+a reusable PID. After binding, that connection speaks only one immutable
+scope's data protocol. Separate eventfds notify proxies of revisions. Dead
+holders remove scopes, wipe retained payloads and close endpoints. SIGTERM
+also drops the transport and removes the control socket.
+
+`wl_frame/private_clipboard.rs` captures CLIPBOARD and PRIMARY into bounded
+pipes asynchronously, announces only accepted revisions, and supplies scoped
+synthetic offers to all launches of the instance. Reads are pinned to the
+offer revision. Ordinary upstream clipboard/primary offers are hidden; explicit
+drag-and-drop offers remain separate. Captured copies survive the application's
+source disappearing, until replacement, explicit clear or holder shutdown.
+Proxy failure/broker failure never falls back to the host clipboard.
+
+The optional recorder subscribes directly to scoped endpoints. Secret hints,
+disabled histories and manager-restored selections are excluded. The manager
+enumerates live destinations through its authenticated host service; `copy-to`
+looks up a running scope and never creates a missing one. History tabs do not
+select active destinations. Frame history receives the exact supervisor's
+scope. Legacy/unverified isolated windows cannot fall back to host history
+paste. Unconfined launches use the shared host clipboard explicitly.
+
+`tests/private-clipboard-smoke.py` exercises independent launches, CLIPBOARD
+and PRIMARY, text and real PNG larger than a pipe buffer, a late reader, a host
+data-control observer, foreign instances, direct private history recording,
+explicit manager transfer, missing destinations, holder exit and broker
+failure. `--without-history` verifies active isolation creates no disk store.
+`clipboard-reverse-smoke.py --private-broker` exercises a real windowless X11
+owner through Satellite, including PRIMARY with `--primary` and a host
+PRIMARY data-control observer. `vm-window.nix --arg clipboardOnly true` covers
+default `cellward run` launches, the user service, actual instance namespaces
+and preserving selections across a live network switch.
+
+Validation completed: 1113 core tests, 56 clipboard-library tests (one large
+benchmark ignored), 4 clipboard-command tests and 73 GUI tests. Production
+Nix package builds/checks passed. Headless native runs passed with history on
+and off; X11 CLIPBOARD and PRIMARY runs passed; tray and frame-history GUI
+runs passed, including destination selection and typing/theme regressions.
+The real NixOS VM test passed in 173 seconds under TCG, including the same
+holder and clipboard contents surviving an offline-to-host network switch.
+
+The following checkpoint and checklist describe the earlier implementation
+stages; they are retained as design history, not current missing features.
+
+## Earlier integration checkpoints
 
 ### FD client checkpoint, 2026-10-26
 

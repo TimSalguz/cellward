@@ -286,6 +286,31 @@ pub fn pipe_nonblocking() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
+/// Enable nonblocking I/O on an already-owned descriptor.
+pub fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    // SAFETY: fcntl takes an integer descriptor and flags, no pointers.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn poll_events_now(fd: std::os::fd::RawFd, events: i16) -> io::Result<i16> {
+    let mut p = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    // SAFETY: one initialized pollfd remains live throughout poll.
+    if unsafe { libc::poll(&mut p, 1, 0) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(p.revents)
+    }
+}
+
 /// An inotify watch on one directory for what appears in it.
 pub struct Inotify {
     fd: OwnedFd,

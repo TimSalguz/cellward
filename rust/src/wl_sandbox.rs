@@ -289,6 +289,8 @@ pub struct Args {
     /// `--clip-history <name>`: the clipboard history its copies go to
     /// (`crate::clip::NO_HISTORY` when none; `main` when not said).
     pub clip_history: String,
+    /// Host-only binding to a live instance: id, holder pid and start stamp.
+    pub clipboard_scope: Option<(String, i32, String)>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -370,6 +372,7 @@ impl Args {
         let mut always_focused = false;
         let mut camera = None;
         let mut clip_history = crate::container::MAIN_RECORD.to_owned();
+        let mut clipboard_scope = None;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
             if word == "--no-proxy" {
@@ -404,6 +407,26 @@ impl Args {
                     return Err(ArgError::BadFrame);
                 }
                 container = Some(name.into_owned());
+            } else if word == "--clipboard-scope" {
+                let id = words
+                    .next()
+                    .and_then(|s| s.to_str())
+                    .ok_or(ArgError::BadFrame)?;
+                let owner = words
+                    .next()
+                    .and_then(|s| s.to_str())
+                    .ok_or(ArgError::BadFrame)?;
+                let (pid, stamp) = owner.split_once(':').ok_or(ArgError::BadFrame)?;
+                let pid: i32 = pid.parse().map_err(|_| ArgError::BadFrame)?;
+                if !crate::clipboard_endpoint::valid_label(id)
+                    || pid <= 0
+                    || stamp.is_empty()
+                    || stamp.len() > 128
+                    || stamp.chars().any(char::is_control)
+                {
+                    return Err(ArgError::BadFrame);
+                }
+                clipboard_scope = Some((id.to_owned(), pid, stamp.to_owned()));
             } else if word == "--clip-history" {
                 let name = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
                 if !crate::clip::valid_history(&name) {
@@ -436,6 +459,9 @@ impl Args {
             } else {
                 positional.push(word);
             }
+        }
+        if clipboard_scope.is_some() && !proxy {
+            return Err(ArgError::BadFrame);
         }
         if positional.len() > 1 {
             return Err(ArgError::TooManyArguments);
@@ -472,6 +498,7 @@ impl Args {
             focus,
             camera,
             clip_history,
+            clipboard_scope,
             cmd,
         })
     }
@@ -726,7 +753,11 @@ pub fn run(args: Args) -> u8 {
             "wl-sandbox: no XDG_RUNTIME_DIR — {}",
             plain_note(&args.zone, &args.cmd[0])
         );
-        return run_plain(&args.cmd);
+        return if args.clipboard_scope.is_some() {
+            EXIT_NOT_STARTED
+        } else {
+            run_plain(&args.cmd)
+        };
     };
     let runtime_dir = PathBuf::from(runtime_dir);
 
@@ -737,7 +768,11 @@ pub fn run(args: Args) -> u8 {
                 "wl-sandbox: {why} — {}",
                 plain_note(&args.zone, &args.cmd[0])
             );
-            return run_plain(&args.cmd);
+            return if args.clipboard_scope.is_some() {
+                EXIT_NOT_STARTED
+            } else {
+                run_plain(&args.cmd)
+            };
         }
     };
 
@@ -783,6 +818,9 @@ pub fn run(args: Args) -> u8 {
         match wl_proxy::Upstream::bind(&runtime_dir, std::process::id()) {
             Ok(upstream) => Some(upstream),
             Err(e) => {
+                if args.clipboard_scope.is_some() {
+                    return not_started(&format!("private clipboard socket failed ({e})"));
+                }
                 eprintln!(
                     "wl-sandbox: cannot create the proxy's socket ({e}) — the compositor listens \
                      for the program itself"
@@ -823,7 +861,8 @@ pub fn run(args: Args) -> u8 {
         forget_upstream(&upstream);
         return match refused {
             // Already confined: on the socket it came through, as before.
-            Refused::Nested => run_plain(&args.cmd),
+            Refused::Nested if args.clipboard_scope.is_none() => run_plain(&args.cmd),
+            Refused::Nested => not_started("private clipboard requires a confined Wayland proxy"),
             Refused::Other(why) => {
                 eprintln!("wl-sandbox: {why} — the program is not started");
                 not_started(&why)
@@ -845,17 +884,42 @@ pub fn run(args: Args) -> u8 {
         proxy_speaks = word.is_some();
         // Its instance's mark, for the clipboard by container (`crate::clip`):
         // the restricted sockets' directory is the instance's.
-        let clip = crate::clip::token_for(&runtime_dir, &args.zone, &args.clip_history);
-        match wl_proxy::start(
+        let clip = if args.clipboard_scope.is_some() {
+            None
+        } else {
+            crate::clip::token_for(&runtime_dir, &args.zone, &args.clip_history)
+        };
+        let private = match args
+            .clipboard_scope
+            .as_ref()
+            .map(|(id, pid, stamp)| {
+                let owner =
+                    sys::pidfd_open(*pid).ok_or_else(|| "clipboard owner has exited".to_owned())?;
+                if sys::process_stamp(*pid).as_deref() != Some(stamp.as_str()) {
+                    return Err("clipboard owner has changed".to_owned());
+                }
+                crate::clipboard_endpoint::bind(&runtime_dir, id, &args.clip_history, owner.as_fd())
+                    .map_err(|e| format!("private clipboard unavailable ({e})"))
+            })
+            .transpose()
+        {
+            Ok(bound) => bound,
+            Err(why) => return not_started(&why),
+        };
+        match wl_proxy::start_private(
             &listener,
             &up.path,
             args.frame.clone(),
             word,
             args.focus,
             clip,
+            private,
         ) {
             Ok(started) => proxy = Some((started, up.path)),
             Err(e) => {
+                if args.clipboard_scope.is_some() {
+                    return not_started(&format!("private clipboard proxy failed ({e})"));
+                }
                 // The second rung: the proxy did not start. The context made
                 // for it is switched off, and the zone's path is registered
                 // itself — exactly what happened before there was a proxy.
@@ -1069,6 +1133,44 @@ mod tests {
         let a = Args::parse(&argv(&["firefox", "--", "firefox", "--new-window"])).unwrap();
         assert_eq!(a.app_id, "firefox");
         assert_eq!(a.cmd, argv(&["firefox", "--new-window"]));
+    }
+
+    #[test]
+    fn private_clipboard_requires_a_proxy_and_a_live_owner_identity() {
+        let parsed = Args::parse(&argv(&[
+            "--clipboard-scope",
+            "app-firefox",
+            "123:456 boot-id",
+            "firefox",
+            "--",
+            "firefox",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed.clipboard_scope,
+            Some(("app-firefox".into(), 123, "456 boot-id".into()))
+        );
+        for owner in ["0:456", "-1:456", "123:", "123", "123:bad\nmark"] {
+            assert!(Args::parse(&argv(&[
+                "--clipboard-scope",
+                "app-firefox",
+                owner,
+                "firefox",
+                "--",
+                "firefox",
+            ]))
+            .is_err());
+        }
+        assert!(Args::parse(&argv(&[
+            "--clipboard-scope",
+            "app-firefox",
+            "123:456 boot-id",
+            "--no-proxy",
+            "firefox",
+            "--",
+            "firefox",
+        ]))
+        .is_err());
     }
 
     #[test]

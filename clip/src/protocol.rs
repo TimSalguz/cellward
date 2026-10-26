@@ -20,6 +20,8 @@
 //! delete⇥<history>⇥<id>                       ok
 //! select⇥<history>⇥<id>                       ok: it is the selection now
 //! copy⇥<history>⇥<id>                         same, without recording a paste
+//! instances                                    live instance id⇥history per line
+//! copy-to⇥<history>⇥<id>⇥<instance>           replace that private CLIPBOARD only
 //! ```
 //!
 //! Values are percent-encoded: `%`, tab, line feed and `=` as `%25`, `%09`,

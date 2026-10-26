@@ -848,8 +848,18 @@ fn paste_from_history(tools: &Tools, pid: i32, label: &str, history: &str) -> u8
     let notify = |body: &str| {
         crate::dialog::notify(&tools.notify_send, None, "5000", label, body);
     };
-    let out = Command::new(&tools.window)
-        .args(["clip", "--history", history, "--launch"])
+    let mut command = Command::new(&tools.window);
+    if let Some(instance) = private_clipboard_scope(tools, pid) {
+        command.args(["clip", "--clipboard-instance", &instance]);
+    } else {
+        if launch_with_tools(tools, pid).is_none_or(|l| l.zone != crate::launch::UNCONFINED) {
+            notify("Не удалось подтвердить приватный буфер этого окна. Перезапустите приложение через обновлённый Cellward.");
+            return 1;
+        }
+        command.arg("clip");
+    }
+    let out = command
+        .args(["--history", history, "--launch"])
         .arg(pid.to_string())
         .args(clip_window_settings(&tools.state))
         .stdin(Stdio::null())
@@ -886,7 +896,17 @@ fn paste_entry(tools: &Tools, pid: i32, label: &str, from: &str, id: &str) -> u8
     let notify = |body: &str| {
         crate::dialog::notify(&tools.notify_send, None, "5000", label, body);
     };
-    match ask_clip(&format!("select\t{from}\t{id}\n")) {
+    let request = match private_clipboard_scope(tools, pid) {
+        Some(instance) => format!("copy-to\t{from}\t{id}\t{instance}\n"),
+        None => {
+            if launch_with_tools(tools, pid).is_none_or(|l| l.zone != crate::launch::UNCONFINED) {
+                notify("Приватный буфер этого окна не подтверждён; буфер хоста не изменён. Перезапустите приложение через обновлённый Cellward.");
+                return 1;
+            }
+            format!("select\t{from}\t{id}\n")
+        }
+    };
+    match ask_clip(&request) {
         Ok(answer) if answer == "ok" => {}
         Ok(answer) => {
             notify(&format!(
@@ -904,6 +924,27 @@ fn paste_entry(tools: &Tools, pid: i32, label: &str, from: &str, id: &str) -> u8
         notify("Запись в буфере обмена — вставьте её сами: окна программы не нашлось");
     }
     0
+}
+
+/// Read the immutable scope from our actual host-side supervisor, never
+/// infer a live instance from the current network or a history tab.
+fn private_clipboard_scope(tools: &Tools, pid: i32) -> Option<String> {
+    let held = crate::sys::pidfd_open(pid)?;
+    if !runs_core(pid, Path::new(&tools.core)) {
+        return None;
+    }
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let words: Vec<_> = bytes.split(|b| *b == 0).filter(|w| !w.is_empty()).collect();
+    let at = words.iter().position(|w| *w == b"wl-sandbox")?;
+    let args: Vec<OsString> = words[at + 1..]
+        .iter()
+        .map(|w| Some(OsString::from(std::str::from_utf8(w).ok()?)))
+        .collect::<Option<_>>()?;
+    let (scope, _, _) = crate::wl_sandbox::Args::parse(&args)
+        .ok()?
+        .clipboard_scope?;
+    use std::os::fd::AsFd;
+    crate::clipboard_endpoint::alive(held.as_fd()).then_some(scope)
 }
 
 /// The launch of supervisor `pid` asked to paste ([`crate::wl_proxy::PASTE_ASK`]):

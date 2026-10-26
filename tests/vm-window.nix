@@ -20,6 +20,7 @@
   loginOnly ? false,
   # Only measure cold/warm picker mapping on a real compositor.
   startupOnly ? false,
+  clipboardOnly ? false,
 }:
 
 let
@@ -29,6 +30,13 @@ let
     overlays = [ ];
   };
   windowFonts = (pkgs.callPackage ../window/package.nix { }).fontsConf;
+  clipboardFixtures = pkgs.runCommand "cellward-clipboard-fixtures" { } ''
+    mkdir -p $out
+    cp ${./private-clipboard-smoke.py} $out/private-clipboard-smoke.py
+    cp ${./clipboard-reverse-smoke.py} $out/clipboard-reverse-smoke.py
+    cp ${./clipboard-bridge-smoke.py} $out/clipboard-bridge-smoke.py
+    cp ${./typing-smoke.py} $out/typing-smoke.py
+  '';
 
   test = pkgs.testers.runNixOSTest {
     name = "cellward-vm-window";
@@ -156,7 +164,10 @@ let
       machine.copy_from_vm("/tmp/cellward-startup.json", "")
       machine.copy_from_vm("/tmp/cellward-startup.trace", "")
       machine.fail("test -e /tmp/startup-must-not-run")
-    '' + pkgs.lib.optionalString (!loginOnly && !startupOnly) (''
+    '' + pkgs.lib.optionalString clipboardOnly ''
+      clipboard_fixtures = "${clipboardFixtures}"
+      exec(open("${./vm-private-clipboard.py}").read())
+    '' + pkgs.lib.optionalString (!loginOnly && !startupOnly && !clipboardOnly) (''
       with subtest("the launch window comes up, stays up, and closed starts nothing"):
           alice(
               f"systemd-run --user --unit=vmpick --setenv=WAYLAND_DISPLAY={display} "

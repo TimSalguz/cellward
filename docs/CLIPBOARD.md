@@ -1,10 +1,35 @@
 # The clipboard by container
 
-A program reads what its own container copied freely. What was copied
-elsewhere — in another container, on the host — it reads only when the
-person pastes it.
+A program reads its own running container's CLIPBOARD and PRIMARY. Ordinary
+copies stay in memory in that instance's private broker scope. They are not
+published to the desktop clipboard and cannot be observed by host clipboard
+managers such as CopyQ. Another launch in the same instance shares those
+selections; another instance does not. Changing the instance's network keeps
+its selections; stopping its holder clears both.
 
-## How
+The manager's **Copy to** selector explicitly chooses a running instance or
+the shared host clipboard. Changing history tabs does not transfer anything.
+The history window opened from a frame starts with that exact instance as
+the destination. Images use the same transfer path as text. Password copies
+require confirmation and carry the secret hint, so they are not recorded
+again. Restoring an ordinary history entry also does not create a new copy
+event in history.
+
+`cellward-clipboard.service` supplies active selections independently of
+`programs.cellward.clipboard.history`. The optional `cellward-clip.service`
+records private selections directly from scoped broker endpoints; it does
+not mirror them through the desktop. The controller authenticates host peers
+by credentials, a live peer pidfd and matching user/pid/mount namespaces.
+Confined proxies receive only an already-bound data socket and change eventfd,
+not the registration socket. Broker failure clears offers and never enables
+the host clipboard as a fallback. A private launch requires its proxy.
+
+**Upgrade:** already-running programs retain their old proxies. Restart them
+through the updated launcher to get private active selections. History paste
+refuses an unverified isolated target rather than exporting to the host.
+Unconfined programs continue to use the desktop clipboard.
+
+## Legacy proxies (programs started before this update)
 
 The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):
 
@@ -28,9 +53,9 @@ The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):
 
 Cellward's private Satellite has an opt-in fallback:
 an X11 owner that has never received a Wayland keyboard serial can publish
-its CLIPBOARD to the launch-local relay. Serial zero is consumed locally,
-not forwarded to the host compositor. PRIMARY and focused X11 copies are
-unchanged. Reinstalling the same local source must not cancel it; source
+its CLIPBOARD or PRIMARY to the private instance. Serial zero is consumed
+locally, not forwarded to the host compositor. Existing keyboard serials
+continue to work. Reinstalling the same local source must not cancel it; source
 destruction/cancellation invalidates its offers.
 
 `tests/clipboard-reverse-smoke.py` verifies the reverse path on a private

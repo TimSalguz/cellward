@@ -256,6 +256,7 @@ def main():
             stop = threading.Event()
             requests = []
             text = "Manager Я🙂\n"
+            copy_request = "copy-to\thost\t1\tsynthetic-gui" if args.frame_history else "copy\thost\t1"
             def serve():
                 while not stop.is_set():
                     try:
@@ -273,19 +274,22 @@ def main():
                         requests.append(line)
                         if line == "histories":
                             client.sendall(b"host\n")
+                        elif line == "instances":
+                            client.sendall(b"synthetic-gui\tmain\n")
                         elif line.startswith("search\t"):
                             label = "Пароль: Test account" if "@secrets:" in line else "GUI input"
                             client.sendall(f"1\t1000\t1000\t1\t0\t0\ttext/plain:{len(text.encode())}\t{label}\n".encode())
                         elif line.startswith("get\t"):
                             client.sendall(f"ok\t{len(text.encode())}\n".encode() + text.encode())
-                        elif line == "copy\thost\t1":
+                        elif line == copy_request:
                             client.sendall(b"ok\n")
                         else:
                             client.sendall(b"error\tunexpected test request\n")
             server = threading.Thread(target=serve, daemon=True)
             server.start()
             gui_marker = wait_for(lambda: next((runtime / "vpn-zones/ask").glob("*.typing"), None))
-            gui_args = ["--history", "host", "--launch", gui_marker.stem] if args.frame_history else ["--manager"]
+            gui_args = ["--history", "host", "--launch", gui_marker.stem,
+                        "--clipboard-instance", "synthetic-gui"] if args.frame_history else ["--manager"]
             manager = start([str(Path(args.window).resolve()), "clip", *gui_args], "manager")
             manager_window = wait_for(lambda: next((w for w in windows() if w["app_id"] == "vpn-zone-window"), None))
             time.sleep(0.3)
@@ -311,8 +315,8 @@ def main():
             if args.grim:
                 wait_for(lambda: background() == bytes((30, 30, 46)), timeout=6)
             tab_offset = -36 if args.frame_history else 0
-            click(rect["x"] + 110, rect["y"] + 318 + tab_offset)
-            wait_for(lambda: "copy\thost\t1" in requests)
+            click(rect["x"] + 110, rect["y"] + 363 + tab_offset)
+            wait_for(lambda: copy_request in requests)
             assert manager.poll() is None, "copy must not close the manager"
             assert not output.exists() or output.stat().st_size == 0, "copy unexpectedly pasted into the target"
             assert not any(line.startswith("select\t") for line in requests), "copy must use copy, not paste semantics"

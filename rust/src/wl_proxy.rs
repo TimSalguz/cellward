@@ -887,6 +887,18 @@ pub fn start(
     focus: FocusPolicy,
     clip: Option<String>,
 ) -> Result<Proxy, String> {
+    start_private(zone_listener, upstream, frame, opened, focus, clip, None)
+}
+
+pub(crate) fn start_private(
+    zone_listener: &UnixListener,
+    upstream: &Path,
+    frame: Option<Setup>,
+    opened: Option<OwnedFd>,
+    focus: FocusPolicy,
+    clip: Option<String>,
+    private: Option<crate::clipboard_endpoint::Bound>,
+) -> Result<Proxy, String> {
     // A live switch may have completed after launch built the command line
     // but before this supervisor drew its first frame. Start from the
     // instance's current network, not a label that was already stale.
@@ -924,7 +936,17 @@ pub fn start(
         let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // The instance's mark for what its programs copy (`crate::clip`):
             // the proxy reads no file of it, it is given.
-            crate::clip::set_mark(clip.as_deref());
+            crate::clip::set_mark(if private.is_some() {
+                None
+            } else {
+                clip.as_deref()
+            });
+            if let Some(bound) = private {
+                if let Err(e) = crate::wl_frame::private_clipboard::initialize(bound) {
+                    eprintln!("wl-sandbox: private clipboard: {e}");
+                    return 1;
+                }
+            }
             child(listener, theirs, supervisor, drawing, opened, focus)
         }))
         .unwrap_or(101);
@@ -2214,6 +2236,7 @@ fn confine(
     }
     let mut keep = vec![0, 1, 2, listener.as_raw_fd(), channel.as_raw_fd()];
     keep.extend(opened);
+    keep.extend(crate::wl_frame::private_clipboard::keep_fds());
     close_all_but(&mut keep)?;
     if let Some(fd) = opened {
         OPENED.store(fd, Ordering::SeqCst);
@@ -2224,9 +2247,13 @@ fn confine(
     limit(libc::RLIMIT_NOFILE, MAX_FDS)?;
     limit(libc::RLIMIT_DATA, MAX_DATA)?;
     let border = drawing.and_then(prepare_border);
-    filter(ScmpAction::KillProcess, title_writer(border.as_ref()))
-        .and_then(|f| f.load())
-        .map_err(|e| format!("seccomp: {e}"))?;
+    filter_scoped(
+        ScmpAction::KillProcess,
+        title_writer(border.as_ref()),
+        crate::wl_frame::private_clipboard::data_fd(),
+    )
+    .and_then(|f| f.load())
+    .map_err(|e| format!("seccomp: {e}"))?;
     Ok(border)
 }
 
@@ -2417,6 +2444,14 @@ pub fn filter(
     default: ScmpAction,
     title: Option<RawFd>,
 ) -> Result<ScmpFilterContext, libseccomp::error::SeccompError> {
+    filter_scoped(default, title, None)
+}
+
+fn filter_scoped(
+    default: ScmpAction,
+    title: Option<RawFd>,
+    clipboard: Option<RawFd>,
+) -> Result<ScmpFilterContext, libseccomp::error::SeccompError> {
     let mut ctx = ScmpFilterContext::new(default)?;
     ctx.set_ctl_nnp(true)?;
     // A foreign architecture's table (int 0x80 on x86_64) is not in the
@@ -2465,6 +2500,48 @@ pub fn filter(
         if let Ok(call) = ScmpSyscall::from_name(name) {
             ctx.add_rule(ScmpAction::Allow, call)?;
         }
+    }
+    if let Some(fd) = clipboard {
+        for name in ["recvfrom", "sendto", "shutdown"] {
+            if let Ok(call) = ScmpSyscall::from_name(name) {
+                ctx.add_rule_conditional(
+                    ScmpAction::Allow,
+                    call,
+                    &[ScmpArgCompare::new(
+                        0,
+                        ScmpCompareOp::MaskedEqual(0xffff_ffff),
+                        fd as u64,
+                    )],
+                )?;
+            }
+        }
+        for cmd in [libc::F_GETFL, libc::F_DUPFD_CLOEXEC] {
+            ctx.add_rule_conditional(
+                ScmpAction::Allow,
+                ScmpSyscall::from_name("fcntl")?,
+                &[ScmpArgCompare::new(
+                    1,
+                    ScmpCompareOp::MaskedEqual(0xffff_ffff),
+                    cmd as u64,
+                )],
+            )?;
+        }
+        ctx.add_rule_conditional(
+            ScmpAction::Allow,
+            ScmpSyscall::from_name("fcntl")?,
+            &[
+                ScmpArgCompare::new(
+                    1,
+                    ScmpCompareOp::MaskedEqual(0xffff_ffff),
+                    libc::F_SETFL as u64,
+                ),
+                ScmpArgCompare::new(
+                    2,
+                    ScmpCompareOp::MaskedEqual(libc::O_NONBLOCK as u64),
+                    libc::O_NONBLOCK as u64,
+                ),
+            ],
+        )?;
     }
     let exec = libc::PROT_EXEC as u64;
     let no_exec = ScmpArgCompare::new(2, ScmpCompareOp::MaskedEqual(exec), 0);
@@ -2552,6 +2629,7 @@ fn serve(
         if channel.is_none() && conns.is_empty() {
             return 0;
         }
+        crate::wl_frame::private_clipboard::tick(Instant::now());
         conns.retain_mut(Conn::flush);
         let now = Instant::now();
         if paused.is_some_and(|until| now >= until) {
@@ -2567,6 +2645,7 @@ fn serve(
         }
         let first_conn = fds.len();
         fds.extend(conns.iter().map(|c| pollfd(c.state.poll_fd().as_raw_fd())));
+        fds.extend(crate::wl_frame::private_clipboard::pollfds());
         let mut timeout = if conns.iter().any(|c| c.stopped) {
             RECHECK_MS
         } else {
@@ -2577,6 +2656,7 @@ fn serve(
             .iter()
             .filter_map(|c| c.frames.as_ref().and_then(|f| f.wake_at()))
             .chain(crate::wl_frame::typing::wake_at())
+            .chain(crate::wl_frame::private_clipboard::wake_at())
             .min();
         for until in [paused, wake].into_iter().flatten() {
             let left = until.saturating_duration_since(now).as_millis();

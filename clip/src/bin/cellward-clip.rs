@@ -59,6 +59,18 @@ fn state_dir() -> Option<PathBuf> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["broker"] {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+        return match clipstore::controller::run(&runtime) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("cellward-clipboard: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let Some(dir) = state_dir() else {
         eprintln!("cellward-clip: нет $HOME");
         return ExitCode::from(1);
@@ -298,6 +310,64 @@ impl Store {
             }
         };
         match words.as_slice() {
+            ["instances"] => {
+                let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") else {
+                    return error(&"нет каталога сеанса");
+                };
+                match clipstore::clipboard_endpoint::list(Path::new(&runtime)) {
+                    Ok(instances) => Reply::Text(
+                        instances
+                            .into_iter()
+                            .map(|(id, history)| format!("{id}\t{history}\n"))
+                            .collect(),
+                    ),
+                    Err(e) => error(&e),
+                }
+            }
+            ["copy-to", name, id, instance] => {
+                let Ok(id) = id.parse::<u64>() else {
+                    return error(&"не номер");
+                };
+                let mut entry = match self.entry(name, id) {
+                    Ok(entry) => entry,
+                    Err(e) => return error(&e),
+                };
+                if name.starts_with("@secrets:") {
+                    entry.contents.push(Content {
+                        mime: recorder::SECRET_HINT.into(),
+                        data: b"secret".to_vec(),
+                    });
+                }
+                entry.contents.push(Content {
+                    mime: clipstore::private_history::RESTORED.into(),
+                    data: Vec::new(),
+                });
+                let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") else {
+                    return error(&"нет каталога сеанса");
+                };
+                let bound =
+                    match clipstore::clipboard_endpoint::lookup(Path::new(&runtime), instance) {
+                        Ok(bound) => bound,
+                        Err(e) => return error(&e),
+                    };
+                let mut client = match clipstore::clipboard_client::Client::new(bound.data) {
+                    Ok(client) => client,
+                    Err(e) => return error(&e),
+                };
+                let contents: Vec<_> = entry
+                    .contents
+                    .iter()
+                    .map(|c| (c.mime.as_str(), c.data.as_slice()))
+                    .collect();
+                match clipstore::private_history::exchange(
+                    &mut client,
+                    clipstore::clipboard_client::Request::Set(&contents),
+                ) {
+                    Ok(clipstore::clipboard_client::Reply::Set(_)) => Reply::Text("ok\n".into()),
+                    Ok(_) => error(&"контейнер не принял буфер"),
+                    Err(e) => error(&e),
+                }
+            }
             ["histories"] => Reply::Text(self.names().iter().map(|n| format!("{n}\n")).collect()),
             ["list", name, n] => {
                 let n = n.parse().unwrap_or(20).min(protocol::MAX_LIMIT);
@@ -550,24 +620,7 @@ enum Reply {
 /// `select` hands back the contents to make the selection.
 fn serve(store: &mut Store, mut stream: std::os::unix::net::UnixStream) -> Option<Vec<Content>> {
     use std::io::{BufRead, Write};
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: u32::MAX,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: a ucred of the length given.
-    let got = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&mut cred as *mut libc::ucred).cast(),
-            &mut len,
-        )
-    };
-    // SAFETY: getuid takes nothing.
-    if got != 0 || cred.uid != unsafe { libc::getuid() } {
+    if !clipstore::clipboard_endpoint::host_peer(&stream) {
         return None;
     }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
@@ -1028,9 +1081,29 @@ fn daemon(dir: &Path) -> ExitCode {
         key,
         open: HashMap::new(),
     };
+    let private_history = clipstore::private_history::start(&runtime);
     tray::start();
     eprintln!("cellward-clip: пишу историю в {}", dir.display());
     loop {
+        while let Ok(entry) = private_history.try_recv() {
+            let contents: Vec<_> = entry
+                .contents
+                .into_iter()
+                .map(|(mime, bytes)| (mime, bytes.as_slice().to_vec()))
+                .collect();
+            let preview = recorder::preview(&contents);
+            store.keep(
+                &entry.history,
+                NewEntry {
+                    copied_at: now_ms(),
+                    preview,
+                    contents: contents
+                        .into_iter()
+                        .map(|(mime, data)| Content { mime, data })
+                        .collect(),
+                },
+            );
+        }
         // The compositor's events and the questions, whichever comes.
         if conn.flush().is_err() || queue.dispatch_pending(&mut app).is_err() {
             eprintln!("cellward-clip: композитор закрыл соединение");
@@ -1050,7 +1123,7 @@ fn daemon(dir: &Path) -> ExitCode {
                 },
             ];
             // SAFETY: two pollfds.
-            unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+            unsafe { libc::poll(fds.as_mut_ptr(), 2, 100) };
             if fds[0].revents != 0 {
                 if guard.read().is_err() {
                     eprintln!("cellward-clip: композитор закрыл соединение");

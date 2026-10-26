@@ -97,6 +97,10 @@ pub mod broker_transport;
 /// Nonblocking FD client; graphic adapters are still a separate integration step.
 #[path = "../../shared/clipboard_client.rs"]
 pub mod clipboard_client;
+#[path = "../../shared/clipboard_endpoint.rs"]
+pub mod clipboard_endpoint;
+pub mod controller;
+pub mod private_history;
 /// What the recorder decides of a selection (`cellward-clip daemon`).
 pub mod recorder;
 /// History paths protected by the container mount boundary and their migration.

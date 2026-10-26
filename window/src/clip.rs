@@ -55,6 +55,20 @@ const LINE: f32 = 20.0;
 const MAX_THUMB_SOURCE: u64 = 32 << 20;
 const TYPE_MODES: [TypeMode; 2] = [TypeMode::Unicode, TypeMode::Keycodes];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardTarget {
+    Host,
+    Instance(String),
+}
+impl std::fmt::Display for ClipboardTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host => f.write_str("Рабочий стол (хост, общий буфер)"),
+            Self::Instance(id) => write!(f, "Контейнер: {id}"),
+        }
+    }
+}
+
 /// Which moments a date filter is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DateOf {
@@ -195,6 +209,8 @@ pub enum Msg {
     MoveAsk(u64),
     Histories(String, Result<Vec<String>, String>),
     Tabs(Result<Vec<String>, String>),
+    Targets(Result<Vec<ClipboardTarget>, String>),
+    Target(ClipboardTarget),
     Switch(String),
     Shelf(bool),
     Secrets,
@@ -271,6 +287,8 @@ pub struct Clip {
     /// scoped to its launch and cannot silently browse another container.
     manager: bool,
     tabs: Vec<String>,
+    targets: Vec<ClipboardTarget>,
+    target: ClipboardTarget,
     favorites: bool,
     secrets: bool,
     /// A text's lines shown before «показать целиком», and an image's
@@ -549,6 +567,8 @@ impl Clip {
             history,
             manager: false,
             tabs: Vec::new(),
+            targets: vec![ClipboardTarget::Host],
+            target: ClipboardTarget::Host,
             favorites: false,
             secrets: false,
             lines: PREVIEW_LINES,
@@ -676,6 +696,39 @@ impl Clip {
             }),
             |r| Msg::Tabs(r.unwrap_or_else(|| Err("служба истории не ответила".to_owned()))),
         )
+    }
+
+    fn load_targets(&self) -> Task<Msg> {
+        let socket = self.socket.clone();
+        Task::perform(
+            clipd::off_thread(move || {
+                let answer = clipd::ask_text(&socket, "instances").map_err(|e| e.text())?;
+                if answer.starts_with("error\t") {
+                    return Err(answer);
+                }
+                let mut targets = vec![ClipboardTarget::Host];
+                for line in answer.lines() {
+                    let (id, _) = line.split_once('\t').ok_or("неверный список контейнеров")?;
+                    if id.is_empty() || id.len() > 512 || id.chars().any(char::is_control) {
+                        return Err("неверное имя контейнера".to_owned());
+                    }
+                    targets.push(ClipboardTarget::Instance(id.to_owned()));
+                }
+                Ok(targets)
+            }),
+            |r| Msg::Targets(r.unwrap_or_else(|| Err("служба не ответила".into()))),
+        )
+    }
+
+    fn copy_request(&self, id: u64) -> String {
+        match &self.target {
+            ClipboardTarget::Host => clipd::copy_request(&self.active_history(), id),
+            ClipboardTarget::Instance(instance) => format!(
+                "copy-to\t{}\t{id}\t{}",
+                clipd::encode(&self.active_history()),
+                instance
+            ),
+        }
     }
 
     /// Ask the daemon `request` expecting `ok[⇥value]`.
@@ -868,11 +921,11 @@ impl Clip {
             Msg::CopyForPaste(id) => {
                 // Password export keeps its separate confirmation path.
                 if self.can_copy_for_paste(id) {
-                    return self.ok(clipd::copy_request(&self.active_history(), id), Msg::CopiedForPaste);
+                    return self.ok(self.copy_request(id), Msg::CopiedForPaste);
                 }
             }
             Msg::CopiedForPaste(result) => match result {
-                Ok(_) => self.notice = Some("Запись в активном буфере рабочего стола. Вернитесь в нужное окно и нажмите Ctrl+V (в терминале — Ctrl+Shift+V).".into()),
+                Ok(_) => self.notice = Some(format!("Запись скопирована: {}. Для вставки нажмите Ctrl+V (в терминале — Ctrl+Shift+V).", self.target)),
                 Err(why) => self.error = Some(why),
             },
             Msg::Whole(id) => {
@@ -1003,7 +1056,15 @@ impl Clip {
                 self.builder_open = false;
                 return self.switch_shelf();
             }
-            Msg::Refresh => return Task::batch([self.search(), self.load_tabs()]),
+            Msg::Refresh => return Task::batch([self.search(), self.load_tabs(), self.load_targets()]),
+            Msg::Targets(result) => match result {
+                Ok(targets) => self.targets = targets,
+                Err(why) => self.error = Some(why),
+            },
+            Msg::Target(target) => {
+                self.target = target;
+                self.copying_secret = None;
+            }
             Msg::Favorite(id) => {
                 if self.favorites || self.secrets || self.entry(id).is_none() {
                     return Task::none();
@@ -1062,14 +1123,14 @@ impl Clip {
                     return Task::none();
                 }
                 return self.ok(
-                    clipd::copy_request(&self.active_history(), id),
+                    self.copy_request(id),
                     Msg::CopiedSecret,
                 );
             }
             Msg::CopiedSecret(result) => {
                 self.copying_secret = None;
                 match result {
-                    Ok(_) => self.notice = Some("Пароль помещён в общий буфер рабочего стола (хост), без автоматической вставки.".to_owned()),
+                    Ok(_) => self.notice = Some(format!("Пароль скопирован: {}. Автоматической вставки нет.", self.target)),
                     Err(why) => self.error = Some(why),
                 }
             }
@@ -1645,8 +1706,17 @@ impl Clip {
             page = page.push(self.view_typing());
         }
         if !self.secrets {
-            page = page.push(text("«Скопировать в буфер рабочего стола» заменяет общий активный буфер, видимый менеджерам вроде CopyQ. Это пока не приватный буфер контейнера; автоматической вставки нет.").size(12));
+            page = page.push(text("Копирование заменяет только выбранный активный буфер. Буфер хоста общий и виден CopyQ. Переключение вкладок ничего не копирует.").size(12));
         }
+        page = page.push(
+            row![
+                text("Копировать в:"),
+                pick_list(self.targets.as_slice(), Some(&self.target), Msg::Target),
+                button("Обновить список").on_press(Msg::Refresh),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
         if let Some(why) = &self.error {
             page = page.push(
                 row![
@@ -1986,9 +2056,10 @@ impl Clip {
         }
         if self.copying_secret == Some(e.id) {
             return row![
-                text(
-                    "Пароль попадёт в общий буфер рабочего стола (хост), доступный CopyQ и другим приложениям хоста. Это не приватный буфер контейнера. Копировать?"
-                )
+                text(format!(
+                    "Пароль станет доступен приложениям выбранного буфера: {}. Копировать?",
+                    self.target
+                ))
                 .size(13),
                 button(text("Копировать пароль").size(13))
                     .style(button::danger)
@@ -2087,7 +2158,7 @@ impl Clip {
         let mut line = row![].spacing(8).align_y(Alignment::Center);
         if !self.secrets {
             line = line.push(
-                button(text("Скопировать в буфер рабочего стола").size(13)).on_press_maybe(
+                button(text("Скопировать в выбранный буфер").size(13)).on_press_maybe(
                     self.can_copy_for_paste(e.id)
                         .then_some(Msg::CopyForPaste(e.id)),
                 ),
@@ -2112,7 +2183,7 @@ impl Clip {
         }
         if self.secrets {
             line = line.push(
-                button(text("Скопировать пароль в буфер рабочего стола…").size(13))
+                button(text("Скопировать пароль в выбранный буфер…").size(13))
                     .style(button::secondary)
                     .on_press_maybe((!self.type_busy).then_some(Msg::CopySecretAsk(e.id))),
             );
@@ -2597,6 +2668,7 @@ fn clip_view(clip: &Clip, _window: iced::window::Id) -> Element<'_, Msg> {
 }
 
 pub fn run(args: &[String]) -> iced::Result {
+    let mut clipboard_instance = None;
     let mut history = None;
     let mut manager = false;
     let mut launch = None;
@@ -2612,6 +2684,7 @@ pub fn run(args: &[String]) -> iced::Result {
         let value = rest.next().cloned().unwrap_or_default();
         match flag.as_str() {
             "--history" if !value.is_empty() => history = Some(value),
+            "--clipboard-instance" if !value.is_empty() => clipboard_instance = Some(value),
             "--launch" => launch = value.parse::<u32>().ok(),
             "--title" if !value.is_empty() => title = Some(value),
             "--lines" => {
@@ -2649,6 +2722,10 @@ pub fn run(args: &[String]) -> iced::Result {
             let mut clip = Clip::new(history.clone(), can_paste, clipd::socket_path());
             clip.launch = launch;
             clip.manager = manager;
+            if let Some(instance) = &clipboard_instance {
+                clip.target = ClipboardTarget::Instance(instance.clone());
+                clip.targets.push(clip.target.clone());
+            }
             clip.lines = lines;
             clip.image_lines = image_lines;
             let first = clip.search();
@@ -2658,7 +2735,11 @@ pub fn run(args: &[String]) -> iced::Result {
                 Task::none()
             };
             let (_, open) = iced::window::open(clip_window_settings());
-            (clip, Task::batch([first, tabs, open.map(Msg::Opened)]))
+            let targets = clip.load_targets();
+            (
+                clip,
+                Task::batch([first, tabs, targets, open.map(Msg::Opened)]),
+            )
         },
         Clip::update,
         clip_view,
@@ -2692,6 +2773,26 @@ mod tests {
     }
 
     #[test]
+    fn copy_destination_is_explicit_and_independent_of_the_history_tab() {
+        let mut c = clip();
+        assert_eq!(c.copy_request(7), "copy\tmain\t7");
+        let _ = c.update(Msg::Target(ClipboardTarget::Instance("app-browser".into())));
+        assert_eq!(c.copy_request(7), "copy-to\tmain\t7\tapp-browser");
+        c.history = "another-history".into();
+        assert_eq!(
+            c.copy_request(7),
+            "copy-to\tanother-history\t7\tapp-browser"
+        );
+        c.secrets = true;
+        c.copying_secret = Some(7);
+        let _ = c.update(Msg::Target(ClipboardTarget::Host));
+        assert!(
+            c.copying_secret.is_none(),
+            "changing destination invalidates password confirmation"
+        );
+    }
+
+    #[test]
     fn tray_copy_supports_images_but_never_bypasses_password_confirmation() {
         let mut c = clip();
         c.manager = true;
@@ -2701,9 +2802,15 @@ mod tests {
         c.entries.push(image);
         assert!(c.can_copy_for_paste(1));
         c.manager = false;
-        assert!(c.can_copy_for_paste(1), "frame history must also copy without pasting");
+        assert!(
+            c.can_copy_for_paste(1),
+            "frame history must also copy without pasting"
+        );
         c.type_enabled = true;
-        assert!(c.can_copy_for_paste(1), "typing mode must not remove the separate copy action");
+        assert!(
+            c.can_copy_for_paste(1),
+            "typing mode must not remove the separate copy action"
+        );
         assert!(!c.can_copy_for_paste(99));
         c.secrets = true;
         assert!(!c.can_copy_for_paste(1));

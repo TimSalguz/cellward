@@ -2174,6 +2174,33 @@ in
   # поэтому урезана тем, что юниту пользователя доступно: сеть ей не
   # нужна совсем, только сокеты Unix (композитор), своя папка и ничего
   # исполняемого в памяти.
+  # Active selections are isolated even when recording history is disabled.
+  # Keep the host namespaces: the controller authenticates registration peers
+  # against its own user, pid and mount namespace identities.
+  systemd.user.services.cellward-clipboard = {
+    Unit = {
+      Description = "Cellward private active clipboards";
+      PartOf = [ "graphical-session.target" ];
+      After = [ "graphical-session.target" ];
+    };
+    Service = {
+      ExecStart = "${cellward-clip}/bin/cellward-clip broker";
+      Restart = "on-failure";
+      RestartSec = 1;
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+      NoNewPrivileges = true;
+      LockPersonality = true;
+      MemoryDenyWriteExecute = true;
+      RestrictRealtime = true;
+      RestrictNamespaces = true;
+      SystemCallArchitectures = "native";
+      UMask = "0077";
+      LimitNOFILE = 2048;
+      LimitCORE = 0;
+    };
+    Install.WantedBy = [ "graphical-session.target" ];
+  };
+
   systemd.user.services.cellward-clip = lib.mkIf cfg.clipboard.history {
     Unit = {
       Description = "История буфера обмена по контейнерам";

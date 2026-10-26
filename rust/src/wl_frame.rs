@@ -6670,6 +6670,7 @@ impl ZwpTabletToolV2Handler for Tool {
 struct DataDeviceManager;
 
 mod clipboard_relay;
+pub(crate) mod private_clipboard;
 
 /// Clipboard policy must apply even when no cosmetic frame is drawn.
 pub(crate) fn watch_clipboard(id: &Rc<dyn Object>, unframed: bool) {
@@ -6687,7 +6688,7 @@ impl WlDataDeviceManagerHandler for DataDeviceManager {
         slf.send_create_data_source(id);
         id.set_handler(Source::default());
         // What this program copies says whose it is (`clip`).
-        if let Some(mark) = crate::clip::mark() {
+        if let Some(mark) = crate::clip::mark().filter(|_| !private_clipboard::enabled()) {
             id.send_offer(&mark);
         }
     }
@@ -6700,7 +6701,11 @@ impl WlDataDeviceManagerHandler for DataDeviceManager {
     ) {
         slf.send_get_data_device(id, seat);
         id.set_handler(DataDevice::default());
-        clipboard_relay::register(id);
+        if private_clipboard::enabled() {
+            private_clipboard::register(id);
+        } else {
+            clipboard_relay::register(id);
+        }
     }
 }
 
@@ -6719,6 +6724,29 @@ impl WlDataDeviceHandler for DataDevice {
         source: Option<&Rc<WlDataSource>>,
         serial: u32,
     ) {
+        if private_clipboard::enabled() {
+            let selected = source.and_then(|s| {
+                s.try_get_handler_ref::<Source>().ok().map(|h| {
+                    (
+                        private_clipboard::SourceRef::Clipboard(s.clone(), h.alive.clone()),
+                        h.types.clone(),
+                        h.relay_overflow,
+                    )
+                })
+            });
+            if source.is_some() && selected.is_none() {
+                return;
+            }
+            let (source, types, overflow) =
+                selected.map_or((None, Vec::new(), false), |(s, t, o)| (Some(s), t, o));
+            private_clipboard::set(
+                crate::clipboard_client::Selection::Clipboard,
+                source,
+                types,
+                overflow,
+            );
+            return;
+        }
         // Reserve zero on this private connection for launch-local copies.
         // Satellite's fallback must never export them to the compositor.
         if serial == 0 {
@@ -6742,7 +6770,20 @@ impl WlDataDeviceHandler for DataDevice {
             // A drag is the person's own act: what it carries is theirs to
             // drop, whoever's it is.
             if let Some(offer) = id {
-                if let Ok(info) = offer.try_get_handler_ref::<Offer>() {
+                if let Ok(mut info) = offer.try_get_handler_mut::<Offer>() {
+                    if private_clipboard::enabled() && !info.announced {
+                        slf.send_data_offer(offer);
+                        for mime in &info.types {
+                            offer.send_offer(mime);
+                        }
+                        if let Some(actions) = info.source_actions {
+                            offer.send_source_actions(actions);
+                        }
+                        if let Some(action) = info.action {
+                            offer.send_action(action);
+                        }
+                        info.announced = true;
+                    }
                     crate::clip::dragged(info.id);
                 }
             }
@@ -6770,10 +6811,15 @@ impl WlDataDeviceHandler for DataDevice {
 
     fn handle_data_offer(&mut self, slf: &Rc<WlDataDevice>, id: &Rc<WlDataOffer>) {
         id.set_handler(Offer::default());
-        slf.send_data_offer(id);
+        if !private_clipboard::enabled() {
+            slf.send_data_offer(id);
+        }
     }
 
     fn handle_selection(&mut self, slf: &Rc<WlDataDevice>, id: Option<&Rc<WlDataOffer>>) {
+        if private_clipboard::enabled() {
+            return;
+        }
         if clipboard_relay::selected(slf, id) {
             return;
         }
@@ -6838,6 +6884,11 @@ struct Offer {
     own: bool,
     types: Vec<String>,
     relay_overflow: bool,
+    announced: bool,
+    source_actions:
+        Option<wl_proxy::protocols::wayland::wl_data_device_manager::WlDataDeviceManagerDndAction>,
+    action:
+        Option<wl_proxy::protocols::wayland::wl_data_device_manager::WlDataDeviceManagerDndAction>,
 }
 
 impl Default for Offer {
@@ -6847,11 +6898,34 @@ impl Default for Offer {
             own: false,
             types: Vec::new(),
             relay_overflow: false,
+            announced: !private_clipboard::enabled(),
+            source_actions: None,
+            action: None,
         }
     }
 }
 
 impl WlDataOfferHandler for Offer {
+    fn handle_source_actions(
+        &mut self,
+        slf: &Rc<WlDataOffer>,
+        actions: wl_proxy::protocols::wayland::wl_data_device_manager::WlDataDeviceManagerDndAction,
+    ) {
+        self.source_actions = Some(actions);
+        if self.announced {
+            slf.send_source_actions(actions);
+        }
+    }
+    fn handle_action(
+        &mut self,
+        slf: &Rc<WlDataOffer>,
+        action: wl_proxy::protocols::wayland::wl_data_device_manager::WlDataDeviceManagerDndAction,
+    ) {
+        self.action = Some(action);
+        if self.announced {
+            slf.send_action(action);
+        }
+    }
     fn handle_offer(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str) {
         if crate::clip::is_mark(mime_type) {
             self.own |= crate::clip::is_own(mime_type);
@@ -6861,7 +6935,9 @@ impl WlDataOfferHandler for Offer {
             return;
         }
         clipboard_relay::keep_type(&mut self.types, &mut self.relay_overflow, mime_type);
-        slf.send_offer(mime_type);
+        if self.announced {
+            slf.send_offer(mime_type);
+        }
     }
 
     fn handle_receive(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str, fd: &Rc<OwnedFd>) {
@@ -6880,8 +6956,8 @@ impl ZwpPrimarySelectionDeviceManagerV1Handler for PrimaryManager {
         id: &Rc<ZwpPrimarySelectionSourceV1>,
     ) {
         slf.send_create_source(id);
-        id.set_handler(PrimarySource);
-        if let Some(mark) = crate::clip::mark() {
+        id.set_handler(PrimarySource(Source::default()));
+        if let Some(mark) = crate::clip::mark().filter(|_| !private_clipboard::enabled()) {
             id.send_offer(&mark);
         }
     }
@@ -6894,27 +6970,81 @@ impl ZwpPrimarySelectionDeviceManagerV1Handler for PrimaryManager {
     ) {
         slf.send_get_device(id, seat);
         id.set_handler(PrimaryDevice);
+        if private_clipboard::enabled() {
+            private_clipboard::register_primary(id);
+        }
     }
 }
 
 struct PrimaryDevice;
 
 impl ZwpPrimarySelectionDeviceV1Handler for PrimaryDevice {
+    fn handle_set_selection(
+        &mut self,
+        slf: &Rc<ZwpPrimarySelectionDeviceV1>,
+        source: Option<&Rc<ZwpPrimarySelectionSourceV1>>,
+        serial: u32,
+    ) {
+        if private_clipboard::enabled() {
+            let selected = source.and_then(|s| {
+                s.try_get_handler_ref::<PrimarySource>().ok().map(|h| {
+                    (
+                        private_clipboard::SourceRef::Primary(s.clone(), h.0.alive.clone()),
+                        h.0.types.clone(),
+                        h.0.relay_overflow,
+                    )
+                })
+            });
+            if source.is_some() && selected.is_none() {
+                return;
+            }
+            let (source, types, overflow) =
+                selected.map_or((None, Vec::new(), false), |(s, t, o)| (Some(s), t, o));
+            private_clipboard::set(
+                crate::clipboard_client::Selection::Primary,
+                source,
+                types,
+                overflow,
+            );
+        } else {
+            slf.send_set_selection(source, serial);
+        }
+    }
+    fn handle_selection(
+        &mut self,
+        slf: &Rc<ZwpPrimarySelectionDeviceV1>,
+        offer: Option<&Rc<ZwpPrimarySelectionOfferV1>>,
+    ) {
+        if !private_clipboard::enabled() {
+            slf.send_selection(offer);
+        }
+    }
     fn handle_data_offer(
         &mut self,
         slf: &Rc<ZwpPrimarySelectionDeviceV1>,
         offer: &Rc<ZwpPrimarySelectionOfferV1>,
     ) {
         offer.set_handler(PrimaryOffer::default());
-        slf.send_data_offer(offer);
+        if !private_clipboard::enabled() {
+            slf.send_data_offer(offer);
+        }
     }
 }
 
-struct PrimarySource;
+struct PrimarySource(Source);
 
 impl ZwpPrimarySelectionSourceV1Handler for PrimarySource {
+    fn handle_destroy(&mut self, slf: &Rc<ZwpPrimarySelectionSourceV1>) {
+        self.0.alive.set(false);
+        slf.send_destroy();
+    }
+    fn handle_cancelled(&mut self, slf: &Rc<ZwpPrimarySelectionSourceV1>) {
+        self.0.alive.set(false);
+        slf.send_cancelled();
+    }
     fn handle_offer(&mut self, slf: &Rc<ZwpPrimarySelectionSourceV1>, mime_type: &str) {
         if !crate::clip::is_mark(mime_type) {
+            clipboard_relay::keep_type(&mut self.0.types, &mut self.0.relay_overflow, mime_type);
             slf.send_offer(mime_type);
         }
     }
@@ -6951,7 +7081,9 @@ impl ZwpPrimarySelectionOfferV1Handler for PrimaryOffer {
             self.own |= crate::clip::is_own(mime_type);
             return;
         }
-        slf.send_offer(mime_type);
+        if !private_clipboard::enabled() {
+            slf.send_offer(mime_type);
+        }
     }
 
     fn handle_receive(

@@ -983,7 +983,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // handed the unrestricted one. Into a zone always — the allowlist and
     // `wayland-sandbox off` are for unconfined launches only, where the
     // compositor's own socket is there anyway.
-    let compositor_wrap: Option<Vec<OsString>> = (zone != UNCONFINED
+    let mut compositor_wrap: Option<Vec<OsString>> = (zone != UNCONFINED
         || wayland_sandbox_wanted(tools, &appbin, program_word(&selection.cmd), unasked))
     .then(|| {
         let app = if appbin.is_empty() {
@@ -1005,7 +1005,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             "--zone".into(),
             dir.into(),
         ];
-        if !wayland_proxy_wanted(tools, &appbin, unasked) {
+        if zone == UNCONFINED && !wayland_proxy_wanted(tools, &appbin, unasked) {
             wrap.push("--no-proxy".into());
         } else if zone != UNCONFINED {
             // The zone's frame around its windows (docs/WINDOW-FRAME.md
@@ -1628,6 +1628,50 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         return 1;
     }
     let through_wl_sandbox = compositor_wrap.is_some();
+    // Bind the active clipboard to the actual, now-ready holder. Its network
+    // and history name are not clipboard identities. Headless launches have
+    // no compositor/selection to isolate.
+    if has_display() {
+        if let (Some(id), Some(wrapped)) = (&instance_id, &mut compositor_wrap) {
+            let owner = crate::instance::up(&tools.state, id)
+                .and_then(|pid| crate::sys::process_stamp(pid).map(|stamp| (pid, stamp)));
+            let Some((pid, stamp)) = owner else {
+                refuse(
+                    tools,
+                    "Контейнер остановился до подключения приватного буфера обмена",
+                );
+                return EXIT_NOT_STARTED;
+            };
+            let runtime = crate::broker::runtime_dir();
+            if !crate::clipboard_endpoint::path(&runtime).exists() {
+                let started = Command::new(&tools.systemctl)
+                    .args(["--user", "start", "cellward-clipboard.service"])
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if !started {
+                    refuse(
+                        tools,
+                        "Не запущена служба приватных буферов cellward-clipboard.service",
+                    );
+                    return EXIT_NOT_STARTED;
+                }
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while !crate::clipboard_endpoint::path(&runtime).exists()
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            wrapped.splice(
+                wrapped.len() - 1..wrapped.len() - 1,
+                [
+                    OsString::from("--clipboard-scope"),
+                    OsString::from(id),
+                    OsString::from(format!("{pid}:{stamp}")),
+                ],
+            );
+        }
+    }
     let exec = match compositor_wrap {
         Some(mut wrapped) => {
             wrapped.extend(exec);

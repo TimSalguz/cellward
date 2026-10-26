@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 const MAX_FRAME: usize = crate::MAX_ENTRY + 32 * 1024;
 const MAX_IO: usize = 128 << 20;
 const MAX_INSTANCE_IO: usize = MAX_FRAME + QUANTUM;
-const MAX_PEERS: usize = 128;
+const MAX_PEERS: usize = 512;
 const QUANTUM: usize = 64 << 10;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -61,16 +61,22 @@ impl Transport {
 
     /// Trusted supervisor operation; never a command on the returned FD.
     pub fn connect(&mut self, instance: Instance) -> io::Result<UnixStream> {
+        let (server, client) = UnixStream::pair()?;
+        self.attach(instance, server)?;
+        Ok(client)
+    }
+
+    /// Trusted controller only: the stream has completed authenticated binding.
+    pub fn attach(&mut self, instance: Instance, server: UnixStream) -> io::Result<()> {
         self.broker
             .types(instance, Selection::Clipboard)
             .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "unknown instance"))?;
         if self.peers.len() >= MAX_PEERS {
             return Err(io::Error::other("too many active-selection peers"));
         }
-        let (server, client) = UnixStream::pair()?;
         server.set_nonblocking(true)?;
         self.peers.push(Peer::new(server, instance));
-        Ok(client)
+        Ok(())
     }
 
     pub fn remove(&mut self, instance: Instance) -> Result<(), Error> {
@@ -96,6 +102,22 @@ impl Transport {
 
     pub fn next_deadline(&self) -> Option<Instant> {
         self.peers.iter().filter_map(|peer| peer.deadline).min()
+    }
+
+    pub fn contains_peer(&self, fd: std::os::fd::RawFd) -> bool {
+        use std::os::fd::AsRawFd;
+        self.peers.iter().any(|peer| peer.stream.as_raw_fd() == fd)
+    }
+
+    pub fn revisions(&self, instance: Instance) -> Result<[u64; 2], Error> {
+        Ok([
+            self.broker
+                .types(instance, Selection::Clipboard)?
+                .map_or(0, |(r, _)| r.wire()),
+            self.broker
+                .types(instance, Selection::Primary)?
+                .map_or(0, |(r, _)| r.wire()),
+        ])
     }
 
     /// Host UI operation ONLY, after explicit user approval. The wire

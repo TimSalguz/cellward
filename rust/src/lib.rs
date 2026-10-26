@@ -111,6 +111,8 @@ pub mod cli;
 pub mod clip;
 #[path = "../../shared/clipboard_client.rs"]
 pub mod clipboard_client;
+#[path = "../../shared/clipboard_endpoint.rs"]
+pub mod clipboard_endpoint;
 pub mod completion;
 pub mod config;
 pub mod connect;
