@@ -29,6 +29,7 @@ rustPlatform.buildRustPackage {
       ./rust/tests
       ./shared/i18n.rs
       ./shared/type_input.rs
+      ./shared/clipboard_client.rs
     ];
   };
   sourceRoot = "source/rust";

@@ -54,6 +54,44 @@ approximately 0.5 GiB sampled process-group RSS.
 
 ## Integration still required
 
+### FD client checkpoint, 2026-10-26
+
+`shared/clipboard_client.rs` is now compiled by both the core and clipboard
+crates. It accepts only an already-scoped Unix stream: no instance name,
+registration command, socket discovery or host fallback. It supports typed
+CLIPBOARD/PRIMARY types/set/read/clear requests, bounded nonblocking I/O,
+complete reply validation, one in-flight operation and a five-second deadline.
+Protocol/transport failure closes the endpoint. A valid broker refusal is
+returned explicitly, never translated to a host read. Payload buffers erase
+their entire capacity and are freed after exchange; Debug redacts payloads.
+
+An interoperability test uses the real server transport and client, including
+a 300 KB binary image plus text, another launch in the same scope, a foreign
+scope, stale revisions and independent PRIMARY. Fragmented replies, malformed
+lengths, timeouts and request validation are also tested. This is **not** the
+Wayland/X11 adapter and does not yet change active desktop selections.
+
+The manager's interim copy action is now available from frame history as well
+as the tray, including images and while character-typing controls are shown.
+It explicitly says **desktop clipboard** because it still exports to the
+shared selection. Password confirmation remains separate. This is not the
+final “copy into the selected container” operation.
+
+The final manager UI must identify a **live instance**, not infer it from a
+history tab: a history can outlive its instance or aggregate several instances.
+Copy to that instance must not paste into a window or publish to the host.
+Host export/import must be a separate explicit action. Opening/switching tabs
+must never change any selection; absent instances must not start implicitly.
+
+Verification of this checkpoint: 1112 core tests, 51 clipboard-library tests,
+4 clipboard-command tests and 72 window tests passed. Production Nix builds
+of the core/window integration and clipboard package passed. Headless Wayland
+smokes from tray and frame history click Copy, verify the explicit `copy`
+request without target insertion or closing, then exercise character input
+and theme preservation. The fake history daemon used by these UI smokes does
+not implement the actual compositor selection; daemon unit tests separately
+verify preserving image/text MIME payloads without recording a paste.
+
 1. Run a hardened host controller independently of `clipboard.history`. Its
    registration/UI endpoint must be hidden from containers; same Unix uid
    alone is not proof of a trusted host supervisor. Mint scoped application
@@ -75,9 +113,9 @@ approximately 0.5 GiB sampled process-group RSS.
    recording preferences. Active selections must work when history is off.
 6. Connect the host manager to explicit import/export/transfer operations;
    do not make tab switching or opening a window publish any selection.
-   Default policy pending the user's choice: ordinary Ctrl+V uses only the
-   container's clipboard, with host imports through the manager, versus an
-   additional explicit host-import shortcut. No implicit focus-based import.
+   Intended policy: ordinary Ctrl+V uses only the container's clipboard, with
+   host imports through the manager. An additional explicit host-import
+   shortcut is a separate future convenience. No implicit focus-based import.
 7. Verify two real instances, multiple launches per instance, host CopyQ-like
    data-control observer, restart/exit, history on/off, both selections and
    text/images. Neither application clipboard writes nor focus changes may

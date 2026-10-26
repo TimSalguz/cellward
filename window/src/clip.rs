@@ -772,7 +772,7 @@ impl Clip {
     }
 
     fn can_copy_for_paste(&self, id: u64) -> bool {
-        self.manager && !self.secrets && !self.type_busy && self.entry(id).is_some()
+        !self.secrets && !self.type_busy && self.entry(id).is_some()
     }
 
     fn paste(&self, id: u64) {
@@ -868,7 +868,7 @@ impl Clip {
             Msg::CopyForPaste(id) => {
                 // Password export keeps its separate confirmation path.
                 if self.can_copy_for_paste(id) {
-                    return self.ok(clipd::select_request(&self.active_history(), id), Msg::CopiedForPaste);
+                    return self.ok(clipd::copy_request(&self.active_history(), id), Msg::CopiedForPaste);
                 }
             }
             Msg::CopiedForPaste(result) => match result {
@@ -1053,23 +1053,23 @@ impl Clip {
             }
             Msg::Secreted(_, _, _) => {}
             Msg::CopySecretAsk(id) => {
-                if self.secrets && self.entry(id).is_some() && !self.can_paste {
+                if self.secrets && self.entry(id).is_some() && !self.type_busy {
                     self.copying_secret = Some(id);
                 }
             }
             Msg::CopySecretYes(id) => {
-                if self.copying_secret != Some(id) || !self.secrets || self.can_paste {
+                if self.copying_secret != Some(id) || !self.secrets || self.type_busy || self.entry(id).is_none() {
                     return Task::none();
                 }
                 return self.ok(
-                    clipd::select_request(&self.active_history(), id),
+                    clipd::copy_request(&self.active_history(), id),
                     Msg::CopiedSecret,
                 );
             }
             Msg::CopiedSecret(result) => {
                 self.copying_secret = None;
                 match result {
-                    Ok(_) => self.notice = Some("Пароль помещён в текущий буфер обмена".to_owned()),
+                    Ok(_) => self.notice = Some("Пароль помещён в общий буфер рабочего стола (хост), без автоматической вставки.".to_owned()),
                     Err(why) => self.error = Some(why),
                 }
             }
@@ -1644,8 +1644,8 @@ impl Clip {
         if self.type_enabled {
             page = page.push(self.view_typing());
         }
-        if self.manager && !self.type_enabled {
-            page = page.push(text("«Копировать для вставки» использует общий активный буфер рабочего стола, видимый менеджерам вроде CopyQ. Это не приватный буфер контейнера.").size(12));
+        if !self.secrets {
+            page = page.push(text("«Скопировать в буфер рабочего стола» заменяет общий активный буфер, видимый менеджерам вроде CopyQ. Это пока не приватный буфер контейнера; автоматической вставки нет.").size(12));
         }
         if let Some(why) = &self.error {
             page = page.push(
@@ -1987,7 +1987,7 @@ impl Clip {
         if self.copying_secret == Some(e.id) {
             return row![
                 text(
-                    "Пароль станет доступен приложениям с доступом к текущему буферу. Копировать?"
+                    "Пароль попадёт в общий буфер рабочего стола (хост), доступный CopyQ и другим приложениям хоста. Это не приватный буфер контейнера. Копировать?"
                 )
                 .size(13),
                 button(text("Копировать пароль").size(13))
@@ -2085,9 +2085,9 @@ impl Clip {
             }
         }
         let mut line = row![].spacing(8).align_y(Alignment::Center);
-        if self.manager && !self.type_enabled && !self.secrets {
+        if !self.secrets {
             line = line.push(
-                button(text("Копировать для вставки").size(13)).on_press_maybe(
+                button(text("Скопировать в буфер рабочего стола").size(13)).on_press_maybe(
                     self.can_copy_for_paste(e.id)
                         .then_some(Msg::CopyForPaste(e.id)),
                 ),
@@ -2110,11 +2110,11 @@ impl Clip {
                 ),
             );
         }
-        if self.secrets && !self.can_paste {
+        if self.secrets {
             line = line.push(
-                button(text("Копировать пароль…").size(13))
+                button(text("Скопировать пароль в буфер рабочего стола…").size(13))
                     .style(button::secondary)
-                    .on_press(Msg::CopySecretAsk(e.id)),
+                    .on_press_maybe((!self.type_busy).then_some(Msg::CopySecretAsk(e.id))),
             );
         }
         if !self.favorites && !self.secrets {
@@ -2700,12 +2700,33 @@ mod tests {
         image.types = vec![("image/png".into(), 100)];
         c.entries.push(image);
         assert!(c.can_copy_for_paste(1));
+        c.manager = false;
+        assert!(c.can_copy_for_paste(1), "frame history must also copy without pasting");
+        c.type_enabled = true;
+        assert!(c.can_copy_for_paste(1), "typing mode must not remove the separate copy action");
         assert!(!c.can_copy_for_paste(99));
         c.secrets = true;
         assert!(!c.can_copy_for_paste(1));
         c.secrets = false;
         c.type_busy = true;
         assert!(!c.can_copy_for_paste(1));
+    }
+
+    #[test]
+    fn frame_password_copy_requires_confirmation_even_when_paste_is_available() {
+        let mut c = clip();
+        c.secrets = true;
+        c.entries.push(entry(1, 10));
+        assert!(c.can_paste);
+        let _ = c.update(Msg::CopySecretYes(1));
+        assert_eq!(c.copying_secret, None);
+        let _ = c.update(Msg::CopySecretAsk(1));
+        assert_eq!(c.copying_secret, Some(1));
+        let _ = c.update(Msg::Cancel);
+        assert_eq!(c.copying_secret, None);
+        c.type_busy = true;
+        let _ = c.update(Msg::CopySecretAsk(1));
+        assert_eq!(c.copying_secret, None);
     }
 
     #[test]

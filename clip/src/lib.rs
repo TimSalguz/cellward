@@ -94,6 +94,9 @@ mod segment;
 pub mod broker;
 /// Scoped socket-pair transport for the active-selection model (not wired to UI yet).
 pub mod broker_transport;
+/// Nonblocking FD client; graphic adapters are still a separate integration step.
+#[path = "../../shared/clipboard_client.rs"]
+pub mod clipboard_client;
 /// What the recorder decides of a selection (`cellward-clip daemon`).
 pub mod recorder;
 /// History paths protected by the container mount boundary and their migration.

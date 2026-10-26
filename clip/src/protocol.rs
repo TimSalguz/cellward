@@ -19,6 +19,7 @@
 //! text/regex searching and ordinary moves of passwords are refused.
 //! delete⇥<history>⇥<id>                       ok
 //! select⇥<history>⇥<id>                       ok: it is the selection now
+//! copy⇥<history>⇥<id>                         same, without recording a paste
 //! ```
 //!
 //! Values are percent-encoded: `%`, tab, line feed and `=` as `%25`, `%09`,

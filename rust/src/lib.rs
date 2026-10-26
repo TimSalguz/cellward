@@ -109,6 +109,8 @@ pub mod camera;
 pub mod chain;
 pub mod cli;
 pub mod clip;
+#[path = "../../shared/clipboard_client.rs"]
+pub mod clipboard_client;
 pub mod completion;
 pub mod config;
 pub mod connect;

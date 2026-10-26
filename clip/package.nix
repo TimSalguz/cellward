@@ -12,13 +12,15 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
 
   src = lib.fileset.toSource {
-    root = ./.;
+    root = ../.;
     fileset = lib.fileset.unions [
       ./Cargo.toml
       ./Cargo.lock
       ./src
+      ../shared/clipboard_client.rs
     ];
   };
+  sourceRoot = "source/clip";
 
   cargoLock.lockFile = ./Cargo.lock;
 

@@ -260,8 +260,9 @@ pub fn move_secret_request(from: &str, id: u64, to: &str) -> String {
     format!("secret-move\t{}\t{id}\t{}", encode(from), encode(to))
 }
 
-pub fn select_request(history: &str, id: u64) -> String {
-    format!("select\t{}\t{id}", encode(history))
+/// Replace the active selection without recording an insertion into a window.
+pub fn copy_request(history: &str, id: u64) -> String {
+    format!("copy\t{}\t{id}", encode(history))
 }
 
 /// Why an answer did not come.

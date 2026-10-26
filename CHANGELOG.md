@@ -6,6 +6,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- History opened from a frame can explicitly copy regular entries and images
+  to the desktop clipboard without pasting or closing the manager. The action
+  also stays available with typing controls open. Its label/warning identifies
+  the shared desktop target; it is not private instance publication.
 - Rounded top frames keep buttons anchored to the window edge and clip their
   pixels to the arc. Their border, corner caps, title and buttons share one
   alpha image, removing overlapping top backgrounds exposed by opacity and
@@ -16,6 +20,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Its brief hold expires through the existing event-loop timer.
 
 ### Security
+- Add a bounded, nonblocking client for pre-scoped private-clipboard FDs and
+  test it against the real broker transport. This is adapter groundwork;
+  desktop clipboard isolation is not enabled by this change.
 - Strict launch-bound network ownership is now the default for new container
   instances. Missing prerequisites fail closed; only an explicit off selects
   legacy compatibility. Existing instances are not silently restarted.

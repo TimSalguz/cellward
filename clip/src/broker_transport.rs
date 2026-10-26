@@ -428,6 +428,109 @@ fn dispatch(broker: &mut Broker, instance: Instance, bytes: &[u8], limit: usize)
 mod tests {
     use super::*;
 
+    #[test]
+    fn proxy_client_interoperates_without_scope_names_or_host_selection() {
+        use crate::clipboard_client::{Client, Reply, Request, Selection as Which};
+        fn run(
+            server: &mut Transport,
+            client: &mut Client,
+            which: Which,
+            request: Request<'_>,
+        ) -> Reply {
+            client.start(which, request, Instant::now()).unwrap();
+            for _ in 0..2000 {
+                server.tick(Instant::now());
+                if let Some(reply) = client.tick(Instant::now()) {
+                    return reply.unwrap();
+                }
+            }
+            panic!("private clipboard exchange stalled")
+        }
+        let mut server = Transport::default();
+        let instance = server.register().unwrap();
+        let foreign = server.register().unwrap();
+        let mut a = Client::new(server.connect(instance).unwrap()).unwrap();
+        let mut b = Client::new(server.connect(instance).unwrap()).unwrap();
+        let mut other = Client::new(server.connect(foreign).unwrap()).unwrap();
+        let image: Vec<u8> = (0..300_000).map(|n| (n % 251) as u8).collect();
+        let Reply::Set(rev) = run(
+            &mut server,
+            &mut a,
+            Which::Clipboard,
+            Request::Set(&[("image/png", &image), ("text/plain", b"synthetic text")]),
+        ) else {
+            panic!()
+        };
+        let Reply::Types(Some((seen, types))) =
+            run(&mut server, &mut b, Which::Clipboard, Request::Types)
+        else {
+            panic!()
+        };
+        assert_eq!(seen, rev);
+        assert_eq!(types, ["image/png", "text/plain"]);
+        let Reply::Data(data) = run(
+            &mut server,
+            &mut b,
+            Which::Clipboard,
+            Request::Read {
+                revision: rev,
+                mime: "image/png",
+            },
+        ) else {
+            panic!()
+        };
+        assert_eq!(data.as_slice(), image);
+        assert!(matches!(
+            run(&mut server, &mut other, Which::Clipboard, Request::Types),
+            Reply::Types(None)
+        ));
+        assert!(matches!(
+            run(
+                &mut server,
+                &mut other,
+                Which::Clipboard,
+                Request::Read {
+                    revision: rev,
+                    mime: "image/png"
+                }
+            ),
+            Reply::Rejected(2)
+        ));
+        assert!(matches!(
+            run(&mut server, &mut b, Which::Primary, Request::Types),
+            Reply::Types(None)
+        ));
+        assert!(matches!(
+            run(
+                &mut server,
+                &mut a,
+                Which::Clipboard,
+                Request::Set(&[("text/plain", b"replacement")])
+            ),
+            Reply::Set(_)
+        ));
+        assert!(matches!(
+            run(
+                &mut server,
+                &mut b,
+                Which::Clipboard,
+                Request::Read {
+                    revision: rev,
+                    mime: "image/png"
+                }
+            ),
+            Reply::Rejected(2)
+        ));
+        assert!(matches!(
+            run(&mut server, &mut b, Which::Clipboard, Request::Clear),
+            Reply::Cleared
+        ));
+        assert!(matches!(
+            run(&mut server, &mut a, Which::Clipboard, Request::Types),
+            Reply::Types(None)
+        ));
+    }
+
     fn frame(body: &[u8]) -> Vec<u8> {
         let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
         bytes.extend_from_slice(body);

@@ -278,6 +278,8 @@ def main():
                             client.sendall(f"1\t1000\t1000\t1\t0\t0\ttext/plain:{len(text.encode())}\t{label}\n".encode())
                         elif line.startswith("get\t"):
                             client.sendall(f"ok\t{len(text.encode())}\n".encode() + text.encode())
+                        elif line == "copy\thost\t1":
+                            client.sendall(b"ok\n")
                         else:
                             client.sendall(b"error\tunexpected test request\n")
             server = threading.Thread(target=serve, daemon=True)
@@ -309,6 +311,13 @@ def main():
             if args.grim:
                 wait_for(lambda: background() == bytes((30, 30, 46)), timeout=6)
             tab_offset = -36 if args.frame_history else 0
+            click(rect["x"] + 110, rect["y"] + 318 + tab_offset)
+            wait_for(lambda: "copy\thost\t1" in requests)
+            assert manager.poll() is None, "copy must not close the manager"
+            assert not output.exists() or output.stat().st_size == 0, "copy unexpectedly pasted into the target"
+            assert not any(line.startswith("select\t") for line in requests), "copy must use copy, not paste semantics"
+            screenshot("manager-copied-without-paste")
+            requests.clear()
             click(rect["x"] + 25, rect["y"] + 95 + tab_offset)
             screenshot("manager-typing-controls")
             click(rect["x"] + 110, rect["y"] + 126 + tab_offset)
@@ -345,7 +354,7 @@ def main():
             stop.set()
             server.join(timeout=2)
             daemon.close()
-            print("manager UI: point selected, window reopened, entry typed without clipboard mutation", flush=True)
+            print("manager UI: copied without paste, point selected, window reopened, entry typed without clipboard mutation", flush=True)
             if args.frame_editor:
                 os.killpg(manager.pid, signal.SIGTERM)
                 manager.wait(timeout=5)

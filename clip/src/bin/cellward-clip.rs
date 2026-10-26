@@ -448,14 +448,16 @@ impl Store {
                     Err(e) => error(&e),
                 }
             }
-            ["select", name, id] => {
+            [action @ ("select" | "copy"), name, id] => {
                 let Ok(id) = id.parse::<u64>() else {
                     return error(&"не номер");
                 };
                 match self.history(name) {
                     Ok(h) => match h.get(id) {
                         Ok(Some(entry)) => {
-                            let _ = h.record_paste(id, now_ms());
+                            if *action == "select" {
+                                let _ = h.record_paste(id, now_ms());
+                            }
                             let mut contents = entry.contents;
                             if name.starts_with("@secrets:") {
                                 contents.push(Content {
@@ -1120,6 +1122,70 @@ fn daemon(dir: &Path) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_replaces_selection_without_recording_a_paste_or_losing_image_types() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("cw-copy-only-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store {
+            key: Key::load_or_create(&dir.join("key")).unwrap(),
+            dir: dir.clone(),
+            open: HashMap::new(),
+        };
+        let id = store
+            .history("host")
+            .unwrap()
+            .append(NewEntry {
+                copied_at: 100,
+                contents: vec![
+                    Content {
+                        mime: "text/plain".into(),
+                        data: b"text".to_vec(),
+                    },
+                    Content {
+                        mime: "image/png".into(),
+                        data: b"\0synthetic\xff".to_vec(),
+                    },
+                ],
+                preview: None,
+            })
+            .unwrap()
+            .id();
+        let Reply::Select(contents) = store.answer(&format!("copy\thost\t{id}")) else {
+            panic!()
+        };
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[1].data, b"\0synthetic\xff");
+        assert!(store
+            .history("host")
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .unwrap()
+            .pastes
+            .is_empty());
+        assert!(matches!(
+            store.answer(&format!("select\thost\t{id}")),
+            Reply::Select(_)
+        ));
+        assert_eq!(
+            store
+                .history("host")
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .unwrap()
+                .pastes
+                .len(),
+            1
+        );
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn a_favourite_is_encrypted_separate_and_survives_deleting_its_source() {
