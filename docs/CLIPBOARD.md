@@ -89,33 +89,34 @@ isolation between instances.
 
 ## X11 CLI paste in a native Wayland terminal
 
-The launch proxy relays current CLIPBOARD offers between a native terminal
-and its own Xwayland Satellite, including when the X11 CLI has no visible
-window. Foreign contents still require the person's paste gesture in that
-launch; the frame is optional. It does not expose host data-control or the
-host X server. The detailed regression and remaining reverse-copy/PRIMARY
-limitations are in [the bridge diagnosis](CLIPBOARD-BRIDGE-DIAGNOSIS.md).
+The private broker supplies both CLIPBOARD and PRIMARY to a launch's
+Xwayland Satellite, including windowless X11 readers in a different launch
+of the same instance. Large text and PNG transfers include X11 INCR.
+It does not expose host data-control or the host X server.
+`tests/private-clipboard-smoke.py --satellite … --x11 …` checks this direction;
+`clipboard-reverse-smoke.py --private-broker … [--primary]` checks X11 copies
+in the other direction. The earlier legacy relay diagnosis remains in
+[the bridge diagnosis](CLIPBOARD-BRIDGE-DIAGNOSIS.md).
 
-## Not covered yet
+## Boundaries
 
-- A paste from a program's own menu of a foreign selection gives nothing. A
-  button of the frame that pastes is next.
-- A program of the host that is not proxied reads every selection and every
-  mark, as before.
+- A paste gesture alone does not import a foreign selection. Transfer it
+  explicitly with the host manager first.
+- Host applications can read the shared desktop selection. Private instance
+  copies are not published there. The host user/administrator remains trusted.
 
-## The host manager (in progress)
+## The host manager
 
-Independent active selections now have a tested model and a scope-bound
-Unix socket-pair transport, but are not enabled in the graphical paths yet.
-See [the broker checkpoint](PRIVATE-CLIPBOARD-BROKER.md). This is separate
-from the encrypted history/manager below; ordinary copies can still be
-recorded by host CopyQ until that integration is complete.
+Independent active selections are enabled by default for new isolated
+launches. See [the broker implementation and validation](PRIVATE-CLIPBOARD-BROKER.md).
 
 With `clipboard.history = true`, the recorder also owns one host tray icon.
 Its click opens `vpn-zone-window clip --manager`: the host and each history
 that has been created appear as tabs. The manager can browse and explicitly
-**copy** an entry into another history; switching tabs or copying an entry
-does not set the system selection. The source entry remains where it was.
+**copy** an entry into another history; switching tabs or copying between
+histories does not set an active selection. The separate **Copy to selected
+clipboard** action replaces the chosen live destination. The source history
+entry remains where it was.
 The frame-opened window stays scoped to its own launch and offers paste only
 there. The tray opens one window at a time; closing it does not stop the
 recorder, and the next click reopens it. Empty containers with no history yet
@@ -134,8 +135,8 @@ are untouched. Deletion is logical; old encrypted records leave the disk
 when their segments are merged. This is neither secure media erasure nor
 clearing the source application's clipboard.
 The list hides its contents. Explicit paste from a launch, or confirmed copy
-from the host manager, still uses the ordinary selection; it is not yet a
-protected typing channel. Text search and ordinary cross-buffer moves of
+from the host manager, uses the selected private or host selection. Character
+typing is a separate action that does not change a clipboard. Text search and ordinary cross-buffer moves of
 passwords are disabled.
 "Edit…" changes the label and optionally the password without revealing the
 current contents. An empty new-password field keeps the previous text.
@@ -153,13 +154,12 @@ selection nor counts or entry ids are changed by this match. An explicit
 clipboard copy also offers `x-kde-passwordManagerHint` for other managers
 which respect it.
 
-The host is not a security boundary. An unproxied host program can read the
-compositor's current selection, including one a container just copied;
-the tabbed history does not grant it access to the stored histories, but it
-cannot make the host's Wayland selection private. No entry is silently
-transferred between histories. A true host/container clipboard boundary
-would require host applications to use the same proxy or compositor support
-for separate selections.
+The shared host clipboard remains readable by unproxied host programs.
+Exporting a history entry to **Host** therefore exposes it to those programs;
+copying to an instance does not. Ordinary container copies remain private
+even when a host clipboard manager is running. No entry is silently
+transferred between histories or active scopes. Already-running legacy
+proxies must be restarted before relying on the new boundary.
 
 ## The history
 

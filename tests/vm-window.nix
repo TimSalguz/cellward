@@ -36,6 +36,7 @@ let
     cp ${./clipboard-reverse-smoke.py} $out/clipboard-reverse-smoke.py
     cp ${./clipboard-bridge-smoke.py} $out/clipboard-bridge-smoke.py
     cp ${./typing-smoke.py} $out/typing-smoke.py
+    cp ${./x11-selection-reader.py} $out/x11-selection-reader.py
   '';
 
   test = pkgs.testers.runNixOSTest {

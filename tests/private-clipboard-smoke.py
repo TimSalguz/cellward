@@ -95,6 +95,8 @@ def main():
     for name in ('core', 'broker', 'sway', 'wl-copy'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--without-history', action='store_true')
+    parser.add_argument('--satellite')
+    parser.add_argument('--x11')
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix='cellward-private-clipboard-'))
     print('Artifacts:', root, flush=True)
@@ -185,6 +187,22 @@ def main():
         assert status('other-primary.json')['types'] == [], 'foreign instance saw PRIMARY'
         assert body('host.json', 'text/plain') == reverse.digest(sentinel), 'host clipboard changed'
         assert source.poll() is None, 'private source exited'
+        if args.satellite:
+            assert args.x11, '--satellite requires --x11'
+            number = next(n for n in range(490, 590) if not Path(f'/tmp/.X11-unix/X{n}').exists()
+                          and not Path(f'/tmp/.X{n}-lock').exists())
+            start([args.core, 'wl-sandbox', 'private-satellite', *binding, '--',
+                   args.satellite, f':{number}'], 'satellite')
+            wire.wait_for(lambda: Path(f'/tmp/.X11-unix/X{number}').exists())
+            for selection in ('CLIPBOARD', 'PRIMARY'):
+                output = root / f'x11-{selection}.json'
+                start([sys.executable, str(Path(__file__).with_name('x11-selection-reader.py')),
+                       f':{number}', args.x11, str(output), selection], f'x11-reader-{selection}')
+                for mime, payload in [('text/plain', TEXT), ('image/png', PNG)]:
+                    wire.wait_for(lambda: status(output.name).get(mime) == reverse.digest(payload))
+            assert body('host.json', 'text/plain') == reverse.digest(sentinel)
+            assert status('other.json')['types'] == []
+            print('PASS: native text/PNG reach windowless X11 CLIPBOARD and PRIMARY readers, including INCR', flush=True)
         # History reads the broker directly; explicit manager copy transfers
         # an entry to a selected container without touching the host.
         if not args.without_history:
