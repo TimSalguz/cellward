@@ -19,6 +19,18 @@ pub struct Prepared {
     _lock: File,
 }
 
+impl Drop for Prepared {
+    fn drop(&mut self) {
+        // A concurrently spawned child can briefly inherit the same open file
+        // description before CLOEXEC. End this daemon's lock explicitly;
+        // merely closing its fd would keep that lock until the child execs.
+        // SAFETY: the guard still owns its open regular lock file.
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 pub fn directory(home: &Path) -> PathBuf {
     home.join(PROTECTED_STATE).join(STORE)
 }
@@ -160,6 +172,25 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn ending_store_ownership_unlocks_even_with_a_transient_inherited_description() {
+        let t = Temp::new();
+        let old = legacy_directory(&t.0, None);
+        let prepared = prepare(&t.0, &old).unwrap();
+        // Dup and a fork inheritance hold the same flock file description.
+        let inherited = prepared._lock.try_clone().unwrap();
+        drop(prepared);
+        let restarted = prepare(&t.0, &old)
+            .expect("transient child descriptor must not retain ended ownership");
+        drop(inherited);
+        assert!(
+            prepare(&t.0, &old).is_err(),
+            "the new daemon still owns its lock"
+        );
+        drop(restarted);
+        assert!(prepare(&t.0, &old).is_ok());
     }
 
     #[test]
