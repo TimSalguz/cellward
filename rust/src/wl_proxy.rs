@@ -657,9 +657,84 @@ struct Asking {
     /// it though it is the launch's own process: its pid, and a pidfd that
     /// says whether that is still it.
     camera: Option<(i32, OwnedFd)>,
+    /// A live selection belongs to the process that requested it, not its UID.
+    typing_owner: Option<TypingOwner>,
+}
+
+struct TypingOwner {
+    pid: i32,
+    pidfd: OwnedFd,
+    token: u64,
+    until: Instant,
+}
+
+impl TypingOwner {
+    fn alive(&self) -> bool {
+        let mut p = libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one live descriptor, nonblocking poll. Errors revoke authority.
+        Instant::now() < self.until && unsafe { libc::poll(&mut p, 1, 0) } == 0
+    }
 }
 
 impl Asking {
+    /// Continuations must come from the live process that selected the point.
+    /// This is ownership binding, not authorization to initiate a selection.
+    fn owns_typing(&mut self, client: RawFd, request: &crate::type_input::Request) -> bool {
+        use crate::type_input::Request;
+        if self.typing_owner.as_ref().is_some_and(|o| !o.alive()) {
+            self.typing_owner = None;
+        }
+        let Some(pid) = sys::peer_pid(client) else {
+            return false;
+        };
+        match request {
+            Request::Select { token } => {
+                if self.typing_owner.as_ref().is_some_and(|o| o.pid != pid) {
+                    return false;
+                }
+                let Some(pidfd) = sys::peer_pidfd(client, pid) else {
+                    return false;
+                };
+                let owner = TypingOwner {
+                    pid,
+                    pidfd,
+                    token: *token,
+                    // Selection lasts two minutes, then the selected target five.
+                    until: Instant::now() + Duration::from_secs(420),
+                };
+                if !owner.alive() {
+                    return false;
+                }
+                self.typing_owner = Some(owner);
+                true
+            }
+            Request::Type { token, .. } | Request::Cancel { token } => {
+                let Some(owner) = self
+                    .typing_owner
+                    .as_mut()
+                    .filter(|o| o.pid == pid && o.token == *token && o.alive())
+                else {
+                    return false;
+                };
+                if let Request::Type { timing, text, .. } = request {
+                    // Keep cancellation authorized even for deliberately slow input.
+                    // The proxy still enforces the target's own expiry separately.
+                    let ms = u64::from(timing.start_ms)
+                        + text.len() as u64
+                            * (u64::from(timing.between_ms) + u64::from(timing.hold_ms));
+                    owner.until = owner
+                        .until
+                        .max(Instant::now() + Duration::from_millis(ms) + Duration::from_secs(10));
+                }
+                true
+            }
+        }
+    }
+
     /// Nonreused within the supervisor/proxy channel's lifetime.
     fn next_sequence(&mut self) -> Option<u64> {
         self.seq = self.seq.checked_add(1)?;
@@ -1434,12 +1509,12 @@ impl Proxy {
         let waiting = std::mem::take(&mut self.asking.waiting);
         for (stream, buf) in waiting {
             if let Some(payload) = asked_of(&buf) {
-                if matches!(
-                    crate::type_input::Request::parse(payload),
-                    Some(crate::type_input::Request::Cancel { .. })
-                ) {
+                if let Some(request @ crate::type_input::Request::Cancel { .. }) =
+                    crate::type_input::Request::parse(payload)
+                {
                     let message = panel_request(TYPE_CONTROL, 0, payload);
                     let sent = !of_this_launch(stream.as_raw_fd())
+                        && self.asking.owns_typing(stream.as_raw_fd(), &request)
                         && self.channel.as_ref().is_some_and(|c| {
                             sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_ok()
                         });
@@ -1493,7 +1568,9 @@ impl Proxy {
         let kind = if let Some(request) = &control {
             // Even the camera helper's permission-question exception never
             // grants a launch access to host-generated typing commands.
-            if of_this_launch(stream.as_raw_fd()) {
+            if of_this_launch(stream.as_raw_fd())
+                || !self.asking.owns_typing(stream.as_raw_fd(), request)
+            {
                 self.asking.say(&stream, ASK_NO);
                 return;
             }
@@ -7047,6 +7124,79 @@ mod tests {
         assert_eq!(heard, [0, 5], "the program saw the panel's input");
         drop(client);
         assert_eq!(rig.finish(), 0);
+    }
+
+    #[test]
+    fn typing_owner_peer() {
+        let Some(path) = std::env::var_os("CW_TYPING_OWNER_TEST_SOCKET") else {
+            return;
+        };
+        let mut stream = UnixStream::connect(path).unwrap();
+        let mut byte = [0];
+        stream.read_exact(&mut byte).unwrap();
+    }
+
+    #[test]
+    fn typing_continuations_are_bound_to_a_live_process_and_token() {
+        use crate::type_input::{Mode, Request, Timing};
+        let mut asking = Asking::default();
+        let (ours, _) = UnixStream::pair().unwrap();
+        let select = Request::Select { token: 42 };
+        let cancel = Request::Cancel { token: 42 };
+        assert!(!asking.owns_typing(ours.as_raw_fd(), &cancel));
+        assert!(asking.owns_typing(ours.as_raw_fd(), &select));
+        assert!(asking.owns_typing(ours.as_raw_fd(), &cancel));
+        assert!(!asking.owns_typing(ours.as_raw_fd(), &Request::Cancel { token: 43 }));
+        let dir = std::env::temp_dir().join(format!("cw-typing-owner-{}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("peer");
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "wl_proxy::tests::typing_owner_peer"])
+            .env("CW_TYPING_OWNER_TEST_SOCKET", &path)
+            .spawn()
+            .unwrap();
+        let (mut foreign, _) = listener.accept().unwrap();
+        assert!(!asking.owns_typing(foreign.as_raw_fd(), &cancel));
+        assert!(!asking.owns_typing(foreign.as_raw_fd(), &select));
+        assert!(!asking.owns_typing(
+            foreign.as_raw_fd(),
+            &Request::Type {
+                token: 42,
+                timing: Timing::default(),
+                mode: Mode::Unicode,
+                allow_newlines: false,
+                text: "injected".into(),
+            }
+        ));
+        // A dead owner cannot retain a lease; neither PID nor UID alone suffices.
+        asking.typing_owner = None;
+        assert!(asking.owns_typing(foreign.as_raw_fd(), &select));
+        foreign.write_all(&[0]).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(!asking.owns_typing(foreign.as_raw_fd(), &cancel));
+        assert!(asking.owns_typing(ours.as_raw_fd(), &select));
+        let slow = Request::Type {
+            token: 42,
+            timing: Timing {
+                start_ms: 5000,
+                between_ms: 5000,
+                hold_ms: 5000,
+            },
+            mode: Mode::Unicode,
+            allow_newlines: false,
+            text: "x".repeat(100),
+        };
+        assert!(asking.owns_typing(ours.as_raw_fd(), &slow));
+        assert!(
+            asking.typing_owner.as_ref().unwrap().until
+                > Instant::now() + Duration::from_secs(1000)
+        );
+        asking.typing_owner.as_mut().unwrap().until = Instant::now();
+        assert!(!asking.owns_typing(ours.as_raw_fd(), &cancel));
+        drop(listener);
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&dir).unwrap();
     }
 
     #[test]

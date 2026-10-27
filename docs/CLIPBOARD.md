@@ -302,3 +302,19 @@ This fixes AyuGram/Qt crashing during platform initialization: an immediate
 regression test starts the installed AyuGram on a private headless compositor,
 with empty and populated private buffers, and revokes the broker afterwards.
 Both CLIPBOARD and PRIMARY remain scoped to the same container instance.
+
+### Typing control ownership (2026-10-27)
+
+A selection and its Type/Cancel continuations belong to the same live process,
+identified by Unix peer credentials and a pidfd, as well as the random target
+token. Another process cannot replace an outstanding selection, cancel it or
+type using its token. Process exit and expiry revoke ownership; slow typing
+keeps cancellation available for its expected duration. This is continuation
+ownership, **not authorization to initiate selection**: authenticating initial
+control requests and protecting the socket against unrestricted same-user
+programs remain open security work. Directory mode 0700 is not that boundary.
+
+Newline entry requires explicit permission in the wire request. The proxy
+rejects both CR and LF without it, independently of the manager's UI setting.
+The flag prevents unintended Return events; it does not make an untrusted
+client authorized.

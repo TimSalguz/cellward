@@ -190,7 +190,11 @@ def main():
             other_output = root / f"other-{mode}.txt"
             other = start([args.foot, "--app-id", f"other-{mode}", sys.executable, "-c", reader, str(other_output)], f"other-{mode}")
             wait_for(lambda: any(w["app_id"] == f"other-{mode}" for w in windows()))
-            request = PREFIX + b"\1" + struct.pack("<QHHHB", token, 100, 150 if mode == 2 else 20, 5, min(mode, 1) if mode != 2 else 0) + text.encode()
+            denied = connect(pid, PREFIX + b"\1" + struct.pack("<QHHHB", token, 0, 1, 1, 0) + b"unapproved\n")
+            assert denied.recv(1) != b"y", "newline authorization was bypassed"
+            denied.close()
+            flags = (min(mode, 1) if mode != 2 else 0) | 2  # Explicit newline opt-in.
+            request = PREFIX + b"\1" + struct.pack("<QHHHB", token, 100, 150 if mode == 2 else 20, 5, flags) + text.encode()
             run = connect(pid, request)
             if mode != 2:
                 # Previously only a pre-start focus change was exercised.
