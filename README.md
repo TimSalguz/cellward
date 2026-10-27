@@ -81,6 +81,19 @@ in a sandbox and start going through the portals for files and the camera on
 their own. If a program needs X11, it gets its own `xwayland-satellite` so it
 cannot see other windows.
 
+## Independent input channels (in development)
+
+Clipboard typing already targets a selected window without moving real keyboard
+focus. The intended next step is independent human/agent input channels and
+private virtual mice, keyboards and gamepads per container/window. A target owned
+by an agent or clipboard operation must be able to exclude accidental physical
+input, show its current owner and offer emergency release, while other windows
+remain usable. **First click only activates the window** will swallow the whole
+initial click gesture on an inactive protected window. “Keep application active”
+is separate from real focus and channel ownership; a policy exists, a live frame
+toggle is planned. General virtual devices and full pointer exclusion are not
+yet implemented. See [the input-channel design](docs/INDEPENDENT-INPUT.md).
+
 ## Requirements
 
 - a compositor supporting `wp_security_context_v1` — tested on **niri** and
