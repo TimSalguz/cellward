@@ -186,6 +186,15 @@ def main():
             pointer.write("press\nrelease\n")
             assert selection.recv(1) == b"y", "the overlay did not select its point"
             selection.close()
+            # Same UID and the correct token are insufficient for a different
+            # process to cancel or replace the owner's selection.
+            foreign_code = "import socket,struct,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); p=bytes.fromhex(sys.argv[2]); s.sendall(struct.pack('<H',len(p))+p); print(s.recv(1).hex())"
+            for opcode in (b"\0", b"\2"):
+                attempt = subprocess.run([sys.executable, "-c", foreign_code,
+                    str(runtime / "vpn-zones/ask" / str(pid)),
+                    (PREFIX + opcode + struct.pack("<Q", token)).hex()],
+                    capture_output=True, text=True, check=True, timeout=5)
+                assert attempt.stdout.strip() != b"y".hex(), "foreign process acquired or canceled selection"
             # The chosen window need not have compositor focus while typing.
             other_output = root / f"other-{mode}.txt"
             other = start([args.foot, "--app-id", f"other-{mode}", sys.executable, "-c", reader, str(other_output)], f"other-{mode}")

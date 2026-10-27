@@ -665,6 +665,7 @@ struct TypingOwner {
     pid: i32,
     pidfd: OwnedFd,
     token: u64,
+    active: bool,
     until: Instant,
 }
 
@@ -693,7 +694,11 @@ impl Asking {
         };
         match request {
             Request::Select { token } => {
-                if self.typing_owner.as_ref().is_some_and(|o| o.pid != pid) {
+                if self
+                    .typing_owner
+                    .as_ref()
+                    .is_some_and(|o| o.active && o.pid != pid)
+                {
                     return false;
                 }
                 let Some(pidfd) = sys::peer_pidfd(client, pid) else {
@@ -703,6 +708,7 @@ impl Asking {
                     pid,
                     pidfd,
                     token: *token,
+                    active: true,
                     // Selection lasts two minutes, then the selected target five.
                     until: Instant::now() + Duration::from_secs(420),
                 };
@@ -721,6 +727,9 @@ impl Asking {
                     return false;
                 };
                 if let Request::Type { timing, text, .. } = request {
+                    if !owner.active {
+                        return false;
+                    }
                     // Keep cancellation authorized even for deliberately slow input.
                     // The proxy still enforces the target's own expiry separately.
                     let ms = u64::from(timing.start_ms)
@@ -1518,6 +1527,13 @@ impl Proxy {
                         && self.channel.as_ref().is_some_and(|c| {
                             sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_ok()
                         });
+                    if sent {
+                        if let Some(owner) = &mut self.asking.typing_owner {
+                            // Retain identity for idempotent Cancel, but allow
+                            // another manager to acquire a new selection now.
+                            owner.active = false;
+                        }
+                    }
                     self.asking
                         .say(&stream, if sent { ASK_YES } else { ASK_NOWHERE });
                     continue;
@@ -7170,7 +7186,18 @@ mod tests {
             }
         ));
         // A dead owner cannot retain a lease; neither PID nor UID alone suffices.
-        asking.typing_owner = None;
+        asking.typing_owner.as_mut().unwrap().active = false;
+        assert!(asking.owns_typing(ours.as_raw_fd(), &cancel));
+        assert!(!asking.owns_typing(
+            ours.as_raw_fd(),
+            &Request::Type {
+                token: 42,
+                timing: Timing::default(),
+                mode: Mode::Unicode,
+                allow_newlines: false,
+                text: "old".into()
+            }
+        ));
         assert!(asking.owns_typing(foreign.as_raw_fd(), &select));
         foreign.write_all(&[0]).unwrap();
         assert!(child.wait().unwrap().success());
