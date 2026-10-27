@@ -100,6 +100,7 @@ pub mod clipboard_client;
 #[path = "../../shared/clipboard_endpoint.rs"]
 pub mod clipboard_endpoint;
 pub mod controller;
+pub mod input_authority;
 pub mod private_history;
 /// What the recorder decides of a selection (`cellward-clip daemon`).
 pub mod recorder;

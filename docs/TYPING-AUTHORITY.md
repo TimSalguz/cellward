@@ -69,3 +69,34 @@ name an arbitrary executable or to inject a secret is not itself consent.
   keyboard/mouse guards, fullscreen, focus elsewhere and multiple windows.
 - Update graphical typing regression, not only pure parser/owner tests; verify
   history on/off and both frame-launched and tray-launched managers.
+
+## Implemented foundation (not wired authorization)
+
+`clip/src/input_authority.rs` contains a bounded volatile lease store: 256-bit
+getrandom capabilities, held pidfd principal, two-minute selection lifetime,
+repeatable validation for a broadcast, principal-bound revocation and removal
+on owner death/expiry. A fresh controller has no old capabilities. Tokens are
+redacted in Debug. Only trusted completed consent may call `issue`; the module
+is not a public control socket operation and is not yet called by the input
+proxy/manager. The audit item remains open. Tests passed: 58 clip library tests,
+one unrelated ignored, including foreign process with a known token, dead owner,
+expiry, controller restart, arbitrary non-pidfd and revocation.
+
+Next integration steps:
+
+1. Extend the clipboard controller with a separately versioned authorization
+   operation. Capture the real requesting socket's peer pidfd (not an owner
+   descriptor supplied by that requester). Obtain the trusted window path from
+   the Nix service configuration. Keep the default API denied without that path.
+2. Poll one bounded consent prompt asynchronously, with owner-death and client
+   disconnect cancellation, guarded safe-first answers and fresh generations.
+   Do not block clipboard service; the existing 3-second control deadline must
+   not be reused as the human-consent deadline.
+3. Add capability validation/revocation RPC using an actual held subject pidfd
+   captured by a trusted target supervisor. All decisions fail closed.
+4. Add versioned authorized Select wire encoding; require authority on the
+   supervisor before sending any selection overlay. Preserve Type/Cancel live
+   owner binding and explicit newline policy. No legacy Select fallback.
+5. Manager obtains one lease before broadcasting to candidate supervisors, then
+   revokes it on selection/cancel. No prompt per target. Adapt graphical smoke
+   tests for actual centralized consent, including tray and frame managers.
