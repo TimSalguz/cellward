@@ -39,6 +39,12 @@ pub struct Authority {
     leases: HashMap<Capability, Lease>,
 }
 impl Authority {
+    pub fn owners(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
+        self.leases.values().map(|lease| lease.owner.as_fd())
+    }
+    pub fn deadline(&self) -> Option<Instant> {
+        self.leases.values().map(|lease| lease.expires).min()
+    }
     /// Only a trusted completed consent operation may issue a selection lease.
     /// Possession of the capability alone never authorizes another process.
     pub fn issue(&mut self, owner: OwnedFd, now: Instant) -> io::Result<Capability> {

@@ -148,6 +148,33 @@ pub fn list(runtime: &Path) -> io::Result<Vec<(String, String)>> {
     Ok(scopes)
 }
 
+/// Versioned input-selection validation. `subject` is the actual peer pidfd
+/// captured by the target supervisor; capability bytes alone are insufficient.
+pub fn verify_selection(
+    runtime: &Path,
+    capability: &[u8; 32],
+    subject: BorrowedFd<'_>,
+) -> io::Result<()> {
+    let mut body = vec![b'V', 1];
+    body.extend_from_slice(capability);
+    let (_, answer, fd) = exchange(runtime, &body, Some(subject))?;
+    if answer != [0] || fd.is_some() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Only the issuing process, taken from this socket's peer, may revoke it.
+pub fn revoke_selection(runtime: &Path, capability: &[u8; 32]) -> io::Result<()> {
+    let mut body = vec![b'X', 1];
+    body.extend_from_slice(capability);
+    let (_, answer, fd) = exchange(runtime, &body, None)?;
+    if answer != [0] || fd.is_some() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 pub fn send_header(
     stream: &UnixStream,
     header: &[u8; 4],
@@ -250,6 +277,11 @@ pub fn owner_pid(fd: BorrowedFd<'_>) -> Option<i32> {
 
 /// A live connecting host process, not merely a matching numeric uid.
 pub fn host_peer(stream: &UnixStream) -> bool {
+    host_owner(stream).is_some()
+}
+
+/// Pin the actual host socket principal for a later authorization decision.
+pub fn host_owner(stream: &UnixStream) -> Option<OwnedFd> {
     use std::os::fd::AsFd;
     let mut cred: libc::ucred = unsafe { mem::zeroed() };
     let mut len = mem::size_of_val(&cred) as libc::socklen_t;
@@ -265,7 +297,7 @@ pub fn host_peer(stream: &UnixStream) -> bool {
         || cred.pid <= 0
         || cred.uid != unsafe { libc::getuid() }
     {
-        return false;
+        return None;
     }
     let mut fd = -1i32;
     let mut len = mem::size_of_val(&fd) as libc::socklen_t;
@@ -280,18 +312,18 @@ pub fn host_peer(stream: &UnixStream) -> bool {
     } != 0
         || fd < 0
     {
-        return false;
+        return None;
     }
     let held = unsafe { OwnedFd::from_raw_fd(fd) };
     if !alive(held.as_fd()) {
-        return false;
+        return None;
     }
     for name in ["user", "pid", "mnt"] {
         let own = std::fs::read_link(format!("/proc/self/ns/{name}")).ok();
         let other = std::fs::read_link(format!("/proc/{}/ns/{name}", cred.pid)).ok();
         if own.is_none() || own != other || !alive(held.as_fd()) {
-            return false;
+            return None;
         }
     }
-    true
+    Some(held)
 }

@@ -100,3 +100,14 @@ Next integration steps:
 5. Manager obtains one lease before broadcasting to candidate supervisors, then
    revokes it on selection/cancel. No prompt per target. Adapt graphical smoke
    tests for actual centralized consent, including tray and frame managers.
+
+The clipboard controller now holds the authority registry, polls lease-owner
+pidfds and expiry deadlines, and exposes versioned V/1 validation and X/1
+revocation operations. Validation receives the supervisor-held subject pidfd;
+revocation pins the actual host socket peer. The shared transport captures a
+held host principal via `host_owner` while preserving namespace checks. There
+is still no public mint operation or consent prompt wired into this controller,
+and no input proxy/manager use of these validation methods yet. The new RPC
+therefore does not close initial-Select authorization. Clip tests: 61 passed,
+one unrelated ignored; real socket regression includes a foreign same-UID test
+process trying to revoke a known capability.

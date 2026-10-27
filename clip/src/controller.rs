@@ -45,6 +45,7 @@ pub struct Controller {
     _lock: File,
     scopes: BTreeMap<String, Scope>,
     transport: Transport,
+    selection_authority: crate::input_authority::Authority,
     pending: Vec<Pending>,
 }
 
@@ -95,6 +96,7 @@ impl Controller {
             _lock: lock,
             scopes: BTreeMap::new(),
             transport: Transport::default(),
+            selection_authority: Default::default(),
             pending: Vec::new(),
         })
     }
@@ -116,6 +118,11 @@ impl Controller {
                 .map(|(fd, write)| p(fd.as_raw_fd(), write)),
         );
         fds.extend(self.scopes.values().map(|s| p(s.owner.as_raw_fd(), false)));
+        fds.extend(
+            self.selection_authority
+                .owners()
+                .map(|fd| p(fd.as_raw_fd(), false)),
+        );
         fds
     }
     pub fn deadline(&self) -> Option<Instant> {
@@ -123,9 +130,11 @@ impl Controller {
             .iter()
             .map(|p| p.deadline)
             .chain(self.transport.next_deadline())
+            .chain(self.selection_authority.deadline())
             .min()
     }
     pub fn tick(&mut self, now: Instant) {
+        self.selection_authority.purge(now);
         for scope in self.scopes.values_mut() {
             scope
                 .watchers
@@ -333,6 +342,31 @@ impl Pending {
     fn dispatch(&mut self, controller: &mut Controller) -> io::Result<Vec<u8>> {
         let mut bytes = &self.body[1..];
         match self.body[0] {
+            b'V' | b'X' if bytes.len() == 33 && bytes[0] == 1 => {
+                let key = crate::input_authority::Capability::from_bytes(
+                    bytes[1..].try_into().map_err(|_| endpoint::invalid())?,
+                );
+                let allowed = if self.body[0] == b'V' {
+                    let subject = self.owner.take().ok_or_else(endpoint::invalid)?;
+                    controller
+                        .selection_authority
+                        .permits(key, subject.as_fd(), Instant::now())
+                } else {
+                    if self.owner.is_some() {
+                        return Err(endpoint::invalid());
+                    }
+                    let subject =
+                        endpoint::host_owner(&self.stream).ok_or_else(endpoint::invalid)?;
+                    controller
+                        .selection_authority
+                        .revoke(key, subject.as_fd(), Instant::now())
+                };
+                if allowed {
+                    Ok(vec![0])
+                } else {
+                    Err(endpoint::invalid())
+                }
+            }
             b'B' => {
                 let id = endpoint::take_string(&mut bytes)?;
                 let history = endpoint::take_string(&mut bytes)?;
@@ -440,6 +474,9 @@ mod tests {
     }
     impl Harness {
         fn new() -> Self {
+            Self::configured(|_| ()).0
+        }
+        fn configured<T>(setup: impl FnOnce(&mut Controller) -> T) -> (Self, T) {
             let runtime = std::env::temp_dir().join(format!(
                 "cw-controller-{}-{}",
                 std::process::id(),
@@ -450,6 +487,7 @@ mod tests {
             ));
             fs::create_dir(&runtime).unwrap();
             let mut controller = Controller::open(&runtime).unwrap();
+            let value = setup(&mut controller);
             let stop = Arc::new(AtomicBool::new(false));
             let running = stop.clone();
             let worker = std::thread::spawn(move || {
@@ -458,11 +496,14 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(1));
                 }
             });
-            Self {
-                runtime,
-                stop,
-                worker: Some(worker),
-            }
+            (
+                Self {
+                    runtime,
+                    stop,
+                    worker: Some(worker),
+                },
+                value,
+            )
         }
     }
     impl Drop for Harness {
@@ -481,6 +522,54 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         Err(io::Error::from(io::ErrorKind::TimedOut))
+    }
+
+    #[test]
+    fn foreign_selection_revoke_probe() {
+        let Some(runtime) = std::env::var_os("CELLWARD_TEST_SELECTION_RUNTIME") else {
+            return;
+        };
+        let cap = std::env::var("CELLWARD_TEST_SELECTION_CAP").unwrap();
+        let mut bytes = [0u8; 32];
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&cap[2 * i..2 * i + 2], 16).unwrap();
+        }
+        assert!(endpoint::revoke_selection(Path::new(&runtime), &bytes).is_err());
+    }
+
+    #[test]
+    fn selection_validation_transport_pins_subject_and_revocation_principal() {
+        let (socket, _other) = UnixStream::pair().unwrap();
+        let owner = endpoint::host_owner(&socket).unwrap();
+        let subject = owner.try_clone().unwrap();
+        let (h, key) = Harness::configured(move |c| {
+            c.selection_authority.issue(owner, Instant::now()).unwrap()
+        });
+        endpoint::verify_selection(&h.runtime, key.bytes(), subject.as_fd()).unwrap();
+        let foreign = Lease::new();
+        assert!(endpoint::verify_selection(&h.runtime, key.bytes(), foreign.fd.as_fd()).is_err());
+        let arbitrary = File::open("/dev/null").unwrap();
+        assert!(endpoint::verify_selection(&h.runtime, key.bytes(), arbitrary.as_fd()).is_err());
+        let cap: String = key.bytes().iter().map(|v| format!("{v:02x}")).collect();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "controller::tests::foreign_selection_revoke_probe",
+                "--nocapture",
+            ])
+            .env("CELLWARD_TEST_SELECTION_RUNTIME", &h.runtime)
+            .env("CELLWARD_TEST_SELECTION_CAP", cap)
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stdout)
+        );
+        endpoint::verify_selection(&h.runtime, key.bytes(), subject.as_fd()).unwrap();
+        endpoint::revoke_selection(&h.runtime, key.bytes()).unwrap();
+        assert!(endpoint::verify_selection(&h.runtime, key.bytes(), subject.as_fd()).is_err());
+        assert!(endpoint::revoke_selection(&h.runtime, key.bytes()).is_err());
     }
 
     #[test]
