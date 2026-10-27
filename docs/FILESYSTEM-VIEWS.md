@@ -145,7 +145,9 @@ is disclosed rather than presented as a complete listing. Exact paths and the
 optional external directory helper remain available. Late directory results
 are generation-bound and cannot overwrite a newer manual path. Outside-home
 views and invalid policies are reported as unknown/invalid, not inferred from
-the home default. Restart actions, an expanded multi-directory tree and
+the home default. A running container has an explicit guarded stop action with a loss-of-unsaved-work
+warning; the next application launch prepares a new view. Applications are not
+restarted automatically or silently. An expanded multi-directory tree and
 full-hide views are still pending.
 
 Native panel layout check: `tests/files-panel-smoke.py` renders synthetic policy
@@ -155,3 +157,8 @@ checks rendering/layout, not the application of mounts or every browser gesture.
 Unit tests additionally verify stale inline-directory and legacy chooser results
 cannot redirect a grant or overwrite a newer manual draft. Final GUI suite: 81
 passed; core suite: 1140 passed, 7 ignored.
+
+The Files stop confirmation pins its container name and cannot be redirected
+by selecting another container. Cancellation and early confirmation do nothing.
+The three-second delay applies only to this destructive confirmation, not folder
+browsing. GUI regression suite after this action: 82 passed.

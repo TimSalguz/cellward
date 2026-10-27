@@ -1019,6 +1019,9 @@ enum Msg {
     FolderPicked(String, Option<String>),
     BrowseInline(String),
     FolderListed(String, String, u64, Result<(Vec<String>, bool), String>),
+    FilesStopAsk(String),
+    FilesStopConfirm(String),
+    FilesStopCancel,
     MergeAsk,
     MergeInto(String),
     MergeGo,
@@ -1122,6 +1125,7 @@ struct Panel {
     folder_loading: bool,
     folder_generation: u64,
     folder_trouble: Option<String>,
+    folder_stop: Option<(String, Instant)>,
     explained: Option<(String, Result<String, String>)>,
     pending: Option<Pending>,
     /// What the last action said: `Ok` done, `Err` refused.
@@ -1362,6 +1366,7 @@ impl Panel {
             folder_loading: false,
             folder_generation: 0,
             folder_trouble: None,
+            folder_stop: None,
             explained: None,
             pending: None,
             said: None,
@@ -1673,6 +1678,27 @@ impl Panel {
                     args.push(term.to_owned());
                 }
                 self.act(args)
+            }
+            Msg::FilesStopAsk(name) => {
+                if !self.busy && self.running(&name).is_some() {
+                    self.folder_stop = Some((name, Instant::now()));
+                }
+                Task::none()
+            }
+            Msg::FilesStopCancel => {
+                self.folder_stop = None;
+                Task::none()
+            }
+            Msg::FilesStopConfirm(name) => {
+                if self.busy
+                    || self.folder_stop.as_ref().is_none_or(|(target, since)| {
+                        target != &name || since.elapsed() < std::time::Duration::from_secs(3)
+                    })
+                {
+                    return Task::none();
+                }
+                self.folder_stop = None;
+                self.act(vec!["container".into(), "stop".into(), name])
             }
             Msg::FilesEdit(name) => {
                 if !self.busy
@@ -4181,6 +4207,41 @@ impl Panel {
                     }
                 }
             }
+            if self.running(&c.name).is_some() {
+                if let Some((target, since)) = self
+                    .folder_stop
+                    .as_ref()
+                    .filter(|(target, _)| target == &c.name)
+                {
+                    block = block.push(text(format!("Остановить все программы контейнера «{target}»? Несохранённая работа может потеряться. Следующий запуск создаст новое представление файлов по текущим правилам.")).size(13));
+                    let left = std::time::Duration::from_secs(3).saturating_sub(since.elapsed());
+                    let label = if left.is_zero() {
+                        "Остановить программы".to_owned()
+                    } else {
+                        format!("Остановить через {} с", left.as_secs() + 1)
+                    };
+                    block = block.push(
+                        row![
+                            button(text(label).size(13))
+                                .style(button::danger)
+                                .on_press_maybe(
+                                    (!self.busy && left.is_zero())
+                                        .then(|| Msg::FilesStopConfirm(target.clone()))
+                                ),
+                            button(text("Отмена").size(13)).on_press(Msg::FilesStopCancel)
+                        ]
+                        .spacing(8)
+                        .wrap(),
+                    );
+                } else {
+                    block = block.push(
+                        button(text("Остановить контейнер для применения правил…").size(13))
+                            .on_press_maybe(
+                                (!self.busy).then(|| Msg::FilesStopAsk(c.name.clone())),
+                            ),
+                    );
+                }
+            }
             page = page.push(container(block).padding(12).width(Length::Fill));
         }
         if self.data.containers.is_empty() {
@@ -4403,6 +4464,24 @@ mod tests {
 
     /// The task lines read, CPU made of two readings' ticks, launches
     /// chosen alone or with Ctrl, and what is ended asked first.
+    #[test]
+    fn file_policy_stop_confirmation_is_guarded_and_pinned_to_its_container() {
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Files);
+        panel.folder_stop = Some(("a".into(), Instant::now()));
+        let _ = panel.update(Msg::FilesStopConfirm("a".into()));
+        assert!(!panel.busy);
+        panel.folder_stop = Some((
+            "a".into(),
+            Instant::now() - std::time::Duration::from_secs(4),
+        ));
+        let _ = panel.update(Msg::FilesStopConfirm("b".into()));
+        assert!(!panel.busy);
+        let _ = panel.update(Msg::FilesStopCancel);
+        assert!(panel.folder_stop.is_none());
+        let _ = panel.update(Msg::FilesStopConfirm("a".into()));
+        assert!(!panel.busy);
+    }
+
     #[test]
     fn legacy_directory_grant_ignores_a_result_after_container_selection_changes() {
         let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Containers);
