@@ -110,3 +110,23 @@ concurrent visibility, host-visible Real writes, private nested overlays,
 read-only denial and persistence after stopping/restarting the instance.
 `tests/run-folder-shared-smoke.py` provides the faster user/mount-namespace
 check and independently inspects the original host directories afterward.
+
+## File access overview
+
+The settings panel has a separate Files tab (`vpn-zone-window panel --tab files`).
+It lists every loaded persistent container, its base home view, explicit legacy
+real-directory grants with Nix/local provenance, nested folder rules, and policy
+read failures. It shows configured policy, not an audit of live mounts. Existing
+container actions remain on Containers; the overview is read-only. Unknown
+provenance from an older core stays unknown. Nested rules are local policy.
+The tab bar wraps on narrow windows instead of forcing new tabs offscreen.
+
+The full-hide metadata requirement includes file sizes where files are exposed
+through a transformed view, directory sizes, allocated blocks, visible link
+counts, inode/device identifiers, timestamps, xattrs and filesystem/watch events.
+For an ordinary fully visible file, report its actual logical size; do not
+fabricate sizes that disagree with readable data. For a hidden file, metadata
+lookup must fail with ENOENT. For a filtered parent, derive metadata from the
+visible view and define stable inode/timestamp semantics. Host statfs capacity
+is not a directory size and needs a separate quota/accounting contract.
+These are acceptance requirements, not features of the current mount rules.

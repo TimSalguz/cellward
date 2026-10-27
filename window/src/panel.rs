@@ -54,6 +54,8 @@ struct Cont {
     /// Granted directories, with when they are taken back (0: never).
     paths: Vec<(String, u64)>,
     folder_rules: Vec<(String, String)>,
+    path_sources: HashMap<String, String>,
+    folder_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -335,7 +337,19 @@ fn parse(text: &str) -> Data {
                 color: color_of(color),
                 paths: Vec::new(),
                 folder_rules: Vec::new(),
+                path_sources: HashMap::new(),
+                folder_error: None,
             }),
+            ["path-source", of, path, source] => {
+                if let Some(c) = d.containers.iter_mut().find(|c| c.name == *of) {
+                    c.path_sources.insert((*path).into(), (*source).into());
+                }
+            }
+            ["folder-error", of, why] => {
+                if let Some(c) = d.containers.iter_mut().find(|c| c.name == *of) {
+                    c.folder_error = Some((*why).into());
+                }
+            }
             ["folder-rule", of, mode, path] => {
                 if let Some(c) = d.containers.iter_mut().find(|c| c.name == *of) {
                     c.folder_rules.push(((*mode).into(), (*path).into()));
@@ -764,16 +778,18 @@ enum Tab {
     Scheme,
     Tasks,
     Containers,
+    Files,
     Zones,
     Settings,
     Defaults,
 }
 
-const TABS: [Tab; 7] = [
+const TABS: [Tab; 8] = [
     Tab::Network,
     Tab::Scheme,
     Tab::Tasks,
     Tab::Containers,
+    Tab::Files,
     Tab::Zones,
     Tab::Settings,
     Tab::Defaults,
@@ -2079,6 +2095,7 @@ impl Panel {
             tab("Схема", Tab::Scheme),
             tab("Задачи", Tab::Tasks),
             tab("Контейнеры", Tab::Containers),
+            tab("Файлы", Tab::Files),
             tab("Подключения", Tab::Zones),
             tab("Настройки", Tab::Settings),
             tab("По умолчанию", Tab::Defaults),
@@ -2089,12 +2106,15 @@ impl Panel {
                 .on_press(Msg::Escape),
         ]
         .spacing(8)
-        .align_y(Alignment::Center);
+        .align_y(Alignment::Center)
+        .wrap()
+        .vertical_spacing(6);
         let body = match self.tab {
             Tab::Network => self.view_network(),
             Tab::Tasks => self.view_tasks(),
             Tab::Scheme => self.view_scheme(),
             Tab::Containers => self.view_containers(),
+            Tab::Files => self.view_files(),
             Tab::Zones => self.view_zones(),
             Tab::Settings => self.view_settings(),
             Tab::Defaults => self.view_defaults(),
@@ -3818,6 +3838,70 @@ impl Panel {
         block.push(buttons).into()
     }
 
+    /// Configured policy, not a claim about mounts of already-running apps.
+    fn view_files(&self) -> Element<'_, Msg> {
+        let mut page = column![
+            text("Доступ контейнеров к файлам").size(20),
+            text("Настроенный доступ. Уже запущенные программы сохраняют свои монтирования и открытые файлы; для полного применения изменений остановите и запустите контейнер.").size(13),
+            text("Ближайшее вложенное правило переопределяет родительское. Слой читает исходные файлы, но хранит изменения отдельно; это не скрытие папки и не снимок данных.").size(13),
+        ].spacing(12);
+        for c in &self.data.containers {
+            let base = match c.home.as_str() {
+                "private" => "Свой дом: обычные файлы настоящего дома не предоставляются; исключения ниже.",
+                "layer" => "Слой над домом: обычные файлы хоста читаются, изменения хранятся отдельно; исключения ниже.",
+                "main" => "Настоящий дом: обычные файлы хоста доступны на чтение и запись. Сетевая изоляция — отдельная настройка.",
+                _ => "Неизвестный вид дома: доступ нельзя определить по этому обзору.",
+            };
+            let mut block = column![text(&c.name).size(17), text(base).size(13)].spacing(6);
+            if c.name == "open" {
+                block = block.push(text("Без изоляции: полный доступ хоста; список исключений не ограничивает этот режим.").size(13));
+            }
+            for (path, until) in &c.paths {
+                let source = match c.path_sources.get(path).map(String::as_str) {
+                    Some("nix") => "Nix",
+                    Some("local") => "локально",
+                    Some("default") => "по умолчанию",
+                    _ => "источник неизвестен",
+                };
+                let term = if *until == 0 {
+                    String::new()
+                } else {
+                    format!("; срок до Unix {until}")
+                };
+                block = block.push(
+                    text(format!(
+                        "{path} — реальные файлы, чтение и запись · {source}{term}"
+                    ))
+                    .size(13),
+                );
+            }
+            for (mode, path) in &c.folder_rules {
+                let access = match mode.as_str() {
+                    "ro" => "чтение",
+                    "rw" => "реальные файлы, чтение и запись",
+                    "overlay" => "отдельный слой изменений",
+                    _ => "неизвестный режим",
+                };
+                block = block.push(text(format!("{path} — {access} · локальное правило")).size(13));
+            }
+            if let Some(why) = &c.folder_error {
+                block = block.push(
+                    text(format!(
+                        "⚠ Не удалось прочитать правила папок: {why}. Обзор неполон."
+                    ))
+                    .size(13),
+                );
+            } else if c.paths.is_empty() && c.folder_rules.is_empty() {
+                block = block.push(text("Явных исключений нет.").size(13));
+            }
+            page = page.push(container(block).padding(12).width(Length::Fill));
+        }
+        if self.data.containers.is_empty() {
+            page = page.push(text("Данные контейнеров пока не загружены.").size(13));
+        }
+        scrollable(page).height(Length::Fill).into()
+    }
+
     fn view_settings(&self) -> Element<'_, Msg> {
         let mut page = column![].spacing(16);
         page = page.push(column![
@@ -3962,6 +4046,7 @@ pub fn run(args: &[String]) -> iced::Result {
             "--tab" if value == "tasks" => tab = Tab::Tasks,
             "--tab" if value == "scheme" => tab = Tab::Scheme,
             "--tab" if value == "containers" => tab = Tab::Containers,
+            "--tab" if value == "files" => tab = Tab::Files,
             "--tab" if value == "zones" => tab = Tab::Zones,
             "--tab" if value == "settings" => tab = Tab::Settings,
             "--tab" if value == "defaults" => tab = Tab::Defaults,
@@ -4021,6 +4106,32 @@ mod tests {
 
     /// The task lines read, CPU made of two readings' ticks, launches
     /// chosen alone or with Ctrl, and what is ended asked first.
+    #[test]
+    fn file_access_overview_retains_provenance_and_rule_failures() {
+        let data = parse("container\twork\tprivate\thost\t789abc\npath\twork\t/home/u/shared\t0\npath-source\twork\t/home/u/shared\tnix\nfolder-rule\twork\toverlay\t/home/u/project\nfolder-error\twork\tinvalid policy\n");
+        let c = &data.containers[0];
+        assert_eq!(
+            c.path_sources.get("/home/u/shared").map(String::as_str),
+            Some("nix")
+        );
+        assert_eq!(
+            c.folder_rules,
+            [("overlay".into(), "/home/u/project".into())]
+        );
+        assert_eq!(c.folder_error.as_deref(), Some("invalid policy"));
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Files);
+        panel.data = data;
+        let _ = panel.view_files();
+        let _ = panel.view();
+        // Old core output must not invent provenance.
+        assert!(
+            parse("container\told\tprivate\thost\t789abc\npath\told\t/home/u/shared\t0\n")
+                .containers[0]
+                .path_sources
+                .is_empty()
+        );
+    }
+
     #[test]
     fn the_tasks_are_read_counted_and_chosen() {
         let reading = |ticks: u64| {

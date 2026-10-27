@@ -154,16 +154,20 @@ pub fn data(tools: &Tools) -> String {
                 .find(|(q, _)| *q == p.value)
                 .map_or(0, |(_, t)| *t);
             line(&["path", &c.name, &path, &until.to_string()]);
+            line(&["path-source", &c.name, &path, p.source.as_str()]);
         }
-        if let Ok(rules) = crate::folder_rules::load(tools, &c.name) {
-            for rule in rules {
-                line(&[
-                    "folder-rule",
-                    &c.name,
-                    rule.mode.word(),
-                    &rule.path.display().to_string(),
-                ]);
+        match crate::folder_rules::load(tools, &c.name) {
+            Ok(rules) => {
+                for rule in rules {
+                    line(&[
+                        "folder-rule",
+                        &c.name,
+                        rule.mode.word(),
+                        &rule.path.display().to_string(),
+                    ]);
+                }
             }
+            Err(why) => line(&["folder-error", &c.name, &why]),
         }
         // Its blocked destinations (`netrules::Block`): what the person can
         // take back, and what Nix set.
