@@ -446,7 +446,9 @@
 - [x] Proxy rejects CR/LF unless explicitly enabled in the wire request;
   core tests and graphical typing regression pass (`b678e0d`). This flag is
   a safety policy, not client authentication.
-- [ ] Bound and validate OpenConnect option values as well as option names.
+- [x] Bound and validate OpenConnect option values as well as option names:
+  length/character checks, numeric policy bounds and path-only usergroup.
+  Regression tests plus 1140 core tests passed.
 - [ ] Add fuzz targets for Wayland, D-Bus and Pulse protocol parsers; run
   dependency audit and targeted Miri checks with reproducible tool versions.
 - [x] Reproduce and fix transparent pixels at hover/frame joins: 100–200%,

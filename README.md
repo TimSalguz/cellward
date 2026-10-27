@@ -341,6 +341,15 @@ flag and its value to be written separately and `Args = --useragent --script`
 would smuggle the forbidden one in as its neighbour's value. Trust is decided
 in exactly one way — `ServerCert`.
 
+Values are bounded too. Cellward accepts base MTU 576–65535, queue length
+1–4096 and DPD/reconnect intervals 0–86400 seconds (zero retains the client's
+zero-value semantics). Hostname/SNI values use bounded DNS-style labels;
+OS identifiers use letters, digits, `_` and `-`. User-agent/version values are
+bounded single tokens. `--usergroup` is a bounded path, not a full URL or URL
+authority; controls, query/fragment delimiters and encoded CR/LF are rejected.
+These are Cellward configuration limits, not the complete syntax accepted by
+OpenConnect. Option meanings follow the [OpenConnect manual](https://www.infradead.org/openconnect/manual.html).
+
 #### The password: why a file, and why not for long
 
 `PasswordFile` exists for one reason: a zone is started by a systemd unit with

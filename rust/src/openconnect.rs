@@ -539,11 +539,70 @@ fn check_args(args: &str) -> Result<Vec<String>, ConfigError> {
             .find(|(flag, _)| *flag == name)
             .map(|(_, takes)| *takes);
         match allowed {
-            Some(takes) if takes == has_value => out.push(word.to_string()),
+            Some(takes)
+                if takes == has_value
+                    && (!takes || valid_arg_value(name, word.split_once('=').unwrap().1)) =>
+            {
+                out.push(word.to_string())
+            }
             _ => return Err(ConfigError::ForbiddenArg(word.to_string())),
         }
     }
     Ok(out)
+}
+
+/// Cellward's bounded configuration policy, not OpenConnect's full syntax.
+/// Values stay single argv entries and cannot inject headers, URL authorities
+/// or unbounded resource settings. Numeric limits deliberately fit signed ints.
+fn valid_arg_value(name: &str, value: &str) -> bool {
+    if value.is_empty() || value.len() > 1024 || !value.bytes().all(|c| c.is_ascii_graphic()) {
+        return false;
+    }
+    let number = |min: u32, max: u32| {
+        value.bytes().all(|c| c.is_ascii_digit())
+            && value.parse::<u32>().is_ok_and(|n| (min..=max).contains(&n))
+    };
+    match name {
+        "--base-mtu" => number(576, 65535),
+        "--force-dpd" | "--reconnect-timeout" => number(0, 86400),
+        "--queue-len" => number(1, 4096),
+        "--os" => {
+            value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+        }
+        "--local-hostname" | "--sni" => {
+            value.len() <= 253
+                && value.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                })
+        }
+        "--usergroup" => {
+            value.len() <= 512
+                && !value.starts_with("//")
+                && !value.contains("://")
+                && !value.contains(['\\', '#', '?', '@'])
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"/-_.~%".contains(&c))
+                && !value.to_ascii_lowercase().contains("%0d")
+                && !value.to_ascii_lowercase().contains("%0a")
+        }
+        "--useragent" | "--version-string" => {
+            value.len() <= 256
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"/._-+():;,".contains(&c))
+        }
+        _ => false,
+    }
 }
 
 // --- THE VPNC-SCRIPT CONTRACT ------------------------------------------------
@@ -1203,6 +1262,44 @@ mod tests {
                 "{bad} was accepted as a pin"
             );
         }
+    }
+
+    #[test]
+    fn extra_argument_values_are_bounded_and_cannot_change_url_authority() {
+        for good in [
+            "--base-mtu=1500",
+            "--queue-len=32",
+            "--force-dpd=0",
+            "--reconnect-timeout=300",
+            "--local-hostname=desktop.example",
+            "--sni=vpn.example",
+            "--usergroup=/portal/login",
+            "--useragent=AnyConnect/4.10",
+            "--version-string=4.10",
+            "--os=linux-64",
+        ] {
+            assert!(check_args(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "--base-mtu=0",
+            "--base-mtu=65536",
+            "--queue-len=0",
+            "--queue-len=4294967295",
+            "--force-dpd=-1",
+            "--reconnect-timeout=86401",
+            "--os=",
+            "--os=linux/64",
+            "--local-hostname=-bad",
+            "--sni=https://evil.example",
+            "--usergroup=https://evil.example/path",
+            "--usergroup=//evil.example",
+            "--usergroup=portal%0d%0aHeader",
+            "--usergroup=portal?next=evil",
+            "--useragent=bad\u{1b}header",
+        ] {
+            assert!(check_args(bad).is_err(), "{bad}");
+        }
+        assert!(check_args(&format!("--useragent={}", "a".repeat(257))).is_err());
     }
 
     #[test]
