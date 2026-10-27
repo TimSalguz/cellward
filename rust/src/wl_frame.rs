@@ -4585,7 +4585,16 @@ impl WlKeyboardHandler for Keyboard {
                     slf.send_leave(serial, &gone);
                 }
             }
-            self.down = keys
+            // A consumed press must not reappear as an already-held key
+            // when focus moves to another surface before its release.
+            let visible: Vec<u8> = keys
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|k| !self.prompt_keys.contains(&u32::from_ne_bytes(**k)))
+                .flat_map(|k| k.iter().copied())
+                .collect();
+            self.down = visible
                 .as_chunks::<4>()
                 .0
                 .iter()
@@ -4593,7 +4602,7 @@ impl WlKeyboardHandler for Keyboard {
                 .take(32)
                 .collect();
             if !typed {
-                slf.send_enter(serial, surface, keys);
+                slf.send_enter(serial, surface, &visible);
             }
         }
     }

@@ -7246,9 +7246,18 @@ mod tests {
         let mut reply = [0u8; 10];
         (&*channel).read_exact(&mut reply).unwrap();
         assert_eq!(reply.as_slice(), panel_message(ANSWERED, 8, Some(0)));
+        // Re-enter before releasing Enter: it must not reappear as a held key.
+        let mut bytes = Vec::new();
+        event(&mut bytes, keyboard, 2, |a| {
+            a.extend_from_slice(&words(&[104, root as i32]))
+        });
+        event(&mut bytes, keyboard, 1, |a| {
+            a.extend_from_slice(&words(&[105, root as i32, 4, 28]))
+        });
+        compositor.write_all(&bytes).unwrap();
         // The panel is gone, but Enter's release must still be swallowed.
-        send_key(&mut compositor, 104, 28, 0);
-        send_key(&mut compositor, 105, 30, 1); // Normal typing resumes.
+        send_key(&mut compositor, 106, 28, 0);
+        send_key(&mut compositor, 107, 30, 1); // Normal typing resumes.
         let heard = events_until(&mut client, |o, op, _| o == 11 && op == 3);
         let keys: Vec<_> = heard
             .iter()
@@ -7256,6 +7265,15 @@ mod tests {
             .collect();
         assert_eq!(keys.len(), 1, "panel navigation leaked to the application");
         assert_eq!(keys[0].2[2], 30);
+        let enters: Vec<_> = heard
+            .iter()
+            .filter(|(o, op, _)| *o == 11 && *op == 1)
+            .collect();
+        assert_eq!(enters.len(), 1);
+        assert_eq!(
+            enters[0].2[2], 0,
+            "consumed key reappeared in the enter array"
+        );
         drop(client);
         assert_eq!(rig.finish(), 0);
     }
