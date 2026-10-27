@@ -4101,9 +4101,7 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
             let (Some(record), Some(mode), Some(path)) =
                 (words.first(), words.get(1), words.get(2))
             else {
-                eprintln!(
-                    "cellward container folder <контейнер> ro|rw|overlay|hide|inherit <папка>"
-                );
+                eprintln!("cellward container folder <контейнер> ro|rw|overlay|inherit <папка>");
                 return 1;
             };
             match crate::folder_rules::set(tools, record, mode, path) {

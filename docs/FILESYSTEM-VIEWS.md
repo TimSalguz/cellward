@@ -117,7 +117,10 @@ The settings panel has a separate Files tab (`vpn-zone-window panel --tab files`
 It lists every loaded persistent container, its base home view, explicit legacy
 real-directory grants with Nix/local provenance, nested folder rules, and policy
 read failures. It shows configured policy, not an audit of live mounts. Existing
-container actions remain on Containers; the overview is read-only. Unknown
+container actions remain on Containers. Private/layer entries also offer a
+folder-rule editor with an exact path or directory chooser, and explicit
+read-only / host-write / separate-layer / inherit buttons. The editor pins its
+container target; late chooser results for another target are ignored. Unknown
 provenance from an older core stays unknown. Nested rules are local policy.
 The tab bar wraps on narrow windows instead of forcing new tabs offscreen.
 
@@ -130,3 +133,11 @@ lookup must fail with ENOENT. For a filtered parent, derive metadata from the
 visible view and define stable inode/timestamp semantics. Host statfs capacity
 is not a directory size and needs a separate quota/accounting contract.
 These are acceptance requirements, not features of the current mount rules.
+
+The folder editor applies persistent container-wide policy only on a mode button
+press. It does not silently grant access while browsing. Removing a rule means
+inheriting the parent/base view and can therefore increase access; the UI says
+so. Nix overlaps, protected paths and mode validity remain checked by the CLI
+backend. A chooser cancellation changes no draft policy. The current chooser
+uses the configured directory-dialog helper; a built-in tree showing modes for
+all descendants, restart actions and full-hide views are still pending.

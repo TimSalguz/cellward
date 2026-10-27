@@ -1010,6 +1010,11 @@ enum Msg {
     GrantFor(&'static str),
     Revoke(String),
     FolderRule(String, String),
+    FilesEdit(String),
+    FolderDraft(String),
+    SaveFolder(&'static str),
+    BrowseFolder(String),
+    FolderPicked(String, Option<String>),
     MergeAsk,
     MergeInto(String),
     MergeGo,
@@ -1108,6 +1113,7 @@ struct Panel {
     /// What each instance sends and receives now, per second.
     rates: HashMap<String, (f64, f64)>,
     selected: Option<String>,
+    folder_draft: Option<(String, String)>,
     explained: Option<(String, Result<String, String>)>,
     pending: Option<Pending>,
     /// What the last action said: `Ok` done, `Err` refused.
@@ -1248,7 +1254,7 @@ fn tick_later() -> Task<Msg> {
 
 /// A directory to grant, chosen in the file dialog of `dirs` (kdialog);
 /// `None` when none was.
-fn choose_dir(dirs: PathBuf) -> Task<Msg> {
+fn choose_dir(dirs: PathBuf, target: Option<String>) -> Task<Msg> {
     Task::perform(
         async move {
             let (done, over) = iced::futures::channel::oneshot::channel();
@@ -1272,7 +1278,10 @@ fn choose_dir(dirs: PathBuf) -> Task<Msg> {
             });
             over.await.ok().flatten()
         },
-        Msg::Chosen,
+        move |path| match &target {
+            Some(name) => Msg::FolderPicked(name.clone(), path),
+            None => Msg::Chosen(path),
+        },
     )
 }
 
@@ -1287,6 +1296,7 @@ impl Panel {
             last: HashMap::new(),
             rates: HashMap::new(),
             selected: None,
+            folder_draft: None,
             explained: None,
             pending: None,
             said: None,
@@ -1575,7 +1585,7 @@ impl Panel {
                 None => Task::none(),
             },
             Msg::GrantAsk => match self.dirs.clone() {
-                Some(dirs) => choose_dir(dirs),
+                Some(dirs) => choose_dir(dirs, None),
                 None => {
                     self.said = Some(Err(
                         "выбрать каталог нечем — в терминале: cellward container grant <контейнер> \
@@ -1602,6 +1612,71 @@ impl Panel {
                     args.push(term.to_owned());
                 }
                 self.act(args)
+            }
+            Msg::FilesEdit(name) => {
+                if !self.busy
+                    && self
+                        .data
+                        .containers
+                        .iter()
+                        .any(|c| c.name == name && matches!(c.home.as_str(), "private" | "layer"))
+                {
+                    self.folder_draft = Some((name, String::new()));
+                }
+                Task::none()
+            }
+            Msg::BrowseFolder(name) => {
+                if self.busy
+                    || self
+                        .folder_draft
+                        .as_ref()
+                        .is_none_or(|(target, _)| target != &name)
+                {
+                    return Task::none();
+                }
+                match self.dirs.clone() {
+                    Some(dirs) => choose_dir(dirs, Some(name)),
+                    None => {
+                        self.said =
+                            Some(Err("Выбор папок недоступен; введите путь вручную.".into()));
+                        Task::none()
+                    }
+                }
+            }
+            Msg::FolderPicked(name, Some(path)) => {
+                if let Some((target, draft)) = &mut self.folder_draft {
+                    if target == &name {
+                        *draft = path;
+                    }
+                }
+                Task::none()
+            }
+            Msg::FolderPicked(_, None) => Task::none(),
+            Msg::FolderDraft(path) => {
+                if let Some((_, draft)) = &mut self.folder_draft {
+                    *draft = path;
+                }
+                Task::none()
+            }
+            Msg::SaveFolder(mode) => {
+                let Some((name, path)) = self.folder_draft.clone() else {
+                    return Task::none();
+                };
+                if self.busy
+                    || path.trim().is_empty()
+                    || !matches!(mode, "ro" | "rw" | "overlay" | "inherit")
+                {
+                    return Task::none();
+                }
+                // The draft owns its target. Changing another tab's selection
+                // or refreshing data cannot redirect this filesystem grant.
+                self.act(vec![
+                    "container".into(),
+                    "folder".into(),
+                    name,
+                    mode.into(),
+                    path,
+                ])
             }
             Msg::FolderRule(path, mode) => match self.chosen().cloned() {
                 Some(c) => self.act(vec![
@@ -3894,6 +3969,39 @@ impl Panel {
             } else if c.paths.is_empty() && c.folder_rules.is_empty() {
                 block = block.push(text("Явных исключений нет.").size(13));
             }
+            if matches!(c.home.as_str(), "private" | "layer") && c.name != "open" {
+                block = block.push(
+                    button(text("Добавить или изменить правило папки…").size(13))
+                        .on_press_maybe((!self.busy).then(|| Msg::FilesEdit(c.name.clone()))),
+                );
+                if let Some((target, path)) = &self.folder_draft {
+                    if target == &c.name {
+                        block = block.push(button(text("Выбрать папку…").size(13)).on_press_maybe(
+                            (!self.busy).then(|| Msg::BrowseFolder(c.name.clone())),
+                        ));
+                        block = block.push(
+                            text_input("Абсолютный путь или ~/папка", path)
+                                .on_input(Msg::FolderDraft),
+                        );
+                        let mut modes = row![].spacing(6);
+                        for (mode, label) in [
+                            ("ro", "Только чтение"),
+                            ("rw", "Чтение и запись хоста"),
+                            ("overlay", "Отдельный слой"),
+                            ("inherit", "Убрать правило"),
+                        ] {
+                            modes = modes.push(
+                                button(text(label).size(13)).on_press_maybe(
+                                    (!self.busy && !path.trim().is_empty())
+                                        .then_some(Msg::SaveFolder(mode)),
+                                ),
+                            );
+                        }
+                        block = block.push(modes.wrap().vertical_spacing(6));
+                        block = block.push(text("Нажатие применяет правило ко всему контейнеру. Убрать правило — наследовать доступ родителя, а не обязательно закрыть доступ. Защищённые пути и пересечения с Nix проверяются перед сохранением. Режима полного скрытия пока нет.").size(12));
+                    }
+                }
+            }
             page = page.push(container(block).padding(12).width(Length::Fill));
         }
         if self.data.containers.is_empty() {
@@ -4106,6 +4214,23 @@ mod tests {
 
     /// The task lines read, CPU made of two readings' ticks, launches
     /// chosen alone or with Ctrl, and what is ended asked first.
+    #[test]
+    fn folder_chooser_cannot_redirect_a_draft_to_another_container() {
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Files);
+        panel.data =
+            parse("container\ta\tprivate\thost\t789abc\ncontainer\tb\tprivate\thost\t789abc\n");
+        let _ = panel.update(Msg::FilesEdit("a".into()));
+        let _ = panel.update(Msg::FolderDraft("~/project".into()));
+        let _ = panel.update(Msg::Select("b".into()));
+        assert_eq!(panel.folder_draft, Some(("a".into(), "~/project".into())));
+        let _ = panel.update(Msg::FilesEdit("b".into()));
+        let _ = panel.update(Msg::FolderPicked("a".into(), Some("~/wrong".into())));
+        assert_eq!(panel.folder_draft, Some(("b".into(), String::new())));
+        let _ = panel.update(Msg::FolderPicked("b".into(), Some("~/right".into())));
+        assert_eq!(panel.folder_draft, Some(("b".into(), "~/right".into())));
+        let _ = panel.view_files();
+    }
+
     #[test]
     fn file_access_overview_retains_provenance_and_rule_failures() {
         let data = parse("container\twork\tprivate\thost\t789abc\npath\twork\t/home/u/shared\t0\npath-source\twork\t/home/u/shared\tnix\nfolder-rule\twork\toverlay\t/home/u/project\nfolder-error\twork\tinvalid policy\n");
