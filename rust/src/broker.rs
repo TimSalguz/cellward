@@ -1778,9 +1778,8 @@ fn link_answer(
                     Err(why) => return refused(why, &shown),
                 }
                 let file_uri = format!("file://{uri}");
-                match crate::links::choose_of_type(
-                    &tools.busctl,
-                    &tools.kdialog,
+                match crate::links::choose_cellward(
+                    &tools.window,
                     &content_type,
                     if scheme.is_some() { uri } else { &file_uri },
                     &programs,
@@ -1812,22 +1811,8 @@ fn link_answer(
         .unwrap_or(&id)
         .to_owned();
     let app_id = OsString::from(crate::desktop::stable_key(&id));
-    // An entry CellWard does not take over (a symlink of the user's, of
-    // home-manager's, any entry where sync takes none over): run where the
-    // link was asked for — in the zone, in the asking program's own
-    // container —, as `xdg-open` there would run it; no network is crossed.
-    // A program of no container known (a throwaway sandbox's) gets the
-    // zone's own, where `xdg-open` in the zone ran it before.
-    if !crate::desktop::intercepted(&tools.home, &id) {
-        let mut argv: Vec<OsString> = vec![zone.into()];
-        if let Asker::Container(c) = &asker {
-            argv.push("--container".into());
-            argv.push(c.name.clone().into());
-        }
-        argv.push("--".into());
-        argv.extend(cmd);
-        return (start(&app_id, &argv, true), zone.to_owned(), id, shown, who);
-    }
+    // Every handler follows the same explicit environment choice, including
+    // symlinked desktop entries not rewritten by desktop interception.
     let locked = tools
         .state
         .join(zone)

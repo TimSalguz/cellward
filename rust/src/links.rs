@@ -5,12 +5,10 @@
 //! broker on the host (`crate::broker`, a link request). Two choices are made
 //! there, each by its owner (owner, 2026-09-26):
 //!
-//! * **the program** is the distribution's to offer: the portal backend's own
-//!   window of choice (`org.freedesktop.impl.portal.AppChooser` — GNOME's,
-//!   KDE's, as the portal configuration names it) with the programs that
-//!   claim the link's scheme, the distribution's default first
-//!   ([`programs_for`], [`distro_default`]). Called on the implementation, not
-//!   on the portal: it answers with the choice and starts nothing;
+//! * **the program** is selected in Cellward; candidates and the default come
+//!   from distribution MIME entries ([`programs_for`], [`distro_default`]).
+//!   The legacy portal chooser remains available as a helper, but the broker
+//!   uses [`choose_cellward`], which starts nothing;
 //! * **the container and the network** are CellWard's: the launch window, as
 //!   for any launch a zone asks for, with the asking zone in it.
 //!
@@ -18,8 +16,7 @@
 //! scheme from this container open in this program" ([`rule`], Nix
 //! `containers.<c>.links`, `cellward container links`). It skips the choice
 //! of the program only — the launch window still shows. The host's own
-//! default (`mimeapps.list`) is never changed by CellWard; KDE's window has
-//! a checkbox of its own that does, and that is the distribution's.
+//! default (`mimeapps.list`) is never changed by CellWard.
 //!
 //! A program's rule is taken only for a container the broker is sure of
 //! (`crate::broker`): the zone's own programs and one not known choose every
@@ -314,6 +311,45 @@ pub fn configured(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Cellward's handler step. It chooses only a handler, never launches it or
+/// changes the system MIME default. Closing/unavailable UI must not fall back
+/// to a portal which could start a handler outside the selected environment.
+pub fn choose_cellward(
+    window: &Path,
+    content_type: &str,
+    uri: &str,
+    programs: &[Program],
+    deadline: Option<std::time::Duration>,
+) -> Choice {
+    if programs.is_empty() {
+        return Choice::Unavailable(format!("нет программы для {content_type}"));
+    }
+    let rows: Vec<_> = programs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (format!("handler-{i}"), format!("{} ({})", p.name, p.id)))
+        .collect();
+    // Cancellation is safe for Enter on a newly appeared app-origin question.
+    let mut answers = vec![("cancel", "Отмена", false)];
+    answers.extend(
+        rows.iter()
+            .map(|(tag, label)| (tag.as_str(), label.as_str(), false)),
+    );
+    let text = format!("Выберите программу для открытия: {}\nСледующий шаг — выбор контейнера и сети. Системная программа по умолчанию не изменится.", crate::bus_filter::loggable(uri));
+    match crate::window::question(window, "Открыть с помощью", &text, None, &answers, deadline)
+    {
+        crate::window::Asked::Chose(tag) => rows
+            .iter()
+            .position(|(id, _)| id == &tag)
+            .map(|i| Choice::Chosen(programs[i].id.clone()))
+            .unwrap_or(Choice::Cancelled),
+        crate::window::Asked::Closed | crate::window::Asked::NoAnswer => Choice::Cancelled,
+        crate::window::Asked::NotShown => {
+            Choice::Unavailable("не удалось открыть окно выбора программы Cellward".into())
+        }
+    }
+}
+
 /// Ask the person which program opens `uri`: the portal backends' window of
 /// choice ([`backends`]), through `busctl` on the session bus — waited for as
 /// long as the person takes; `kdialog`'s menu where no backend has one.
@@ -523,6 +559,67 @@ fn kdialog_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cellward_handler_choice_validates_answers_and_never_falls_back() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "cellward-handler-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let script = dir.join("window");
+        let programs = vec![
+            Program {
+                id: "first".into(),
+                name: "Browser".into(),
+            },
+            Program {
+                id: "second".into(),
+                name: "Browser".into(),
+            },
+        ];
+        for (answer, expected) in [
+            ("handler-1", Some("second")),
+            ("handler-20", None),
+            ("cancel", None),
+            ("second", None),
+        ] {
+            fs::write(
+                &script,
+                format!("#!/bin/sh\ncat > /dev/null\nprintf 'action\\t{answer}\\n'\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+            let result = choose_cellward(
+                &script,
+                "x-scheme-handler/https",
+                "https://example.org/",
+                &programs,
+                Some(std::time::Duration::from_secs(2)),
+            );
+            match (result, expected) {
+                (Choice::Chosen(id), Some(want)) => assert_eq!(id, want),
+                (Choice::Cancelled, None) => {}
+                other => panic!("unexpected handler selection: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            choose_cellward(
+                &dir.join("missing"),
+                "https",
+                "https://example.org/",
+                &programs,
+                None
+            ),
+            Choice::Unavailable(_)
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn a_scheme_is_told_by_the_standard() {

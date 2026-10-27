@@ -8,8 +8,8 @@ link chooser or workspace creation flow is implemented.
 
 Previously the link broker identified its source container but called
 `ask_window` with `--from-zone` only. It now also passes the known source
-container as a compatible existing-row proposal. Handler selection still uses
-the system AppChooser; the complete two-step interface remains pending.
+container as a compatible existing-row proposal. Handler selection now uses a Cellward guarded menu. A single window with
+Back preserving both steps remains pending.
 The unconfined/host opener path also needs tracing: it must not manufacture a
 container identity from application-supplied environment variables.
 
@@ -76,8 +76,8 @@ current shared container.
 1. Trace launcher, portal, direct xdg-open and unconfined link paths. Pass a
    verified source context from broker to picker; it remains a proposal until
    the user confirms, never authority derived from URI/command/environment.
-2. Replace system AppChooser for links with the Cellward handler step, retaining
-   MIME/default discovery. Preserve choices on Back and keep the footer visible
+2. The broker now uses a Cellward handler menu, retaining MIME/default discovery.
+   Remaining: preserve choices on Back and keep the footer visible
    at small sizes and fractional scales.
 3. Add exact-source / own-handler / other-workspace choices and broker-side
    validation, including no-escape constraints and live instance identity.
@@ -121,3 +121,19 @@ name into the existing picker as a proposal. It selects only an existing row
 compatible with the source network, still asks for confirmation, and saves no
 application assignment. Exact live temporary instance selection, unconfined
 paths and the new combined handler/environment interface remain pending.
+
+## Handler menu implementation
+
+The broker uses `choose_cellward` for multiple handlers. Candidate order comes
+from MIME discovery (default first). A safe Cancel entry is initially selected;
+opaque numeric action tags are validated against the offered candidates, never
+interpreted as desktop IDs or commands. The display uses a redacted URI. Closing,
+timeout and unavailable Cellward UI do not fall back to a launching portal.
+A single candidate still skips handler selection; source rules skip it too.
+All handler desktop entries, including non-intercepted symlinks, now pass the
+explicit environment picker. The legacy system chooser helper remains in code
+for other callers but is not used by this broker path.
+
+This is the existing menu widget, not the finished two-step Back-enabled
+launcher. Unconfined host origins, exact ephemeral identity and cross-container
+browser handoff still require end-to-end implementation and graphical tests.
