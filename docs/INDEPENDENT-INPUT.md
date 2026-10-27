@@ -13,7 +13,8 @@ Escape cancels. This is scoped synthetic input, not a complete virtual seat.
 Physical pointer motion/buttons are not yet a complete independent locked channel.
 Selection continuations are now bound to the live requesting process and token
 (pidfd); newline entry requires an explicit wire-level opt-in. Initial selection
-authorization remains open: see [typing control ownership](CLIPBOARD.md#typing-control-ownership-2026-10-27).
+authorization remains open; the centralized lease design and a rejected
+per-launch-prompt approach are recorded in [TYPING-AUTHORITY.md](TYPING-AUTHORITY.md). See [typing control ownership](CLIPBOARD.md#typing-control-ownership-2026-10-27).
 
 For windows handled by Cellward's frame, the `always_focused` policy already
 maintains application-facing activation and focus state (`cellward container set NAME always-focused on|off|default`, Nix
