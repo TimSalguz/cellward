@@ -2597,6 +2597,47 @@ mod tests {
                 assert!((p & 255) <= a && ((p >> 8) & 255) <= a && ((p >> 16) & 255) <= a);
             }
         }
+        // Fractional rounding of the row origin must never leave transparent
+        // pixels between the border and a revealed hover title.
+        for scale in [120, 150, 180, 210, 240] {
+            for border in 1..=4 {
+                let spec = top::TopSpec {
+                    width: 80,
+                    height: 30,
+                    border,
+                    radius: 8,
+                    edge_height: 30,
+                    content_y: None,
+                    visible: true,
+                    lit: None,
+                };
+                let (w, _, pixels) = top::render_top(&text, spec, scale);
+                let s = scale as f32 / 120.0;
+                let y = device(12, scale);
+                for x in 0..w {
+                    let lx = (x as f32 + 0.5) / s;
+                    if lx <= border as f32 / 2.0 || lx >= spec.width as f32 - border as f32 / 2.0 {
+                        continue;
+                    }
+                    let at = ((y * w + x) * 4 + 3) as usize;
+                    assert_eq!(
+                        pixels[at], 255,
+                        "horizontal seam: scale={scale}, border={border}, x={x}"
+                    );
+                }
+                let x = w / 2;
+                for y in 0..device(border + HEIGHT, scale) {
+                    if (y as f32 + 0.5) / s >= (border + HEIGHT) as f32 {
+                        continue;
+                    }
+                    assert_eq!(
+                        pixels[((y * w + x) * 4 + 3) as usize],
+                        255,
+                        "vertical seam: scale={scale}, border={border}, y={y}"
+                    );
+                }
+            }
+        }
         let one = text.top_at(120, base).unwrap();
         for width in [1, 2, 3, 10] {
             let (w, h, pixels) = top::render_top(&text, top::TopSpec { width, ..base }, 150);

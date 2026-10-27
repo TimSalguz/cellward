@@ -34,7 +34,7 @@ impl TopSpec {
 
     pub fn title_at(&self, x: f32, y: f32) -> bool {
         let b = self.border as f32;
-        self.visible && x >= b && x < self.width as f32 - b && y >= b && y < b + HEIGHT as f32
+        self.visible && x >= b && x <= self.width as f32 - b && y >= b && y < b + HEIGHT as f32
     }
 
     pub fn input_at(&self, x: f32, y: f32) -> bool {
@@ -109,16 +109,23 @@ pub fn render_top(text: &Text, spec: TopSpec, scale: u32) -> (i32, i32, Vec<u8>)
             let depth = spec.depth(lx, ly);
             let title = spec.title_at(lx, ly);
             let ring = if ly < spec.edge_height as f32 {
-                rings.iter().find(|(end, _)| depth < *end)
+                rings.iter().find(|(end, _)| depth <= *end)
             } else {
                 None
             };
-            let color = if let Some((_, color)) = ring {
+            let mut color = if let Some((_, color)) = ring {
                 *color
-            } else if title && x >= b && x < w - b && y >= b && y < b + row_h {
-                let at = (((y - b) * row_w + x - b) * 4) as usize;
-                let word = u32::from_ne_bytes(row[at..at + 4].try_into().unwrap());
-                Rgb((word >> 16) as u8, (word >> 8) as u8, word as u8)
+            } else if title {
+                // Logical coverage and rounded raster origins can disagree by
+                // a pixel at fractional scales. Fill the entire title region,
+                // including pixels outside the rounded text/button raster.
+                if x >= b && x < w - b && y >= b && y < b + row_h {
+                    let at = (((y - b) * row_w + x - b) * 4) as usize;
+                    let word = u32::from_ne_bytes(row[at..at + 4].try_into().unwrap());
+                    Rgb((word >> 16) as u8, (word >> 8) as u8, word as u8)
+                } else {
+                    text.bg
+                }
             } else {
                 if let Some((iy, side, bytes)) = &inner {
                     if y >= *iy && y < iy + side {
@@ -140,10 +147,25 @@ pub fn render_top(text: &Text, spec: TopSpec, scale: u32) -> (i32, i32, Vec<u8>)
                 }
                 continue;
             };
-            let cover = ((depth * s + 0.5).clamp(0.0, 1.0)).min(if title {
+            let inner_cover = ((spec.border as f32 - depth) * s + 0.5).clamp(0.0, 1.0);
+            // A revealed title backs the border's inner antialiased edge.
+            // Blend into its background, never into transparency: these are
+            // adjacent parts of one opaque surface, including fractional pixels.
+            let backed = spec.visible && ly < (spec.border + HEIGHT) as f32;
+            if backed && ring.is_some() && inner_cover < 1.0 {
+                let mix = |edge: u8, bg: u8| {
+                    (edge as f32 * inner_cover + bg as f32 * (1.0 - inner_cover)).round() as u8
+                };
+                color = Rgb(
+                    mix(color.0, text.bg.0),
+                    mix(color.1, text.bg.1),
+                    mix(color.2, text.bg.2),
+                );
+            }
+            let cover = ((depth * s + 0.5).clamp(0.0, 1.0)).min(if title || backed {
                 1.0
             } else {
-                ((spec.border as f32 - depth) * s + 0.5).clamp(0.0, 1.0)
+                inner_cover
             });
             let at = ((y * w + x) * 4) as usize;
             pixels[at..at + 4].copy_from_slice(&premultiplied(color, cover));
