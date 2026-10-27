@@ -449,8 +449,11 @@
 - [x] Bound and validate OpenConnect option values as well as option names:
   length/character checks, numeric policy bounds and path-only usergroup.
   Regression tests plus 1140 core tests passed.
-- [ ] Add fuzz targets for Wayland, D-Bus and Pulse protocol parsers; run
-  dependency audit and targeted Miri checks with reproducible tool versions.
+- [x] Add locked libFuzzer targets for Wayland, D-Bus, Pulse and typing.
+  Initial native coverage-guided smoke runs passed; see rust/fuzz/README.md.
+- [ ] Longer stateful/FD-bearing fuzz campaigns and ASan; dependency audit
+  and targeted Miri checks with reproducible tool versions. cargo-audit/Miri
+  are unavailable; fetching cargo-audit failed due to builder DNS resolution.
 - [x] Reproduce and fix transparent pixels at hover/frame joins: 100–200%,
   border 1–4 px (`a63a5f9`). The independent compositor opacity seam remains
   open; this fix does not claim to solve per-surface opacity.

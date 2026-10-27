@@ -1,0 +1,44 @@
+[package]
+name = "cellward-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+vpn-zone = { path = ".." }
+wl-proxy = { version = "=0.1.4", default-features = false }
+
+[[bin]]
+name = "dbus"
+path = "fuzz_targets/dbus.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pulse"
+path = "fuzz_targets/pulse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typing"
+path = "fuzz_targets/typing.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "wayland"
+path = "fuzz_targets/wayland.rs"
+test = false
+doc = false
+bench = false
