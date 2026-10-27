@@ -56,6 +56,7 @@ pub enum Request {
         token: u64,
         timing: Timing,
         mode: Mode,
+        allow_newlines: bool,
         text: String,
     },
 }
@@ -76,6 +77,7 @@ impl Request {
                 token,
                 timing,
                 mode,
+                allow_newlines,
                 text,
             } => {
                 out.push(1);
@@ -83,10 +85,12 @@ impl Request {
                 for ms in [timing.start_ms, timing.between_ms, timing.hold_ms] {
                     out.extend_from_slice(&ms.to_le_bytes());
                 }
-                out.push(match mode {
-                    Mode::Unicode => 0,
-                    Mode::Keycodes => 1,
-                });
+                out.push(
+                    (match mode {
+                        Mode::Unicode => 0,
+                        Mode::Keycodes => 1,
+                    }) | if *allow_newlines { 2 } else { 0 },
+                );
                 out.extend_from_slice(text.as_bytes());
             }
         }
@@ -111,19 +115,29 @@ impl Request {
                     between_ms: u16::from_le_bytes(bytes.get(11..13)?.try_into().ok()?),
                     hold_ms: u16::from_le_bytes(bytes.get(13..15)?.try_into().ok()?),
                 };
-                let mode = match bytes.get(15)? {
+                let flags = *bytes.get(15)?;
+                if flags & !3 != 0 {
+                    return None;
+                }
+                let allow_newlines = flags & 2 != 0;
+                let mode = match flags & 1 {
                     0 => Mode::Unicode,
                     1 => Mode::Keycodes,
                     _ => return None,
                 };
                 let text = std::str::from_utf8(bytes.get(16..)?).ok()?;
-                if !timing.valid() || text.is_empty() || text.len() > MAX_TEXT {
+                if !timing.valid()
+                    || text.is_empty()
+                    || text.len() > MAX_TEXT
+                    || (!allow_newlines && text.contains(['\n', '\r']))
+                {
                     return None;
                 }
                 Some(Self::Type {
                     token,
                     timing,
                     mode,
+                    allow_newlines,
                     text: text.to_owned(),
                 })
             }
@@ -233,11 +247,29 @@ fn us_key(c: char) -> Option<Stroke> {
 mod tests {
     use super::*;
     #[test]
+    fn newline_permission_is_enforced_by_wire_parser() {
+        for text in ["command\n", "command\r", "command\r\n"] {
+            let mut request = Request::Type {
+                token: 1,
+                timing: Timing::default(),
+                mode: Mode::Unicode,
+                allow_newlines: false,
+                text: text.into(),
+            };
+            assert!(Request::parse(&request.bytes()).is_none());
+            if let Request::Type { allow_newlines, .. } = &mut request {
+                *allow_newlines = true;
+            }
+            assert!(Request::parse(&request.bytes()).is_some());
+        }
+    }
+    #[test]
     fn typing_is_bounded_and_keeps_unicode_out_of_shell_arguments() {
         let request = Request::Type {
             token: 42,
             timing: Timing::default(),
             mode: Mode::Unicode,
+            allow_newlines: true,
             text: "Ab Я🙂\n".into(),
         };
         let bytes = request.bytes();

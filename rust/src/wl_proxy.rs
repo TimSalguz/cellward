@@ -2740,6 +2740,7 @@ fn serve(
                             timing,
                             mode,
                             text,
+                            ..
                         } => {
                             crate::wl_frame::typing::start(seq, token, timing, mode, &text, fd);
                         }
@@ -7044,6 +7045,67 @@ mod tests {
             .map(|(_, op, _)| *op)
             .collect();
         assert_eq!(heard, [0, 5], "the program saw the panel's input");
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    #[test]
+    fn question_keyboard_navigation_does_not_type_into_the_parent() {
+        let Some(font) = test_font() else { return };
+        let rig = Rig::with_drawing(
+            "question-keyboard",
+            Some(titled(TitleMode::Always, Some(font))),
+        );
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, BUTTON_GLOBALS);
+        a_window(&mut client);
+        let got = log_until(&log, |m| m.iface == "xdg_wm_base" && m.opcode == 2);
+        let root = got.last().unwrap().args[1];
+        log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        request(&mut client, 6, 1, &11u32.to_ne_bytes());
+        let got = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 1);
+        let keyboard = got.last().unwrap().args[0];
+        let mut bytes = Vec::new();
+        event(&mut bytes, keyboard, 1, |a| {
+            a.extend_from_slice(&words(&[100, root as i32, 0]))
+        });
+        compositor.write_all(&bytes).unwrap();
+        events_until(&mut client, |o, op, _| o == 11 && op == 1);
+        let channel = rig.channel.as_ref().unwrap();
+        let mut message = panel_message(QUESTION, 8, None);
+        message.extend_from_slice(&ask_request("Network permission", &["Deny", "Allow"]).unwrap());
+        sys::send_with_fds(channel.as_raw_fd(), &message, &[]).unwrap();
+        log_until(&log, |m| m.iface == "xdg_surface" && m.opcode == 2);
+        // No popup keyboard grab: the compositor still focuses the app.
+        // Navigation during the countdown must not extend that countdown.
+        let send_key = |compositor: &mut UnixStream, serial: i32, key: i32, down: i32| {
+            let mut bytes = Vec::new();
+            event(&mut bytes, keyboard, 3, |a| {
+                a.extend_from_slice(&words(&[serial, 0, key, down]))
+            });
+            compositor.write_all(&bytes).unwrap();
+        };
+        send_key(&mut compositor, 101, 108, 1); // Down: first safe choice.
+        send_key(&mut compositor, 102, 108, 0);
+        std::thread::sleep(crate::wl_frame::PANEL_GUARD + Duration::from_millis(500));
+        send_key(&mut compositor, 103, 28, 1); // Enter chooses Deny.
+        channel
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reply = [0u8; 10];
+        (&*channel).read_exact(&mut reply).unwrap();
+        assert_eq!(reply.as_slice(), panel_message(ANSWERED, 8, Some(0)));
+        // The panel is gone, but Enter's release must still be swallowed.
+        send_key(&mut compositor, 104, 28, 0);
+        send_key(&mut compositor, 105, 30, 1); // Normal typing resumes.
+        let heard = events_until(&mut client, |o, op, _| o == 11 && op == 3);
+        let keys: Vec<_> = heard
+            .iter()
+            .filter(|(o, op, _)| *o == 11 && *op == 3)
+            .collect();
+        assert_eq!(keys.len(), 1, "panel navigation leaked to the application");
+        assert_eq!(keys[0].2[2], 30);
         drop(client);
         assert_eq!(rig.finish(), 0);
     }

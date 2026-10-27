@@ -1315,6 +1315,10 @@ pub struct Prompt {
 }
 
 impl Prompt {
+    pub(crate) fn button_count(&self) -> usize {
+        self.buttons.len()
+    }
+
     /// `text` wrapped by words into [`PROMPT_ROWS`] rows at most, a row a
     /// paragraph at least; `labels` the buttons, [`PROMPT_BUTTONS`] at most,
     /// in rows at the bottom right — as many to a row as fit —, the first on

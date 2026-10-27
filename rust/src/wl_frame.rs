@@ -4102,8 +4102,8 @@ impl Drop for Shown {
 
 /// A question's panel: an `xdg_popup` of the program's window under its
 /// title strip (at its top without one), a surface of the proxy's own like
-/// the ≡'s dropdown — but without a grab: the keyboard stays the
-/// program's, and nothing of the person's elsewhere closes it. Every image
+/// the ≡'s dropdown — but without a grab. Keyboard events on its focused
+/// parent are routed to the panel; input in other windows stays there. Every image
 /// of it drawn once, when it opens ([`Text::prompt_at`]); a button lights
 /// under the pointer (a new buffer of the same region) and answers on a
 /// press and a release on it. Every answer waits for its countdown
@@ -4340,6 +4340,33 @@ impl Window {
         questions.next_second(panel.shown?, panel.left)
     }
 
+    /// Keyboard navigation belongs to this panel only while its parent has
+    /// real compositor focus. Navigation never restarts the safety countdown.
+    fn prompt_key(&mut self, f: &Frames, key: u32) {
+        let Some(panel) = &mut self.prompt else {
+            return;
+        };
+        let action = menu_key(key, panel.prompt.button_count(), panel.lit);
+        let left = panel
+            .shown
+            .map_or(PANEL_GUARD.as_secs(), |s| f.questions.left(s));
+        let answer = match action {
+            MenuKey::Light(row) => {
+                panel.light(Some(row), left);
+                None
+            }
+            MenuKey::Act(row) if f.questions.click_allowed(row, panel.shown) => Some(row),
+            MenuKey::Close if f.questions.click_allowed(0, panel.shown) => Some(0),
+            _ => None,
+        };
+        if let Some(row) = answer {
+            let seq = panel.seq;
+            self.close_prompt();
+            f.questions
+                .done(Reply::Chose(seq, u8::try_from(row).unwrap_or(u8::MAX)));
+        }
+    }
+
     /// The left button down (`down`) or up at (`x`, `y`) on the panel: a
     /// press too soon is none, and makes the next one wait; a release on
     /// the button pressed answers.
@@ -4427,6 +4454,8 @@ struct Keyboard {
     f: Rc<Frames>,
     typing: Rc<RefCell<typing::KeyboardState>>,
     menu: bool,
+    /// Presses consumed by a question: their releases stay consumed after it closes.
+    prompt_keys: Vec<u32>,
     /// The keys down on the program's surface, and its locked modifiers and
     /// group: what a held-back leave lets go of (3d).
     down: Vec<u32>,
@@ -4605,6 +4634,40 @@ impl WlKeyboardHandler for Keyboard {
     ) {
         if typing::key(slf, key, state == WlKeyboardKeyState::PRESSED) {
             return;
+        }
+        let pressed = state == WlKeyboardKeyState::PRESSED;
+        if let Some(at) = self.prompt_keys.iter().position(|k| *k == key) {
+            if !pressed {
+                self.prompt_keys.swap_remove(at);
+            }
+            return;
+        }
+        // Use compositor focus, never the application's always-focused state.
+        // A request in another window must not take this window's keyboard.
+        let prompt_window = {
+            let focus = self.typing.borrow();
+            if focus.on || self.menu {
+                focus
+                    .surface
+                    .upgrade()
+                    .and_then(|s| spot(&s))
+                    .map(|(w, _)| w)
+            } else {
+                None
+            }
+        };
+        if pressed && !self.down.contains(&key) {
+            if let Some(window) = prompt_window {
+                if let Ok(mut window) = window.try_borrow_mut() {
+                    if window.prompt.is_some() {
+                        self.prompt_keys.push(key);
+                        if self.f.first(serial) {
+                            window.prompt_key(&self.f, key);
+                        }
+                        return;
+                    }
+                }
+            }
         }
         if !self.menu {
             if state == WlKeyboardKeyState::PRESSED {
@@ -5714,6 +5777,7 @@ impl WlSeatHandler for Seat {
             f: self.f.clone(),
             typing: typing::register_keyboard(id, &self.f, slf),
             menu: false,
+            prompt_keys: Vec::new(),
             down: Vec::new(),
             locked: (0, 0),
             depressed: 0,

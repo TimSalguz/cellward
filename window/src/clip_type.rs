@@ -183,6 +183,7 @@ pub fn type_entry(
             token: target.token,
             timing,
             mode,
+            allow_newlines: matches!(lines, LineBreaks::Enter),
             text,
         },
     )?;
