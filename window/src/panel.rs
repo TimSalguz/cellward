@@ -284,6 +284,7 @@ struct ProcRow {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Data {
+    host_home: String,
     /// Where each zone's names go past its tunnel: `zone → (vpn|public|-,
     /// words)` (`dns` lines).
     dns: HashMap<String, (String, String)>,
@@ -326,6 +327,7 @@ fn parse(text: &str) -> Data {
     for line in text.lines() {
         let f: Vec<&str> = line.split('\t').collect();
         match f.as_slice() {
+            ["host-home", path] => d.host_home = (*path).into(),
             ["route-policy", value] => d.route_policy = (*value).to_owned(),
             ["node", name] if !name.is_empty() => d.nodes.push((*name).to_owned()),
             ["system-vpn", name] if !name.is_empty() => d.system_vpns.push((*name).to_owned()),
@@ -949,7 +951,7 @@ enum Pending {
     /// Its programs run in another network: switch now, or with a restart.
     Switch(String),
     /// A directory chosen: for how long.
-    Grant(String),
+    Grant(String, String),
     /// Merge into which one.
     Merge,
     /// Merge into this one, the person agreeing.
@@ -1006,7 +1008,7 @@ enum Msg {
     Switch(bool),
     Stop,
     GrantAsk,
-    Chosen(Option<String>),
+    Chosen(String, Option<String>),
     GrantFor(&'static str),
     Revoke(String),
     FolderRule(String, String),
@@ -1015,6 +1017,8 @@ enum Msg {
     SaveFolder(&'static str),
     BrowseFolder(String),
     FolderPicked(String, Option<String>),
+    BrowseInline(String),
+    FolderListed(String, String, u64, Result<(Vec<String>, bool), String>),
     MergeAsk,
     MergeInto(String),
     MergeGo,
@@ -1114,6 +1118,10 @@ struct Panel {
     rates: HashMap<String, (f64, f64)>,
     selected: Option<String>,
     folder_draft: Option<(String, String)>,
+    folder_browser: Option<(String, Vec<String>, bool)>,
+    folder_loading: bool,
+    folder_generation: u64,
+    folder_trouble: Option<String>,
     explained: Option<(String, Result<String, String>)>,
     pending: Option<Pending>,
     /// What the last action said: `Ok` done, `Err` refused.
@@ -1254,7 +1262,7 @@ fn tick_later() -> Task<Msg> {
 
 /// A directory to grant, chosen in the file dialog of `dirs` (kdialog);
 /// `None` when none was.
-fn choose_dir(dirs: PathBuf, target: Option<String>) -> Task<Msg> {
+fn choose_dir(dirs: PathBuf, target: String, legacy: bool) -> Task<Msg> {
     Task::perform(
         async move {
             let (done, over) = iced::futures::channel::oneshot::channel();
@@ -1278,11 +1286,64 @@ fn choose_dir(dirs: PathBuf, target: Option<String>) -> Task<Msg> {
             });
             over.await.ok().flatten()
         },
-        move |path| match &target {
-            Some(name) => Msg::FolderPicked(name.clone(), path),
-            None => Msg::Chosen(path),
+        move |path| {
+            if legacy {
+                Msg::Chosen(target.clone(), path)
+            } else {
+                Msg::FolderPicked(target.clone(), path)
+            }
         },
     )
+}
+
+/// Bound work; directory I/O runs on a worker, never in the UI event loop.
+fn list_folders(path: &str) -> Result<(Vec<String>, bool), String> {
+    let mut entries = Vec::new();
+    for (examined, entry) in std::fs::read_dir(path)
+        .map_err(|e| e.to_string())?
+        .enumerate()
+    {
+        if examined >= 4096 {
+            entries.sort();
+            return Ok((entries, true));
+        }
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().is_dir() {
+            if let Some(path) = entry.path().to_str() {
+                entries.push(path.to_owned());
+            }
+        }
+    }
+    entries.sort();
+    Ok((entries, false))
+}
+
+/// Lexical configured inheritance, not the mounts of running applications.
+fn folder_mode<'a>(c: &'a Cont, path: &str, home: &str) -> &'a str {
+    let path = std::path::Path::new(path);
+    if c.folder_error.is_some() {
+        return "invalid";
+    }
+    if home.is_empty() || !path.starts_with(home) {
+        return "outside-home";
+    }
+    c.folder_rules
+        .iter()
+        .filter(|(_, p)| path.starts_with(p))
+        .max_by_key(|(_, p)| std::path::Path::new(p).components().count())
+        .map(|(mode, _)| mode.as_str())
+        .unwrap_or_else(|| {
+            if c.paths.iter().any(|(p, _)| path.starts_with(p)) {
+                "rw"
+            } else {
+                match c.home.as_str() {
+                    "private" => "private",
+                    "layer" => "overlay",
+                    "main" => "rw",
+                    _ => "unknown",
+                }
+            }
+        })
 }
 
 impl Panel {
@@ -1297,6 +1358,10 @@ impl Panel {
             rates: HashMap::new(),
             selected: None,
             folder_draft: None,
+            folder_browser: None,
+            folder_loading: false,
+            folder_generation: 0,
+            folder_trouble: None,
             explained: None,
             pending: None,
             said: None,
@@ -1584,29 +1649,25 @@ impl Panel {
                 Some(c) => self.act(vec!["container".into(), "stop".into(), c.name]),
                 None => Task::none(),
             },
-            Msg::GrantAsk => match self.dirs.clone() {
-                Some(dirs) => choose_dir(dirs, None),
-                None => {
-                    self.said = Some(Err(
-                        "выбрать каталог нечем — в терминале: cellward container grant <контейнер> \
-                         <каталог>"
-                            .to_owned(),
-                    ));
+            Msg::GrantAsk => match (self.dirs.clone(), self.chosen().map(|c| c.name.clone())) {
+                (Some(dirs), Some(target)) => choose_dir(dirs, target, true),
+                _ => {
+                    self.said = Some(Err("Выберите контейнер и каталог; при отсутствии диалога используйте cellward container grant <контейнер> <каталог>".into()));
                     Task::none()
                 }
             },
-            Msg::Chosen(Some(dir)) => {
-                self.pending = Some(Pending::Grant(dir));
+            Msg::Chosen(target, Some(dir)) => {
+                if self.selected.as_deref() == Some(target.as_str()) {
+                    self.pending = Some(Pending::Grant(target, dir));
+                }
                 Task::none()
             }
-            Msg::Chosen(None) => Task::none(),
+            Msg::Chosen(_, None) => Task::none(),
             Msg::GrantFor(term) => {
-                let (Some(c), Some(Pending::Grant(dir))) =
-                    (self.chosen().cloned(), self.pending.clone())
-                else {
+                let Some(Pending::Grant(target, dir)) = self.pending.clone() else {
                     return Task::none();
                 };
-                let mut args = vec!["container".into(), "grant".into(), c.name, dir];
+                let mut args = vec!["container".into(), "grant".into(), target, dir];
                 if term != "always" {
                     args.push("--for".into());
                     args.push(term.to_owned());
@@ -1621,7 +1682,61 @@ impl Panel {
                         .iter()
                         .any(|c| c.name == name && matches!(c.home.as_str(), "private" | "layer"))
                 {
+                    self.folder_generation = self.folder_generation.saturating_add(1);
                     self.folder_draft = Some((name, String::new()));
+                    self.folder_browser = None;
+                    self.folder_trouble = None;
+                }
+                Task::none()
+            }
+            Msg::BrowseInline(path) => {
+                let Some((target, _)) = self.folder_draft.clone() else {
+                    return Task::none();
+                };
+                if self.folder_loading {
+                    return Task::none();
+                }
+                let Some(generation) = self.folder_generation.checked_add(1) else {
+                    return Task::none();
+                };
+                self.folder_generation = generation;
+                self.folder_loading = true;
+                self.folder_trouble = None;
+                Task::perform(
+                    async move {
+                        let (tx, rx) = iced::futures::channel::oneshot::channel();
+                        let requested = path.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(list_folders(&requested));
+                        });
+                        (
+                            target,
+                            path,
+                            generation,
+                            rx.await
+                                .unwrap_or_else(|_| Err("Чтение папки прервано".into())),
+                        )
+                    },
+                    |(target, path, generation, result)| {
+                        Msg::FolderListed(target, path, generation, result)
+                    },
+                )
+            }
+            Msg::FolderListed(target, path, generation, result) => {
+                self.folder_loading = false;
+                if generation == self.folder_generation
+                    && self
+                        .folder_draft
+                        .as_ref()
+                        .is_some_and(|(name, _)| name == &target)
+                {
+                    match result {
+                        Ok((entries, limited)) => {
+                            self.folder_browser = Some((path.clone(), entries, limited));
+                            self.folder_draft = Some((target, path));
+                        }
+                        Err(why) => self.folder_trouble = Some(why),
+                    }
                 }
                 Task::none()
             }
@@ -1635,7 +1750,7 @@ impl Panel {
                     return Task::none();
                 }
                 match self.dirs.clone() {
-                    Some(dirs) => choose_dir(dirs, Some(name)),
+                    Some(dirs) => choose_dir(dirs, name, false),
                     None => {
                         self.said =
                             Some(Err("Выбор папок недоступен; введите путь вручную.".into()));
@@ -1646,6 +1761,7 @@ impl Panel {
             Msg::FolderPicked(name, Some(path)) => {
                 if let Some((target, draft)) = &mut self.folder_draft {
                     if target == &name {
+                        self.folder_generation = self.folder_generation.saturating_add(1);
                         *draft = path;
                     }
                 }
@@ -1653,6 +1769,7 @@ impl Panel {
             }
             Msg::FolderPicked(_, None) => Task::none(),
             Msg::FolderDraft(path) => {
+                self.folder_generation = self.folder_generation.saturating_add(1);
                 if let Some((_, draft)) = &mut self.folder_draft {
                     *draft = path;
                 }
@@ -2174,7 +2291,6 @@ impl Panel {
             tab("Подключения", Tab::Zones),
             tab("Настройки", Tab::Settings),
             tab("По умолчанию", Tab::Defaults),
-            container(text(note).size(13)).width(Length::Fill),
             button(text("Закрыть  Esc").size(14))
                 .padding([6, 14])
                 .style(button::secondary)
@@ -2195,6 +2311,9 @@ impl Panel {
             Tab::Defaults => self.view_defaults(),
         };
         let mut page = column![top].spacing(12).padding(16);
+        if !note.is_empty() {
+            page = page.push(text(note).size(13));
+        }
         // What the last action said, whichever tab it was in.
         if let Some(said) = &self.said {
             let (mark, what, color) = match said {
@@ -2978,11 +3097,11 @@ impl Panel {
             ]
             .spacing(8)
             .into(),
-            Pending::Grant(dir) => column![
+            Pending::Grant(target, dir) => column![
                 question(format!(
                     "Надолго ли выдать «{dir}» контейнеру «{}»? По истечении срока каталог \
                      отмонтируется и у уже запущенных программ.",
-                    c.name
+                    target
                 )),
                 row![
                     go("Бессрочно".into(), Msg::GrantFor("always"), false),
@@ -3976,6 +4095,66 @@ impl Panel {
                 );
                 if let Some((target, path)) = &self.folder_draft {
                     if target == &c.name {
+                        let home = if self.data.host_home.is_empty() {
+                            "/"
+                        } else {
+                            self.data.host_home.as_str()
+                        };
+                        block = block.push(
+                            button(text("Папки настоящего дома").size(13)).on_press_maybe(
+                                (!self.folder_loading).then(|| Msg::BrowseInline(home.into())),
+                            ),
+                        );
+                        if self.folder_loading {
+                            block = block.push(text("Чтение каталога…").size(12));
+                        }
+                        if let Some(why) = &self.folder_trouble {
+                            block = block.push(
+                                text(format!("Не удалось прочитать каталог: {why}")).size(12),
+                            );
+                        }
+                        if let Some((current, entries, limited)) = &self.folder_browser {
+                            block = block.push(
+                                text(format!(
+                                    "{current} · настроенный режим: {}",
+                                    folder_mode(c, current, home)
+                                ))
+                                .size(13),
+                            );
+                            if let Some(parent) = std::path::Path::new(current)
+                                .parent()
+                                .and_then(|p| p.to_str())
+                            {
+                                block = block.push(
+                                    button(text("↑ На уровень выше").size(13)).on_press_maybe(
+                                        (!self.folder_loading)
+                                            .then(|| Msg::BrowseInline(parent.into())),
+                                    ),
+                                );
+                            }
+                            let mut dirs = column![].spacing(3);
+                            for entry in entries {
+                                dirs = dirs.push(
+                                    button(
+                                        text(format!(
+                                            "{} · {}",
+                                            entry,
+                                            folder_mode(c, entry, home)
+                                        ))
+                                        .size(13),
+                                    )
+                                    .on_press_maybe(
+                                        (!self.folder_loading)
+                                            .then(|| Msg::BrowseInline(entry.clone())),
+                                    ),
+                                );
+                            }
+                            block = block.push(scrollable(dirs).height(180));
+                            if *limited {
+                                block = block.push(text("Показана часть каталога (предел 4096 записей); другую папку можно указать точным путём.").size(12));
+                            }
+                            block = block.push(text("private — свой дом, ro — чтение, rw — реальные записи, overlay — слой. Это наследование настроек; защищённые пути и Nix проверяются при сохранении.").size(12));
+                        }
                         block = block.push(button(text("Выбрать папку…").size(13)).on_press_maybe(
                             (!self.busy).then(|| Msg::BrowseFolder(c.name.clone())),
                         ));
@@ -4007,7 +4186,17 @@ impl Panel {
         if self.data.containers.is_empty() {
             page = page.push(text("Данные контейнеров пока не загружены.").size(13));
         }
-        scrollable(page).height(Length::Fill).into()
+        scrollable(
+            container(page.width(Length::Fill))
+                .padding(iced::Padding {
+                    right: 16.0,
+                    ..iced::Padding::ZERO
+                })
+                .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 
     fn view_settings(&self) -> Element<'_, Msg> {
@@ -4214,6 +4403,59 @@ mod tests {
 
     /// The task lines read, CPU made of two readings' ticks, launches
     /// chosen alone or with Ctrl, and what is ended asked first.
+    #[test]
+    fn legacy_directory_grant_ignores_a_result_after_container_selection_changes() {
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Containers);
+        panel.selected = Some("b".into());
+        let _ = panel.update(Msg::Chosen("a".into(), Some("/home/u/shared".into())));
+        assert!(panel.pending.is_none());
+        panel.selected = Some("a".into());
+        let _ = panel.update(Msg::Chosen("a".into(), Some("/home/u/shared".into())));
+        assert_eq!(
+            panel.pending,
+            Some(Pending::Grant("a".into(), "/home/u/shared".into()))
+        );
+    }
+
+    #[test]
+    fn late_directory_read_cannot_replace_a_manually_edited_path() {
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Files);
+        panel.folder_draft = Some(("a".into(), "~/before".into()));
+        panel.folder_generation = 4;
+        panel.folder_loading = true;
+        let _ = panel.update(Msg::FolderDraft("~/after".into()));
+        let _ = panel.update(Msg::FolderListed(
+            "a".into(),
+            "/host/old".into(),
+            4,
+            Ok((vec![], false)),
+        ));
+        assert_eq!(panel.folder_draft, Some(("a".into(), "~/after".into())));
+        assert!(panel.folder_browser.is_none());
+        assert!(!panel.folder_loading);
+    }
+
+    #[test]
+    fn configured_folder_mode_uses_component_ancestry_and_reports_unknown_views() {
+        let mut c = Cont {
+            home: "private".into(),
+            folder_rules: vec![
+                ("overlay".into(), "/home/u/project".into()),
+                ("ro".into(), "/home/u/project/ref".into()),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(folder_mode(&c, "/home/u/project/ref/a", "/home/u"), "ro");
+        assert_eq!(folder_mode(&c, "/home/u/project/new", "/home/u"), "overlay");
+        assert_eq!(
+            folder_mode(&c, "/home/u/project-other", "/home/u"),
+            "private"
+        );
+        assert_eq!(folder_mode(&c, "/etc", "/home/u"), "outside-home");
+        c.folder_error = Some("bad rules".into());
+        assert_eq!(folder_mode(&c, "/home/u", "/home/u"), "invalid");
+    }
+
     #[test]
     fn folder_chooser_cannot_redirect_a_draft_to_another_container() {
         let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Files);

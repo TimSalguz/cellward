@@ -130,6 +130,7 @@ pub fn data(tools: &Tools) -> String {
             line(&["system-vpn", &name]);
         }
     }
+    line(&["host-home", &tools.home.display().to_string()]);
     let mut containers = crate::container::load_all(tools);
     containers.sort_by(|a, b| a.name.cmp(&b.name));
     for c in &containers {

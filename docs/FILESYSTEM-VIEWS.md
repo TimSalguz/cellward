@@ -138,6 +138,20 @@ The folder editor applies persistent container-wide policy only on a mode button
 press. It does not silently grant access while browsing. Removing a rule means
 inheriting the parent/base view and can therefore increase access; the UI says
 so. Nix overlaps, protected paths and mode validity remain checked by the CLI
-backend. A chooser cancellation changes no draft policy. The current chooser
-uses the configured directory-dialog helper; a built-in tree showing modes for
-all descendants, restart actions and full-hide views are still pending.
+backend. A chooser cancellation changes no draft policy. The editor also provides built-in host-directory navigation (including hidden
+directories) with configured inherited modes beside each child. Enumeration
+runs off the UI thread and examines at most 4096 entries per directory; a limit
+is disclosed rather than presented as a complete listing. Exact paths and the
+optional external directory helper remain available. Late directory results
+are generation-bound and cannot overwrite a newer manual path. Outside-home
+views and invalid policies are reported as unknown/invalid, not inferred from
+the home default. Restart actions, an expanded multi-directory tree and
+full-hide views are still pending.
+
+Native panel layout check: `tests/files-panel-smoke.py` renders synthetic policy
+at 100/125/150/175/200% on private headless Sway and saves screenshots. Visual
+inspection found and fixed an empty header row and scrollbar text overlap. This
+checks rendering/layout, not the application of mounts or every browser gesture.
+Unit tests additionally verify stale inline-directory and legacy chooser results
+cannot redirect a grant or overwrite a newer manual draft. Final GUI suite: 81
+passed; core suite: 1140 passed, 7 ignored.
