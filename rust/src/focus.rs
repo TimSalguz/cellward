@@ -1965,15 +1965,16 @@ fn sway_nodes_of(v: &Value, pid: i64, out: &mut Vec<i64>) {
 /// compositor has it) through the compositor's IPC: the newest of them, by
 /// the compositor's numbering — niri does not promise to keep its ids in
 /// order, and at worst it is another window of the same launch.
+const NO_WINDOW: &str = "у программы нет окна";
+
 pub fn focus_launch(pid: i32) -> Result<(), String> {
-    const NONE: &str = "у программы нет окна";
     let (program, args): (&str, Vec<String>) = match compositor() {
         Some(Compositor::Niri) => {
             let windows = run_json("niri", &["msg", "--json", "windows"])?;
             let id = windows_of_niri(&windows, pid)
                 .into_iter()
                 .max()
-                .ok_or(NONE)?;
+                .ok_or(NO_WINDOW)?;
             (
                 "niri",
                 vec![
@@ -1987,7 +1988,10 @@ pub fn focus_launch(pid: i32) -> Result<(), String> {
         }
         Some(Compositor::Sway) => {
             let tree = run_json("swaymsg", &["-t", "get_tree", "-r"])?;
-            let id = windows_of_sway(&tree, pid).into_iter().max().ok_or(NONE)?;
+            let id = windows_of_sway(&tree, pid)
+                .into_iter()
+                .max()
+                .ok_or(NO_WINDOW)?;
             ("swaymsg", vec![format!("[con_id={id}] focus")])
         }
         None => {
@@ -2006,6 +2010,51 @@ pub fn focus_launch(pid: i32) -> Result<(), String> {
         return Err(format!("{program} {} — не вышло", args.join(" ")));
     }
     Ok(())
+}
+
+/// An explicit user action: focus an existing window, or ask only the
+/// selected launch's tray item to remap, then focus that launch. The original
+/// process reference stays held across discovery and the remap wait.
+pub(crate) fn restore_launch(pid: i32, held: &OwnedFd) -> Result<(), String> {
+    let alive = || crate::tray_restore::held_pid(held) == Some(pid);
+    if !alive() {
+        return Err("экземпляр программы завершился".into());
+    }
+    match focus_launch(pid) {
+        Ok(()) => {
+            return if alive() {
+                Ok(())
+            } else {
+                Err("экземпляр программы завершился".into())
+            }
+        }
+        Err(why) if why == NO_WINDOW => (),
+        Err(why) => return Err(why),
+    }
+    crate::tray_restore::activate(pid, held)?;
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if !alive() {
+            return Err("экземпляр программы завершился".into());
+        }
+        match focus_launch(pid) {
+            Ok(()) => {
+                return if alive() {
+                    Ok(())
+                } else {
+                    Err("экземпляр программы завершился".into())
+                }
+            }
+            Err(why) if why == NO_WINDOW && std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            Err(why) => {
+                return Err(format!(
+                    "программа не показала окно после активации трея: {why}"
+                ))
+            }
+        }
+    }
 }
 
 /// `vpn-zone window-focus --pid <pid> [--ask]`: a program of the launch of
@@ -2051,7 +2100,7 @@ pub fn attention(tools: &Tools, args: &[OsString]) -> u8 {
     if !yes || !crate::sys::pidfd_signal(&target, 0) {
         return 0;
     }
-    match focus_launch(args.pid) {
+    match restore_launch(args.pid, &target) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("cellward window-focus: {e}");

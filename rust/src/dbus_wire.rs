@@ -964,6 +964,59 @@ pub fn plain_args(msg: &[u8], h: &Header) -> Result<Vec<Arg>> {
         .collect()
 }
 
+/// A bounded array of Unix-FD indexes, with no trailing data. Descriptors
+/// themselves are carried separately by the transport and never guessed.
+pub fn fd_array(msg: &[u8], h: &Header, max: usize) -> Result<Vec<u32>> {
+    if h.signature.as_deref() != Some("ah") {
+        return Err(WireError("not an FD array"));
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: h.little,
+    };
+    let bytes = r.u32()? as usize;
+    if bytes % 4 != 0 || bytes / 4 > max || r.pos.checked_add(bytes) != Some(msg.len()) {
+        return Err(WireError("invalid or excessive FD array"));
+    }
+    (0..bytes / 4).map(|_| r.u32()).collect()
+}
+
+/// String arrays used by ListNames and a watcher's variant property. Bounds
+/// apply before allocation, and strings cannot run outside the array body.
+pub fn string_array(msg: &[u8], h: &Header, max: usize) -> Result<Vec<String>> {
+    if h.unix_fds != 0 {
+        return Err(WireError("unexpected descriptors"));
+    }
+    let mut r = Reader {
+        buf: msg,
+        pos: h.body_offset,
+        little: h.little,
+    };
+    match h.signature.as_deref() {
+        Some("as") => (),
+        Some("v") if r.signature()? == "as" => (),
+        _ => return Err(WireError("not a string array")),
+    }
+    let bytes = r.u32()? as usize;
+    let end = r
+        .pos
+        .checked_add(bytes)
+        .ok_or(WireError("array length overflow"))?;
+    if bytes > 64 * 1024 || end != msg.len() {
+        return Err(WireError("invalid string array length"));
+    }
+    r.buf = &msg[..end];
+    let mut out = Vec::new();
+    while r.pos < end {
+        if out.len() >= max {
+            return Err(WireError("too many strings"));
+        }
+        out.push(r.string()?);
+    }
+    Ok(out)
+}
+
 /// The body of [`plain_args`], written back.
 pub fn plain_body(args: &[Arg]) -> Vec<u8> {
     let mut w = Writer { buf: Vec::new() };
@@ -1946,5 +1999,51 @@ mod tests {
         let (msg, h) = reply("v", &w.buf);
         let ask = ItemAsk::One("IconPixmap".into());
         assert!(marked_item_reply(&msg, &h, &ask, &marks(None)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tray_array_tests {
+    use super::*;
+    #[test]
+    fn fd_indexes_are_bounded_and_reject_trailing_or_partial_data() {
+        let make = |body: &[u8]| {
+            let msg = message(METHOD_CALL, 0, 1, &[Field::Signature("ah")], body);
+            let h = parse_header(&msg).unwrap();
+            (msg, h)
+        };
+        let mut body = 8u32.to_le_bytes().to_vec();
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&1u32.to_le_bytes());
+        let (msg, h) = make(&body);
+        assert_eq!(fd_array(&msg, &h, 2).unwrap(), [0, 1]);
+        assert!(fd_array(&msg, &h, 1).is_err());
+        body.push(0);
+        let (msg, h) = make(&body);
+        assert!(fd_array(&msg, &h, 2).is_err());
+        let (msg, h) = make(&u32::MAX.to_le_bytes());
+        assert!(fd_array(&msg, &h, 64).is_err());
+    }
+    #[test]
+    fn string_array_variants_are_bounded() {
+        let mut writer = Writer { buf: Vec::new() };
+        writer.u32(0);
+        let begin = writer.buf.len();
+        writer.string(":1.5");
+        writer.string("org.kde.StatusNotifierWatcher");
+        let size = (writer.buf.len() - begin) as u32;
+        writer.buf[..4].copy_from_slice(&size.to_le_bytes());
+        for signature in ["as", "v"] {
+            let mut body = if signature == "v" {
+                vec![2, b'a', b's', 0]
+            } else {
+                vec![]
+            };
+            body.extend_from_slice(&writer.buf);
+            let msg = message(METHOD_RETURN, 0, 2, &[Field::Signature(signature)], &body);
+            let h = parse_header(&msg).unwrap();
+            assert_eq!(string_array(&msg, &h, 2).unwrap().len(), 2);
+            assert!(string_array(&msg, &h, 1).is_err());
+        }
     }
 }

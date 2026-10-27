@@ -705,6 +705,9 @@ impl Ctx {
 struct Conn {
     client: UnixStream,
     write: Mutex<()>,
+    up_write: Mutex<()>,
+    /// Actual connection peer, retained independently of self-reported bus names.
+    peer: Option<crate::origin::Peer>,
     unique: Mutex<Option<String>>,
     began: AtomicBool,
     /// Who the connection is to the portal, and how far that got: the two
@@ -756,10 +759,13 @@ impl ItemCalls {
 
 impl Conn {
     fn new(client: UnixStream, who: crate::origin::Who) -> Self {
+        let peer = crate::origin::Peer::of(client.as_raw_fd());
         Self {
             who,
             client,
             write: Mutex::new(()),
+            up_write: Mutex::new(()),
+            peer,
             unique: Mutex::new(None),
             began: AtomicBool::new(false),
             registry: Mutex::new(Registration::default()),
@@ -812,6 +818,11 @@ impl Conn {
     fn send(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
         let _guard = self.write.lock().unwrap_or_else(|e| e.into_inner());
         send_all(self.client.as_raw_fd(), bytes, fds)
+    }
+
+    fn send_up(&self, socket: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
+        let _guard = self.up_write.lock().unwrap_or_else(|e| e.into_inner());
+        send_all(socket, bytes, fds)
     }
 
     fn registration(&self) -> MutexGuard<'_, Registration> {
@@ -1103,7 +1114,7 @@ fn register(conn: &Conn, ctx: &Ctx, up: RawFd, hello: &Header) -> io::Result<()>
     // Not waited for here: the program's calls that may reach the portal
     // wait for the answer (`Conn::settle`); what goes elsewhere before them
     // goes on.
-    send_all(up, &call, &[])
+    conn.send_up(up, &call, &[])
 }
 
 /// A call the portal may see: to its name, or to a unique name — which may
@@ -1515,7 +1526,7 @@ fn client_to_bus(
                 // knows to expect messages.
                 conn.began.store(true, Ordering::SeqCst);
             }
-            send_all(up, &lines, &[])?;
+            conn.send_up(up, &lines, &[])?;
             let Some(split) = split else {
                 continue;
             };
@@ -1544,7 +1555,7 @@ fn client_to_bus(
             if was_first && ctx.portal_app.is_some() {
                 conn.registration().stage = Stage::Hello(h.serial);
                 let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
-                send_all(up, &msg, &raw)?;
+                conn.send_up(up, &msg, &raw)?;
                 register(conn, ctx, up, &h)?;
                 continue;
             }
@@ -1557,7 +1568,7 @@ fn client_to_bus(
             // The program's answer to a tray host, with the zone's mark.
             if let Some(message) = marked_reply(conn, ctx, &msg, &h) {
                 let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
-                send_all(up, &message, &raw)?;
+                conn.send_up(up, &message, &raw)?;
                 continue;
             }
             match door(&h) {
@@ -1576,7 +1587,7 @@ fn client_to_bus(
                         let raw: Vec<RawFd> = carried.iter().map(AsRawFd::as_raw_fd).collect();
                         // A tray icon's name: the host's own (`tray_name_up`).
                         if let Some(message) = tray_name_up(conn, &msg, &h) {
-                            send_all(up, &message, &raw)?;
+                            conn.send_up(up, &message, &raw)?;
                             continue;
                         }
                         match rewritten(&msg, &h, cast == Cast::Remember) {
@@ -1584,9 +1595,9 @@ fn client_to_bus(
                             // daemon at the network or at an application, or
                             // have the screen shown again without a question
                             // where the switch does not say so.
-                            Some(Ok(message)) => send_all(up, &message, &raw)?,
+                            Some(Ok(message)) => conn.send_up(up, &message, &raw)?,
                             Some(Err(e)) => deny(conn, ctx, &h, &format!("call refused: {e}"))?,
-                            None => send_all(up, &msg, &raw)?,
+                            None => conn.send_up(up, &msg, &raw)?,
                         }
                     }
                 },
@@ -1639,6 +1650,33 @@ fn bus_to_client(upstream: &UnixStream, conn: &Conn, ctx: &Ctx) -> io::Result<()
                 }
             }
             let carried = take_fds(&mut fds, h.unix_fds)?;
+            match crate::tray_restore::rewrite(&msg, &h, &carried, conn.peer.as_ref()) {
+                Ok(Some(activate)) => {
+                    conn.send(&activate, &[])?;
+                    continue;
+                }
+                Err(why) => {
+                    if h.kind == wire::METHOD_CALL && h.flags & wire::NO_REPLY_EXPECTED == 0 {
+                        if let Some(to) = h.sender.as_deref() {
+                            let error = wire::message(
+                                wire::ERROR,
+                                wire::NO_REPLY_EXPECTED,
+                                ctx.serial(),
+                                &[
+                                    Field::ReplySerial(h.serial),
+                                    Field::Destination(to),
+                                    Field::ErrorName("org.cellward.Tray.NotOwner"),
+                                    Field::Signature("s"),
+                                ],
+                                &body::string(why),
+                            );
+                            conn.send_up(upstream.as_raw_fd(), &error, &[])?;
+                        }
+                    }
+                    continue;
+                }
+                Ok(None) => (),
+            }
             // The answer to our own `Register` is ours: the program never
             // sees it (and its descriptors, if any, are closed).
             if conn.answered(ctx, &msg, &h) {
@@ -3519,5 +3557,59 @@ mod tests {
         assert_eq!(h.reply_serial, Some(1));
         let got = s.through(&select_sources(10, ":1.7"));
         assert_eq!(remembers(&got), (true, true));
+    }
+    #[test]
+    fn tray_restore_is_owned_by_the_connection_and_never_forwards_process_fds() {
+        let mut s = Served::start("tray-restore", None, |c| c);
+        let mut first = AUTH.to_vec();
+        first.extend(hello(1));
+        s.program.send(&first, &[]);
+        s.authenticated();
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, 1);
+        s.bus.send(&reply_to(1, "org.freedesktop.DBus"), &[]);
+        s.program.message();
+        let request = |serial| {
+            wire::message(
+                wire::METHOD_CALL,
+                0,
+                serial,
+                &[
+                    Field::Path("/CustomTrayItem"),
+                    Field::Interface(crate::tray_restore::INTERFACE),
+                    Field::Member("ActivateIfOwned"),
+                    Field::Destination(":1.42"),
+                    Field::Sender(":1.99"),
+                    Field::Signature("ah"),
+                    Field::UnixFds(1),
+                ],
+                &[4, 0, 0, 0, 0, 0, 0, 0],
+            )
+        };
+        let own = sys::pidfd_open(std::process::id() as i32).unwrap();
+        s.bus.send(&request(80), &[own.as_raw_fd()]);
+        let (msg, h, fds) = s.program.message();
+        assert_eq!(h.member.as_deref(), Some("Activate"));
+        assert_eq!(h.path.as_deref(), Some("/CustomTrayItem"));
+        assert_eq!(h.sender.as_deref(), Some(":1.99"));
+        assert_eq!(h.serial, 80);
+        assert_eq!(h.signature.as_deref(), Some("ii"));
+        assert_eq!(&msg[h.body_offset..], &[0; 8]);
+        assert!(fds.is_empty());
+        let arbitrary = fs::File::open("/dev/null").unwrap();
+        s.bus.send(&request(81), &[arbitrary.as_raw_fd()]);
+        let (_, h, fds) = s.bus.message();
+        assert_eq!(h.kind, wire::ERROR);
+        assert_eq!(h.reply_serial, Some(81));
+        assert_eq!(h.destination.as_deref(), Some(":1.99"));
+        assert!(fds.is_empty());
+        assert!(s.program.quiet(Duration::from_millis(20)));
+        // Normal traffic in both directions continues after a rejected request.
+        s.program.send(
+            &method(82, "org.example.Test", "org.example.Test", "Ping", 0),
+            &[],
+        );
+        let (_, h, _) = s.bus.message();
+        assert_eq!(h.serial, 82);
     }
 }

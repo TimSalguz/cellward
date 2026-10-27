@@ -2315,7 +2315,10 @@ pub fn main() -> ExitCode {
             };
             match choice {
                 Again::There => {
-                    raise_running(&tools.state, &key);
+                    if let Err(why) = raise_running(&tools, &key, &zone, &selector) {
+                        tell_not_raised(&tools, &label, &why);
+                        return ExitCode::from(1);
+                    }
                     return ExitCode::SUCCESS;
                 }
                 Again::Same => {}
@@ -3590,7 +3593,10 @@ fn launch_asked(
     }
     // And the person clicked for that copy's window: raised for them.
     if (handover || memory.hands_over) && status.success() && !in_zone {
-        raise_running(&tools.state, key);
+        if let Err(why) = raise_running(tools, key, zone_choice, &container.selector()) {
+            tell_not_raised(tools, label, &why);
+            return ExitCode::from(1);
+        }
     }
     if status.code() == Some(i32::from(EXIT_NOT_STARTED)) {
         tell_not_started(tools, label, NOT_STARTED_UNSAID);
@@ -3616,47 +3622,51 @@ fn launch_asked(
     ExitCode::from(status.code().map_or(1, |c| c as u8))
 }
 
-/// The window of the copy of `key` that runs, raised through the
-/// compositor's IPC (`crate::focus::focus_launch`): the click on a running
-/// program's shortcut was handed to that copy, and the copy cannot raise
-/// it itself — the token it makes is from its own last input, which a
-/// compositor holds too old (niri) and the focus policy of its container
-/// lets up once (`crate::wl_focus`). The person's click is what raises it,
-/// as the frame's ⇄ does; nothing the program asks for. A copy in the tray
-/// maps its window a moment after: looked for a few seconds.
-fn raise_running(state: &Path, key: &str) {
-    let running = state.join(".running");
-    let pids: Vec<i32> = registry::dirs(&running)
+/// Focus only the selected network/container launch. If hidden, activate its
+/// verified tray item before waiting for its window; never relaunch a copy.
+fn raise_running(tools: &Tools, key: &str, zone: &str, selector: &str) -> Result<(), String> {
+    let running = tools.state.join(".running");
+    let mut candidates: Vec<i32> = registry::dirs(&running)
         .into_iter()
         .filter_map(|dir| fs::read_to_string(dir.join(key)).ok())
         .flat_map(|text| {
             text.lines()
                 .filter_map(registry::parse_record)
-                .filter(|r| registry::launched_here(&running, r.pid))
+                .filter(|r| r.zone == zone && canon(tools, &r.selector) == canon(tools, selector))
                 .map(|r| r.pid)
                 .collect::<Vec<_>>()
         })
         .collect();
-    let Some(pid) = pids.into_iter().next() else {
-        return;
-    };
-    let until = std::time::Instant::now() + RAISE_WITHIN;
-    loop {
-        match crate::focus::focus_launch(pid) {
-            Ok(()) => return,
-            Err(e) if std::time::Instant::now() >= until => {
-                eprintln!("vpn-zone-pick: окно «{key}» не поднять: {e}");
-                return;
-            }
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+    candidates.sort_unstable();
+    candidates.dedup();
+    for pid in candidates.into_iter().rev() {
+        let Some(held) = crate::sys::pidfd_open(pid) else {
+            continue;
+        };
+        // Check the registry identity after pinning, never pin a reused PID
+        // after treating an earlier record check as permission to focus it.
+        if !registry::launched_here(&running, pid)
+            || crate::tray_restore::held_pid(&held) != Some(pid)
+        {
+            continue;
         }
+        return crate::focus::restore_launch(pid, &held);
     }
+    Err(format!(
+        "открытый экземпляр «{key}» в выбранном контейнере уже завершился"
+    ))
 }
 
-/// How long [`raise_running`] looks for the window of the copy that runs:
-/// one brought back from a tray maps it when it gets to it — three seconds
-/// was not enough for the owner's messenger under load (2026-10-15).
-const RAISE_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
+fn tell_not_raised(tools: &Tools, label: &str, why: &str) {
+    eprintln!("vpn-zone-pick: окно «{label}» не показано: {why}");
+    crate::dialog::notify(
+        &tools.notify_send,
+        None,
+        "5000",
+        &format!("Не удалось показать окно «{label}»"),
+        why,
+    );
+}
 
 /// Why a launch did not start, when nothing on the way said it.
 const NOT_STARTED_UNSAID: &str = "запуск закончился, не начав программу (код 127) — причина в \
