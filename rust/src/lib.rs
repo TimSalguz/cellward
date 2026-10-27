@@ -134,6 +134,7 @@ pub mod epoch;
 pub mod explain;
 pub mod flows;
 pub mod focus;
+pub mod folder_rules;
 pub mod frame;
 pub(crate) mod frame_preview;
 pub mod frame_window;

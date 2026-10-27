@@ -127,7 +127,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -8960,10 +8960,59 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     }
     // Its own machine-id, kept in the project's state: before that is hidden.
     own_machine_id(zone);
+    // Per-folder source views and overlays belong to the instance, not to
+    // each launch. Pin before HOME/storage/state are covered; recursive
+    // storage keeps carry these same mounts into launches afterwards.
+    if let Some(instance) = &zone.instance {
+        if let (crate::origin::Who::Container(record), Some(data)) =
+            (&instance.who, &instance.storage)
+        {
+            let config = zone.home.join(CONFIG_SUBDIR);
+            let file =
+                crate::container::policy_dir_in(&config, record).join(crate::folder_rules::FILE);
+            match fs::read_to_string(file) {
+                Ok(text) => {
+                    let rules = crate::folder_rules::parse(&text)?;
+                    let protected = vec![
+                        config,
+                        zone.home.join(STATE_SUBDIR),
+                        zone.home.join(crate::container::PROFILES_SUBDIR),
+                        zone.home.join(".local/state/vpn-sandboxes"),
+                    ];
+                    let owner = fs::metadata(&zone.dir).map_err(|e| e.to_string())?;
+                    crate::folder_rules::with_fs_owner(owner.uid(), owner.gid(), || {
+                        crate::folder_rules::mount_shared(&zone.home, data, &rules, &protected)
+                    })?;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("не прочитать правила папок: {e}")),
+            }
+        }
+    }
     // The project's own state, last among the covers: from here on the zone's
     // directory is reached through a descriptor.
     let zone = &hide_project_state(zone)?;
     hide_container_storage(zone)?;
+    // A whole-home overlay is also one mount per instance. Reusing the same
+    // upper/work in a fresh overlay for every program is unsupported by the
+    // kernel and does not give the programs a coherent shared filesystem.
+    if let Some(instance) = &zone.instance {
+        if let (crate::origin::Who::Container(record), Some(data)) =
+            (&instance.who, &instance.storage)
+        {
+            let config = zone.home.join(CONFIG_SUBDIR);
+            let home = crate::container::own_value_in(&config, record, "home")
+                .map_err(|_| "не прочитать вид дома")?
+                .and_then(|(word, _)| crate::container::Home::parse(&word));
+            if home == Some(crate::container::Home::Layer) {
+                crate::profile::give_storage_back(data)?;
+                let owner = fs::metadata(&zone.dir).map_err(|e| e.to_string())?;
+                crate::folder_rules::with_fs_owner(owner.uid(), owner.gid(), || {
+                    crate::profile::mount_profile(data, &zone.given)
+                })?;
+            }
+        }
+    }
     if zone.instance.is_some() {
         own_sysfs(zone);
         cover_cgroupfs(zone)?;

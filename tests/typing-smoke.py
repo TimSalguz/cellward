@@ -97,6 +97,7 @@ def main():
     parser.add_argument("--gui-only", action="store_true")
     parser.add_argument("--frame-history", action="store_true", help="exercise the launch-bound history window instead of the tray manager")
     parser.add_argument("--frame-editor", action="store_true", help="also render the live frame sliders")
+    parser.add_argument("--container-frame-editor", action="store_true", help="exercise the container-specific live width slider")
     parser.add_argument("--launch-permissions", action="store_true", help="also inspect deduplicated optional launch resources")
     parser.add_argument("--fonts", help="small font directory to avoid scanning the host font collection")
     args = parser.parse_args()
@@ -372,13 +373,16 @@ def main():
             server.join(timeout=2)
             daemon.close()
             print("manager UI: copied without paste, point selected, window reopened, entry typed without clipboard mutation", flush=True)
-            if args.frame_editor:
+            if args.frame_editor or args.container_frame_editor:
                 os.killpg(manager.pid, signal.SIGTERM)
                 manager.wait(timeout=5)
                 wait_for(lambda: not any(w["app_id"] == "vpn-zone-window" for w in windows()))
                 request = "mode\tperms\ntitle\tLive frame preview\nblock\tFrame\nframe-preview\t1\nguard\t0\n"
                 request += "perm\twidth\tWidth\t0:0;4:4;default:Nix\nperm\tradius\tInner radius\t0:0;8:8;niri:Niri\nperm\touter-radius\tOuter radius\t0:0;8:8;niri:Niri\n"
                 request += "permof\tthis\tChanges are previewed until Save\twidth=4,radius=8,outer-radius=8\nslider\twidth\t32\t4\nslider\tradius\t16\t8\nslider\touter-radius\t32\t8\n"
+                width_key = "container-width" if args.container_frame_editor else "width"
+                if args.container_frame_editor:
+                    request = request.replace("width", width_key)
                 editor = start([str(Path(args.window).resolve())], "frame-editor", request)
                 wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
                 time.sleep(1.5)
@@ -387,11 +391,11 @@ def main():
                 (root / "frame-editor-tree.json").write_text(json.dumps(frame, indent=2))
                 r = frame["rect"]
                 msg(f"[con_id={frame['id']}]", "focus")
-                pointer.write(f"move {r['x'] + 334} {r['y'] + 140}\npress\n")
+                pointer.write(f"move {r['x'] + 334} {r['y'] + 175}\npress\n")
                 time.sleep(0.1)
-                pointer.write(f"move {r['x'] + 520} {r['y'] + 140}\n")
+                pointer.write(f"move {r['x'] + 520} {r['y'] + 175}\n")
                 live = root / "frame-editor.log"
-                wait_for(lambda: b"preview\twidth\t" in live.read_bytes())
+                wait_for(lambda: f"preview\t{width_key}\t".encode() in live.read_bytes())
                 assert b"perm\t" not in live.read_bytes(), "preview was committed before Save"
                 assert editor.poll() is None, "drag closed the editor"
                 pointer.write("release\n")
@@ -407,28 +411,45 @@ def main():
                     os.killpg(manager.pid, signal.SIGTERM)
                     manager.wait(timeout=5)
                 wait_for(lambda: not any(w["app_id"] == "vpn-zone-window" for w in windows()))
-                request = "title\tLaunch permissions\nguard\t0\nnet\thost\tHost network\tselected\ncontainer\twork\tWork container\tselected\n"
+                fixture = root / "host-home"
+                (fixture / "Projects/shared/cache").mkdir(parents=True)
+                (fixture / ".config/my-app").mkdir(parents=True)
+                request = "title\tLaunch permissions\nlang\ten\nguard\t0\nnet\tunconfined\tWithout isolation\tselected\nnet\toffline\tOffline\t\nnet\thost\tHost network\t\ncontainer\twork\tWork container\tselected\n"
+                request += f"host-home\t{fixture}\nfiles\twork\tprivate\t1\n"
                 request += "perm\tx11\tOwn X server\toff:Off;on:On\nperm\tcamera\tCamera\tno:No;yes:Yes\nperm\tmicrophone\tMicrophone\task:Ask;yes:Yes;no:No\nperm\tscreencast\tScreen capture\task:Ask;yes:Yes;no:No\nperm\tnetwork\tPrograms without a network rule\task:Ask;yes:Yes;no:No\nperm\tfocus\tWindows taking focus\tinput:After input;notify:Notify\n"
-                request += "permof\twork\tPermissions for this container\tx11=off,camera=no,microphone=ask,screencast=ask,network=ask,focus=input\noffer\tcamera=on\tCamera\noffer\tfolder=~/Downloads\tDownloads folder\n"
+                request += "permof\twork\tPermissions for this container\tx11=off,camera=no,microphone=ask,screencast=ask,network=ask,focus=input\noffer\tfolder=~/Downloads\tDownloads folder\n"
                 launcher = start([str(Path(args.window).resolve())], "launch-permissions", request)
                 wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
-                time.sleep(1.5)
-                screenshot("launch-permissions")
+                time.sleep(1)
                 frame = next(w for w in windows() if w["app_id"] == "vpn-zone-window")
-                (root / "launch-tree.json").write_text(json.dumps(frame, indent=2))
                 r = frame["rect"]
-                click(r["x"] + 100, r["y"] + r["height"] - 70)
-                time.sleep(0.3)
-                screenshot("launch-resources")
+                screenshot("launch-unconfined")
+                # Select host network after opening in the compact unconfined state.
+                msg(f"[con_id={frame['id']}]", "focus")
                 for down in [1, 0]:
-                    packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, 1, down))
+                    packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, 3, down))
                     time.sleep(0.05)
-                if launcher.poll() is None:
-                    for down in [1, 0]:
-                        packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, 1, down))
-                        time.sleep(0.05)
-                assert launcher.wait(timeout=5) != 0, "Cancel unexpectedly launched the program"
-                print("launch permissions and resources pages rendered; canceled without grants", flush=True)
+                time.sleep(0.3)
+                screenshot("launch-environment")
+                click(r["x"] + 165, r["y"] + 108)
+                time.sleep(0.3)
+                screenshot("launch-permissions")
+                click(r["x"] + 260, r["y"] + 108)
+                time.sleep(0.3)
+                screenshot("launch-files")
+                # Force a small viewport: the body scrolls; Launch stays outside it.
+                msg(f"[con_id={frame['id']}]", "resize set width 620 px height 320 px")
+                time.sleep(0.5)
+                frame = next(w for w in windows() if w["app_id"] == "vpn-zone-window")
+                r = frame["rect"]
+                screenshot("launch-files-small")
+                click(r["x"] + r["width"] - 220, r["y"] + r["height"] - 24)
+                assert launcher.wait(timeout=5) == 0, "visible Launch button did not launch"
+                answer = (root / "launch-permissions.log").read_text()
+                assert "net\thost\n" in answer, answer
+                assert "files-reviewed\t1\n" in answer, answer
+                assert "grant\t" not in answer, "merely browsing granted a folder"
+                print("launcher: unconfined → host, tabs and small viewport; Launch visible, browsing grants nothing", flush=True)
         vk.close()
         print("typing smoke passed", flush=True)
     finally:

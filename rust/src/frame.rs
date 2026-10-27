@@ -1108,7 +1108,15 @@ impl Setup {
                     .container
                     .as_deref()
                     .and_then(|c| crate::container::frame_color_in(&self.switch, c));
-                Frame::of_launch(&o.state, &self.switch, &zone, color.as_deref())
+                let mut frame = Frame::of_launch(&o.state, &self.switch, &zone, color.as_deref());
+                if let Some(width) = o
+                    .container
+                    .as_deref()
+                    .and_then(|c| crate::container::frame_width_in(&self.switch, c))
+                {
+                    frame.width = width;
+                }
+                frame
             }
             None if self.switch.as_os_str().is_empty() => self.frame,
             None => Frame {

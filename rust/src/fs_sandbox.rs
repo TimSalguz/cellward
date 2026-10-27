@@ -255,9 +255,13 @@ pub struct Args {
     /// named sandbox (`docs/CONTAINERS.md` §3.5) — a Wine prefix, a Steam
     /// library. Checked again here against the state of this project.
     pub bind_paths: Vec<PathBuf>,
+    pub folder_rules: Vec<crate::folder_rules::Rule>,
+    pub folder_protected: Vec<PathBuf>,
+    pub folder_shared: bool,
     /// `--x11 on`: the container's own `x11` permission (`vpn-zone container
     /// set … x11 on`, or Nix), on top of whatever the dialog answered.
     pub x11: bool,
+    pub x11_override: Option<bool>,
     /// `--camera on`: the host's cameras let this launch (`container::
     /// camera_for`) — their nodes are bound into the sandbox's own `/dev`,
     /// which has none otherwise.
@@ -337,7 +341,11 @@ impl Args {
         let mut sandbox: Option<String> = None;
         let mut label: Option<String> = None;
         let mut bind_paths: Vec<PathBuf> = Vec::new();
+        let mut folder_rules = Vec::new();
+        let mut folder_protected = Vec::new();
+        let mut folder_shared = false;
         let mut x11 = false;
+        let mut x11_override = None;
         let mut camera = false;
         let mut share_tmp = false;
         let mut devices = Vec::new();
@@ -373,12 +381,23 @@ impl Args {
                 "--label" => {
                     label = Some(value.to_string_lossy().into_owned()).filter(|l| !l.is_empty())
                 }
+                "--folder-shared" => folder_shared = value == "on",
+                "--folder-protect" => folder_protected.push(PathBuf::from(value)),
+                "--folder-rule" => {
+                    folder_rules.extend(
+                        crate::folder_rules::parse(&value.to_string_lossy())
+                            .map_err(|_| ArgError::MissingValue(flag.clone()))?,
+                    );
+                }
                 "--bind-path" => {
                     if !value.is_empty() {
                         bind_paths.push(PathBuf::from(value));
                     }
                 }
-                "--x11" => x11 = value == "on",
+                "--x11" => {
+                    x11 = value == "on";
+                    x11_override = Some(x11);
+                }
                 "--camera" => camera = value == "on",
                 "--share-tmp" => share_tmp = value == "on",
                 // Only a node of the kinds a grant gives: nothing else.
@@ -407,7 +426,11 @@ impl Args {
             sandbox,
             label,
             bind_paths,
+            folder_rules,
+            folder_protected,
+            folder_shared,
             x11,
+            x11_override,
             camera,
             share_tmp,
             devices,
@@ -518,15 +541,10 @@ fn ask_in_window(window: &Path, shown: &str, question: &str) -> Option<Perms> {
 }
 
 /// What the question offers, in its order: `(token, label, opens much)`.
-const PERM_CHOICES: [(&str, &str, bool); 5] = [
+const PERM_CHOICES: [(&str, &str, bool); 4] = [
     ("downloads", "Загрузки (~/Downloads)", false),
     ("documents", "Документы (~/Documents)", false),
     ("pictures", "Изображения (~/Pictures)", false),
-    (
-        "x11",
-        "Свой X-сервер (нужен Wine и старым программам)",
-        false,
-    ),
     (
         "home",
         "ВЕСЬ домашний каталог — файловой изоляции не будет",
@@ -597,6 +615,7 @@ pub struct Layout {
     /// Directories granted to this sandbox, bound after the home is replaced:
     /// `(the directory it really is, the path the program asked for)`.
     pub granted: Vec<(PathBuf, PathBuf)>,
+    pub folder_mounts: Vec<crate::folder_rules::Mount>,
     /// `~/.config/mimeapps.list`, when it exists.
     pub mimeapps: Option<PathBuf>,
     /// The desktop's look, read-only, for a home of its own ([`appearance`]).
@@ -839,6 +858,8 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
             bind(&mut a, "--bind", real, path);
         }
     }
+    // Explicit restrictions also apply over a legacy whole-home grant.
+    crate::folder_rules::bwrap_args(&mut a, &layout.folder_mounts);
 
     // --- FILE AND LINK ASSOCIATIONS ---
     if let Some(mime) = &layout.mimeapps {
@@ -1374,6 +1395,26 @@ fn perm_paths(home: &Path, app_id: &str, sandbox: Option<&str>) -> (PathBuf, Opt
     }
 }
 
+/// Existing host-side filesystem policy, including pre-unified legacy grants.
+pub fn saved_permissions(home: &Path, app: &str, sandbox: Option<&str>) -> Perms {
+    let (path, _) = perm_paths(home, app, sandbox);
+    fs::read_to_string(path)
+        .map(|s| Perms::parse(&s))
+        .unwrap_or_default()
+}
+
+/// The host launch dialog explicitly confirmed the displayed filesystem policy.
+/// Preserve existing legacy access; new policies start with no extra host files.
+/// This function is called only by the trusted picker after final confirmation.
+pub fn confirm_permissions(home: &Path, app: &str, sandbox: Option<&str>) -> Result<(), String> {
+    let (path, _) = perm_paths(home, app, sandbox);
+    if path.is_file() {
+        return Ok(());
+    }
+    fs::create_dir_all(path.parent().ok_or("нет каталога политики")?).map_err(|e| e.to_string())?;
+    fs::write(path, Perms::default().render()).map_err(|e| e.to_string())
+}
+
 /// Ask a program's permissions once and remember them — on the host, before
 /// the launch enters its zone, where the answers are read-only. Nothing to do
 /// when they are known.
@@ -1484,7 +1525,7 @@ pub fn run(args: Args) -> u8 {
         Some(perms) => perms,
         None => Perms::parse(&fs::read_to_string(&perm_file).unwrap_or_default()),
     };
-    perms.x11 |= args.x11;
+    perms.x11 = args.x11_override.unwrap_or(perms.x11 || args.x11);
     if !perms.home {
         for (allowed, name) in [
             (perms.downloads, "Downloads"),
@@ -1670,6 +1711,40 @@ pub fn run(args: Args) -> u8 {
         }
     }
 
+    let mut folder_rules = args.folder_rules.clone();
+    let folder_mounts = if folder_rules.is_empty() {
+        Vec::new()
+    } else {
+        for (_, path) in &granted {
+            if !folder_rules.iter().any(|r| &r.path == path) {
+                folder_rules.push(crate::folder_rules::Rule {
+                    path: path.clone(),
+                    mode: crate::folder_rules::Mode::Real,
+                });
+            }
+        }
+        let data = sandbox_home
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or(&cleanup.dir);
+        match crate::folder_rules::prepare_for_launch(
+            &home,
+            data,
+            &folder_rules,
+            &args.folder_protected,
+            args.folder_shared,
+        ) {
+            Ok(mounts) => {
+                granted.clear();
+                mounts
+            }
+            Err(why) => {
+                eprintln!("fs-sandbox: folder policy failed: {why}");
+                return EXIT_NOT_STARTED;
+            }
+        }
+    };
+
     // The real home is bound whole with the `home` permission; nothing to add.
     let look = if perms.home {
         Vec::new()
@@ -1687,6 +1762,7 @@ pub fn run(args: Args) -> u8 {
         ),
         sandbox_home,
         granted,
+        folder_mounts,
         mimeapps: home.join(MIMEAPPS).is_file().then(|| home.join(MIMEAPPS)),
         appearance: look,
         resolv: resolv_file(),
@@ -1916,6 +1992,21 @@ pub fn run_x11(args: X11Args) -> u8 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn integrated_confirmation_preserves_legacy_grants_and_records_explicit_empty_policy() {
+        let dir = std::env::temp_dir().join(format!("cw-files-confirm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        confirm_permissions(&dir, "app", Some("own")).unwrap();
+        let (path, _) = perm_paths(&dir, "app", Some("own"));
+        assert!(path.is_file());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "");
+        fs::write(&path, "home\ndocuments\n").unwrap();
+        confirm_permissions(&dir, "other-app", Some("own")).unwrap();
+        let legacy = saved_permissions(&dir, "other-app", Some("own"));
+        assert!(legacy.home && legacy.documents);
+        let _ = fs::remove_dir_all(dir);
+    }
     use super::*;
 
     /// The bus filter's directory is in the runtime directory, closed, and
@@ -2171,6 +2262,32 @@ mod tests {
 
     // --- THE ARGUMENT LIST ---
 
+    #[test]
+    fn explicit_folder_restriction_overrides_a_legacy_whole_home_grant() {
+        let mut l = layout();
+        l.perms.home = true;
+        l.folder_mounts = vec![crate::folder_rules::Mount {
+            shared: false,
+            rule: crate::folder_rules::Rule {
+                path: PathBuf::from("/home/u/secret"),
+                mode: crate::folder_rules::Mode::ReadOnly,
+            },
+            source: PathBuf::from("/home/u/secret"),
+            upper: PathBuf::new(),
+            work: PathBuf::new(),
+        }];
+        let words = bwrap_args(&l, &["true".into()]);
+        let home = words
+            .windows(3)
+            .position(|w| w == ["--bind", "/home/u", "/home/u"])
+            .unwrap();
+        let restricted = words
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/home/u/secret", "/home/u/secret"])
+            .expect("legacy whole-home permission swallowed an explicit restriction");
+        assert!(restricted > home);
+    }
+
     fn layout() -> Layout {
         Layout {
             app_id: "discord".to_string(),
@@ -2179,6 +2296,7 @@ mod tests {
             perms: Perms::default(),
             sandbox_home: None,
             granted: Vec::new(),
+            folder_mounts: Vec::new(),
             machine_id: None,
             mimeapps: None,
             appearance: Vec::new(),

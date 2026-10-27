@@ -109,7 +109,7 @@ pub fn rows(
         setting_row(
             c,
             "width",
-            "Толщина",
+            "Общая толщина",
             &[
                 ("0", "0"),
                 ("2", "2"),
@@ -332,6 +332,31 @@ pub fn rows(
             false,
         );
     }
+    if let Some(record) = record {
+        let own = crate::container::frame_width_setting_in(c, record);
+        let now = own
+            .and_then(|s| s.value)
+            .map_or_else(|| "inherit".to_owned(), |w| w.to_string());
+        push(
+            row(
+                "container-width",
+                &format!("Толщина — контейнера «{record}»"),
+                &[
+                    ("inherit", "общая"),
+                    ("0", "0"),
+                    ("1", "1"),
+                    ("2", "2"),
+                    ("4", "4"),
+                    ("6", "6"),
+                    ("8", "8"),
+                    ("12", "12"),
+                    ("default", "вернуть из Nix / общую"),
+                ],
+            ),
+            now,
+            false,
+        );
+    }
     if let Some(record) = record.filter(|r| *r != crate::container::MAIN_RECORD) {
         let own = crate::container::load(tools, record).and_then(|c| c.frame_color);
         let now = match &own {
@@ -354,12 +379,22 @@ pub fn request(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Strin
     let (perms, values) = rows(tools, zone, record);
     let of = PermOf {
         tag: "this".to_owned(),
-        scope: "Вид — для всех окон. Геометрия, стиль, кнопки и режимы заголовка меняются сразу; отмена возвращает прежнее, «Сохранить» закрепляет поверх Nix. Цвет сети/контейнера и общий выключатель — пока по сохранению. Полноэкранная вкладка независимо задаёт толщину, заголовок и показ имени при входе. Верхние 2 px доступны приложению. Закрепление в Nix — отдельно в stillconf."
+        scope: "Общий вид — для всех окон, толщина контейнера — только для его окон. Геометрия, стиль, кнопки и режимы заголовка меняются сразу; отмена возвращает прежнее, «Сохранить» закрепляет поверх Nix. Цвет сети/контейнера и общий выключатель — пока по сохранению. Полноэкранная вкладка независимо задаёт общую толщину, заголовок и показ имени при входе. Верхние 2 px доступны приложению. Закрепление в Nix — отдельно в stillconf."
             .to_owned(),
         values,
     };
     let request = crate::window::render_perms("Рамка окон", &[], &perms, &of);
-    format!("block\tРамка\n{request}frame-preview\t1\nguard\t0\nslider\twidth\t{}\t{}\nslider\tradius\t{}\t{}\nslider\touter-radius\t{}\t{}\n",
+    let own_slider = record
+        .map(|record| {
+            format!(
+                "slider\tcontainer-width\t{}\t{}\n",
+                crate::frame::MAX_WIDTH,
+                crate::container::frame_width_in(&tools.config, record)
+                    .unwrap_or_else(|| crate::frame::width(&tools.config).0)
+            )
+        })
+        .unwrap_or_default();
+    format!("block\tРамка\n{request}frame-preview\t1\nguard\t0\n{own_slider}slider\twidth\t{}\t{}\nslider\tradius\t{}\t{}\nslider\touter-radius\t{}\t{}\n",
         crate::frame::MAX_WIDTH, crate::frame::width(&tools.config).0,
         crate::frame::MAX_RADIUS, crate::frame::radius(&tools.config).0.px().min(crate::frame::MAX_RADIUS),
         crate::frame::MAX_OUTER_RADIUS, crate::frame::outer_radius(&tools.config).0.px())
@@ -436,6 +471,15 @@ pub fn edit(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Option<V
         Ok(session) => session,
         Err(e) => return Some(vec![format!("Предпросмотр рамки не открыт: {e}")]),
     };
+    let mut own_preview = record
+        .map(|record| {
+            crate::frame_preview::Session::new(&crate::container::policy_dir_in(
+                &tools.config,
+                record,
+            ))
+        })
+        .transpose()
+        .ok()?;
     let mut child = Command::new(&tools.window)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -464,6 +508,21 @@ pub fn edit(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Option<V
         let fields: Vec<_> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
         match fields.as_slice() {
             ["preview", key, value] => {
+                if *key == "container-width" {
+                    if let (Some(record), Some(preview)) = (record, &mut own_preview) {
+                        let value = if *value == "default" {
+                            crate::container::declared_frame_width_in(&tools.config, record)
+                                .flatten()
+                                .map_or_else(|| "inherit".to_owned(), |w| w.to_string())
+                        } else {
+                            (*value).to_owned()
+                        };
+                        if crate::container::parse_frame_width(&value).is_some() {
+                            let _ = preview.set(crate::frame::WIDTH_SETTING, &value);
+                        }
+                    }
+                    continue;
+                }
                 if let Some((name, value)) = preview_value(tools, key, value) {
                     if let Err(e) = preview.set(name, &value) {
                         eprintln!("frame preview: {e}");
@@ -492,6 +551,20 @@ pub fn apply(
     let mut said = Vec::new();
     for (key, value) in changes {
         let args: Vec<OsString> = match key.as_str() {
+            "container-width" => {
+                let Some(record) = record else { continue };
+                said.push(
+                    match crate::container::set_frame_width(
+                        tools,
+                        record,
+                        (value != "default").then_some(value.as_str()),
+                    ) {
+                        Ok(()) => format!("Толщина рамки контейнера «{record}»: {value}"),
+                        Err(e) => e,
+                    },
+                );
+                continue;
+            }
             "zone-color" => {
                 let Some(zone) = zone else { continue };
                 let args = vec!["color".into(), zone.into(), value.into()];
@@ -641,6 +714,30 @@ exit TEST_EXIT
     /// The rows say the settings as they are; a change is `cellward
     /// frame …`'s, so the next look says it; zone and container colours
     /// are independent.
+    #[test]
+    fn the_main_container_width_editor_has_its_own_slider_and_does_not_change_global_width() {
+        let base = std::env::temp_dir().join(format!("vz-frame-main-width-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("config")).unwrap();
+        let tools = tools_in(&base);
+        assert!(request(&tools, None, Some("main")).contains("slider\tcontainer-width\t32\t4\n"));
+        let said = apply(
+            &tools,
+            None,
+            Some("main"),
+            &[("container-width".into(), "1".into())],
+        );
+        assert_eq!(said.len(), 1);
+        assert_eq!(
+            crate::container::frame_width_in(&tools.config, "main"),
+            Some(1)
+        );
+        assert_eq!(crate::frame::width(&tools.config).0, 4);
+        let (_, values) = rows(&tools, None, Some("main"));
+        assert_eq!(value(&values, "container-width"), "1");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn the_frames_settings_are_shown_and_changed() {
         let base = std::env::temp_dir().join(format!("vz-frame-window-{}", std::process::id()));

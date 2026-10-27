@@ -23,8 +23,8 @@
 //! `crate::sys`). What `profile-run` checks from inside is that pid
 //! namespace ([`crate::profile::ENV_EXPECT_PIDNS`]). An instance started by
 //! an earlier build has no pid namespace of its own (its space's is the
-//! host's): it is joined as it is, with a notice — its programs see the
-//! host's processes until it is restarted.
+//! host's): entry is refused until it is restarted. A warning must not
+//! silently turn a new isolated launch into a view of host processes.
 //!
 //! **The main program's end.** `profile-run` stays in the instance as the
 //! launch's subreaper (`crate::profile`), for as long as anything it
@@ -630,8 +630,8 @@ pub fn run(args: &Args) -> u8 {
     };
     std::env::set_var(crate::profile::ENV_EXPECT_NETNS, &netns);
     // Its pid namespace (stage 3): joined for the child, and checked from
-    // inside. One of an earlier build's instance is the host's: not joined
-    // — there is nothing to join — and the person told.
+    // inside. An earlier build's host PID namespace is refused: no new
+    // isolated launch may silently inherit visibility of host processes.
     let mut flags = libc::CLONE_NEWUSER | libc::CLONE_NEWNET | libc::CLONE_NEWIPC;
     std::env::remove_var(crate::profile::ENV_EXPECT_PIDNS);
     if crate::instance::own_pid_namespace(pid) {
@@ -651,9 +651,13 @@ pub fn run(args: &Args) -> u8 {
     } else {
         eprintln!(
             "контейнер {} поднят прошлой сборкой: своего пространства pid у него нет, и его \
-             программы видят процессы хоста — перезапусти его (cellward container stop {})",
+             программы видели бы процессы хоста — запуск остановлен. Останови старый \
+             экземпляр (cellward container stop {}), затем запусти программу снова",
             args.instance, args.instance
         );
+        drop(lock);
+        ring(&dir);
+        return EXIT_NOT_STARTED;
     }
     // Connect with host credentials BEFORE entering the instance userns.
     // This is a private inherited connection, never a public token chosen by

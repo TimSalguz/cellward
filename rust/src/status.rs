@@ -938,6 +938,15 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         Some(color) => sourced_str(&color.value, color.source),
         None => sourced("null".to_owned(), Source::Default),
     };
+    let frame_width = match crate::container::frame_width_setting_in(&tools.config, &c.name) {
+        Some(width) => sourced(
+            width
+                .value
+                .map_or_else(|| "null".to_owned(), |w| w.to_string()),
+            width.source,
+        ),
+        None => sourced("null".to_owned(), Source::Default),
+    };
     // Its own microphone and screen cast settings, or none: the zone's
     // (`networks[]`).
     let microphone = match &c.microphone {
@@ -1004,10 +1013,25 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         })
         .collect::<Vec<String>>()
         .join(",");
+    let folder_rules = match crate::folder_rules::load(tools, &c.name) {
+        Ok(rules) => array(
+            rules
+                .into_iter()
+                .map(|r| {
+                    format!(
+                        "{{\"path\":{},\"mode\":{}}}",
+                        string(&r.path.display().to_string()),
+                        string(r.mode.word())
+                    )
+                })
+                .collect(),
+        ),
+        Err(why) => format!("{{\"error\":{}}}", string(&why)),
+    };
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
-         \"permissions\":{permissions},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"camera_mode\":{camera_mode},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
+         \"permissions\":{permissions},\"folder_rules\":{folder_rules},\"compositor\":{},\"trust\":{},\"running\":{},\
+         \"x11\":{},\"frame_color\":{frame_color},\"frame_width\":{frame_width},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"camera_mode\":{camera_mode},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),

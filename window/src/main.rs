@@ -75,6 +75,9 @@ struct Item {
 /// Everything the window shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Request {
+    files: Vec<FileAccess>,
+    host_home: String,
+    folder_protected: Vec<String>,
     language: Language,
     /// `menu`: the hotkey menu of a running program — entries, one of which
     /// is chosen; with a `guard` it is a question (the broker's, the
@@ -120,6 +123,14 @@ struct Request {
     block: Option<String>,
     frame_preview: bool,
     frame_sliders: std::collections::HashMap<String, (u32, u32)>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FileAccess {
+    tag: String,
+    home: String,
+    editable: bool,
+    paths: Vec<(String, String)>,
 }
 
 /// A permission's row: its key, its name, its choices `(value, text)`.
@@ -200,6 +211,19 @@ fn parse_request(text: &str) -> Request {
     for line in text.lines() {
         let fields: Vec<&str> = line.split('\t').collect();
         match fields[0] {
+            "file-protected" if fields.len() == 2 => req.folder_protected.push(fields[1].into()),
+            "host-home" => req.host_home = fields.get(1).unwrap_or(&"").to_string(),
+            "files" if fields.len() == 4 => req.files.push(FileAccess {
+                tag: fields[1].into(),
+                home: fields[2].into(),
+                editable: fields[3] == "1",
+                paths: Vec::new(),
+            }),
+            "file-path" if fields.len() == 4 => {
+                if let Some(f) = req.files.iter_mut().find(|f| f.tag == fields[1]) {
+                    f.paths.push((fields[2].into(), fields[3].into()));
+                }
+            }
             "lang" => req.language = Language::from_wire_tag(fields.get(1).copied().unwrap_or("")),
             "mode" => req.mode = fields.get(1).unwrap_or(&"").to_string(),
             "frame-preview" => req.frame_preview = fields.get(1) == Some(&"1"),
@@ -268,6 +292,14 @@ enum Pane {
 
 #[derive(Debug, Clone)]
 enum Msg {
+    LaunchTab(u8),
+    Browse(String),
+    HiddenFolders(bool),
+    PickFolder(String, String),
+    Home(String),
+    FolderInput(String),
+    AddFolder,
+    RemoveFolder(usize),
     Appearance,
     /// A menu entry, by its index.
     Action(usize),
@@ -312,6 +344,14 @@ struct Window {
     /// The request's offers ticked, one each.
     offered: Vec<bool>,
     show_offers: bool,
+    launch_tab: u8,
+    browse: String,
+    directories: Vec<String>,
+    hidden_folders: bool,
+    homes: std::collections::HashMap<String, String>,
+    folder_inputs: std::collections::HashMap<String, String>,
+    folders: std::collections::HashMap<String, Vec<String>>,
+    folder_modes: std::collections::HashMap<(String, String), String>,
     frame_fullscreen_tab: bool,
     /// The permissions changed: `(container tag, key) → value`.
     changed: std::collections::HashMap<(String, String), String>,
@@ -328,6 +368,25 @@ struct Window {
     /// Laid out to be measured (`fitted_size`): every list whole, at its own
     /// height, rather than in a place that scrolls.
     measuring: bool,
+}
+
+/// Read only directory names, never file contents. Browsing grants no access;
+/// every selected path is validated again by the host and at actual mounting.
+fn folder_directories(path: &str, hidden: bool) -> Vec<String> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let mut dirs: Vec<_> = std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| hidden || !e.file_name().to_string_lossy().starts_with('.'))
+        .filter(|e| e.path().is_dir())
+        .take(1000)
+        .map(|e| e.path().display().to_string())
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 /// Why a container cannot go with this network, if it cannot.
@@ -364,6 +423,14 @@ impl Window {
             rule: false,
             offered: vec![false; req.offers.len()],
             show_offers: false,
+            launch_tab: 0,
+            browse: req.host_home.clone(),
+            directories: folder_directories(&req.host_home, false),
+            hidden_folders: false,
+            homes: Default::default(),
+            folder_inputs: Default::default(),
+            folders: Default::default(),
+            folder_modes: Default::default(),
             frame_fullscreen_tab: false,
             changed: std::collections::HashMap::new(),
             pane: Pane::Net,
@@ -562,6 +629,23 @@ impl Window {
                 out.push_str(&format!("offer\t{line}\n"));
             }
         }
+        if self.req.files.iter().any(|f| f.tag == c.tag) {
+            out.push_str("files-reviewed\t1\n");
+            if let Some(home) = self.homes.get(&c.tag) {
+                out.push_str(&format!("home\t{home}\n"));
+            }
+            if let Some(paths) = self.folders.get(&c.tag) {
+                for path in paths {
+                    out.push_str(&format!(
+                        "grant\t{}\t{path}\n",
+                        self.folder_modes
+                            .get(&(c.tag.clone(), path.clone()))
+                            .map(String::as_str)
+                            .unwrap_or("ro")
+                    ));
+                }
+            }
+        }
         out.push_str(&self.perms_answer());
         out
     }
@@ -682,6 +766,62 @@ impl Window {
             Msg::Offer(i, v) => {
                 if let Some(ticked) = self.offered.get_mut(i) {
                     *ticked = v;
+                }
+            }
+            Msg::Browse(path) => {
+                self.directories = folder_directories(&path, self.hidden_folders);
+                self.browse = path;
+            }
+            Msg::HiddenFolders(show) => {
+                self.hidden_folders = show;
+                self.directories = folder_directories(&self.browse, show);
+            }
+            Msg::PickFolder(path, mode) => {
+                let tag = self.container_tag().to_owned();
+                self.folder_modes.insert((tag.clone(), path.clone()), mode);
+                let paths = self.folders.entry(tag).or_default();
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            Msg::LaunchTab(tab) => self.launch_tab = tab.min(2),
+            Msg::Home(home) => {
+                if self
+                    .req
+                    .files
+                    .iter()
+                    .any(|f| f.tag == self.container_tag() && f.editable)
+                    && ["private", "layer", "main"].contains(&home.as_str())
+                {
+                    self.homes.insert(self.container_tag().to_owned(), home);
+                }
+            }
+            Msg::FolderInput(value) => {
+                self.folder_inputs.insert(
+                    self.container_tag().to_owned(),
+                    value.replace(['\t', '\n', '\r'], ""),
+                );
+            }
+            Msg::AddFolder => {
+                let tag = self.container_tag().to_owned();
+                let value = self
+                    .folder_inputs
+                    .get(&tag)
+                    .map(|p| p.trim().to_owned())
+                    .unwrap_or_default();
+                if !value.is_empty() {
+                    let paths = self.folders.entry(tag.clone()).or_default();
+                    if !paths.contains(&value) {
+                        paths.push(value);
+                    }
+                    self.folder_inputs.insert(tag, String::new());
+                }
+            }
+            Msg::RemoveFolder(i) => {
+                if let Some(paths) = self.folders.get_mut(&self.container_tag().to_owned()) {
+                    if i < paths.len() {
+                        paths.remove(i);
+                    }
                 }
             }
             Msg::ShowOffers(show) => self.show_offers = show && !self.req.offers.is_empty(),
@@ -820,6 +960,15 @@ impl Window {
     }
 
     fn key_choose(&mut self, key: Key, modifiers: keyboard::Modifiers) -> Task<Msg> {
+        if self.launch_tab != 0
+            && !matches!(
+                key.as_ref(),
+                Key::Named(key::Named::Escape | key::Named::Enter)
+            )
+        {
+            return Task::none();
+        }
+
         if self.show_offers {
             if matches!(
                 key.as_ref(),
@@ -1038,26 +1187,48 @@ impl Window {
             );
         }
 
-        // The program's name inside the window too: niri draws no title bars.
-        let mut page = column![text(&self.req.title).size(20)]
-            .spacing(12)
-            .padding(16);
+        let mut header = column![text(&self.req.title).size(20)].spacing(10);
+        let mut page = column![].spacing(12).padding([0, 16]);
         for note in &self.req.notes {
             page = page.push(text(format!("ⓘ {note}")).size(14));
         }
-        if self.req.nets.iter().any(|n| n.tag == "unconfined") {
-            let style = if unconfined {
-                button::danger
-            } else {
-                button::secondary
-            };
-            if let Some(index) = self.req.nets.iter().position(|n| n.tag == "unconfined") {
-                page = page.push(
-                    button(text(tr(self.req.language, UiKey::UnconfinedWarning)).size(15))
-                        .width(Length::Fill)
-                        .style(style)
-                        .on_press(Msg::Net(index)),
-                );
+        if let Some(open) = self.req.nets.iter().position(|n| n.tag == "unconfined") {
+            let isolated = self
+                .req
+                .nets
+                .iter()
+                .position(|n| n.tag == "offline")
+                .or_else(|| self.req.nets.iter().position(|n| n.tag != "unconfined"))
+                .unwrap_or(open);
+            header = header.push(
+                row![
+                    button(
+                        text(self.local("● Container isolation", "● Изоляция в контейнере"))
+                            .size(14)
+                    )
+                    .style(if unconfined {
+                        button::secondary
+                    } else {
+                        button::primary
+                    })
+                    .on_press(Msg::Net(if unconfined {
+                        isolated
+                    } else {
+                        self.net
+                    })),
+                    button(text(self.local("Without isolation", "Без изоляции")).size(14))
+                        .style(if unconfined {
+                            button::danger
+                        } else {
+                            button::secondary
+                        })
+                        .on_press(Msg::Net(open))
+                ]
+                .spacing(8),
+            );
+            if unconfined {
+                header =
+                    header.push(text(tr(self.req.language, UiKey::UnconfinedWarning)).size(13));
             }
         }
         if !self.req.command.is_empty() {
@@ -1066,44 +1237,70 @@ impl Window {
         let lists = if self.measuring {
             Length::Shrink
         } else {
-            Length::Fill
+            Length::Fixed(240.0)
         };
-        if unconfined {
-            page = page.push(text(tr(self.req.language, UiKey::NoContainer)).size(14));
-            page = page.push(left.height(lists));
-        } else {
-            let containers = self.column_view(
-                tr(self.req.language, UiKey::Container),
-                Pane::Container,
-                &self.req.containers,
-                self.container,
-                Msg::Container,
+        let mut tabs = row![].spacing(8);
+        for (tab, label) in [
+            (0, self.local("Environment", "Среда")),
+            (1, self.local("Permissions", "Разрешения")),
+            (2, self.local("Files", "Файлы")),
+        ] {
+            tabs = tabs.push(
+                button(text(label).size(14))
+                    .style(if self.launch_tab == tab {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press(Msg::LaunchTab(tab)),
             );
-            let mut right = column![containers].spacing(8).width(Length::FillPortion(3));
-            if !self.req.no_pins {
-                right = right.push(
-                    checkbox(self.pin_container)
-                        .label(tr(self.req.language, UiKey::AlwaysContainer))
-                        .on_toggle(Msg::PinContainer),
-                );
-            }
-            page = page.push(row![left, right].spacing(16).height(lists));
         }
-        if !unconfined {
-            if !self.req.perms.is_empty() {
-                page = page.push(self.perms_view());
+        header = header.push(tabs);
+        if self.launch_tab == 0 {
+            if unconfined {
+                page = page.push(text(tr(self.req.language, UiKey::NoContainer)).size(14));
+                page = page.push(left.height(lists));
+            } else {
+                let containers = self.column_view(
+                    tr(self.req.language, UiKey::Container),
+                    Pane::Container,
+                    &self.req.containers,
+                    self.container,
+                    Msg::Container,
+                );
+                let mut right = column![containers].spacing(8).width(Length::FillPortion(3));
+                if !self.req.no_pins {
+                    right = right.push(
+                        checkbox(self.pin_container)
+                            .label(tr(self.req.language, UiKey::AlwaysContainer))
+                            .on_toggle(Msg::PinContainer),
+                    );
+                }
+                page = page.push(row![left, right].spacing(16).height(lists));
+                page = page.push(text(self.local("The container owns files and permissions; the network is its current route.", "Контейнер хранит файлы и разрешения; сеть — его текущий маршрут.")).size(13));
             }
+        } else if unconfined {
+            page = page.push(text(self.local("This launch runs as your host user, outside Cellward isolation. Container permissions and private clipboard do not apply.", "Запуск с правами вашего пользователя хоста, вне изоляции Cellward. Разрешения контейнера и его отдельный буфер не применяются.")).size(14));
+        } else if self.launch_tab == 1 {
+            page = page.push(self.perms_view());
             if let Some(rule) = &self.req.rule {
                 page = page.push(checkbox(self.rule).label(rule).on_toggle(Msg::Rule));
             }
-            if !self.req.offers.is_empty() {
-                page = page.push(
-                    button(text(tr(self.req.language, UiKey::OptionalAccess)).size(13))
-                        .padding([3, 8])
-                        .style(button::text)
-                        .on_press(Msg::ShowOffers(true)),
-                );
+            for (i, (line, label)) in self.req.offers.iter().enumerate() {
+                if !line.starts_with("path ")
+                    && !line.starts_with("path=")
+                    && !line.starts_with("dir ")
+                    && !line.starts_with("folder=")
+                {
+                    page = page.push(
+                        checkbox(self.offered.get(i).copied().unwrap_or(false))
+                            .label(label.as_str())
+                            .on_toggle(move |v| Msg::Offer(i, v)),
+                    );
+                }
             }
+        } else {
+            page = page.push(self.files_view());
         }
         let label = if !self.armed {
             self.wait_label()
@@ -1135,11 +1332,307 @@ impl Window {
         } else {
             container(text("")).width(Length::Fill).into()
         };
-        page = page.push(
-            row![lead, launch, cancel]
-                .spacing(10)
-                .align_y(Alignment::Center),
-        );
+        let body: Element<'_, Msg> = if self.measuring {
+            page.into()
+        } else {
+            scrollable(page).height(Length::Fill).into()
+        };
+        column![
+            header.padding([12, 16]),
+            body,
+            column![
+                text(format!(
+                    "{} · {}",
+                    self.req.nets.get(self.net).map_or("", |n| n.label.as_str()),
+                    if unconfined {
+                        self.local("Host process", "Процесс хоста")
+                    } else {
+                        self.req
+                            .containers
+                            .get(self.container)
+                            .map_or("", |c| c.label.as_str())
+                    }
+                ))
+                .size(12),
+                row![lead, launch, cancel]
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+            ]
+            .spacing(6)
+            .padding([8, 16])
+        ]
+        .height(if self.measuring {
+            Length::Shrink
+        } else {
+            Length::Fill
+        })
+        .into()
+    }
+
+    fn local<'a>(&self, en: &'a str, ru: &'a str) -> &'a str {
+        if self.req.language == Language::English {
+            en
+        } else {
+            ru
+        }
+    }
+
+    fn folder_choices<'a>(&'a self, path: &'a str) -> Element<'a, Msg> {
+        let tag = self.container_tag();
+        let value = std::path::Path::new(path);
+        let real = std::fs::canonicalize(value).unwrap_or_else(|_| value.to_path_buf());
+        let blocked = self.req.folder_protected.iter().any(|p| {
+            let p = std::path::Path::new(p);
+            let rp = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_owned());
+            [&real, &value.to_owned()].iter().any(|v| {
+                v.starts_with(p) || p.starts_with(v) || v.starts_with(&rp) || rp.starts_with(v)
+            })
+        });
+        let outside = !self.req.host_home.is_empty()
+            && !value.starts_with(&self.req.host_home)
+            && !["/mnt", "/media", "/run/media", "/srv"]
+                .iter()
+                .any(|p| value.starts_with(p) && value != std::path::Path::new(p));
+        if blocked || outside || value == std::path::Path::new(&self.req.host_home) {
+            return text(self.local("Protected path", "Защищённый путь"))
+                .size(12)
+                .into();
+        }
+        let own = self
+            .folder_modes
+            .get(&(tag.to_owned(), path.to_owned()))
+            .map(String::as_str)
+            .or_else(|| {
+                self.req
+                    .files
+                    .iter()
+                    .find(|f| f.tag == tag)
+                    .and_then(|f| f.paths.iter().find(|(p, _)| p == path))
+                    .and_then(|(_, s)| s.strip_prefix("rule:"))
+            });
+        let own = own.or_else(|| {
+            self.folders
+                .get(tag)
+                .is_some_and(|v| v.iter().any(|p| p == path))
+                .then_some("ro")
+        });
+        let mut choices = row![].spacing(3);
+        for (mode, label) in [
+            ("inherit", self.local("Inherit", "Наследовать")),
+            ("ro", self.local("Read", "Чтение")),
+            ("rw", self.local("Real", "Запись")),
+            ("overlay", self.local("Layer", "Слой")),
+        ] {
+            choices = choices.push(
+                button(text(label).size(12))
+                    .style(if own == Some(mode) {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press(Msg::PickFolder(path.to_owned(), mode.to_owned())),
+            );
+        }
+        let mut inherited: Option<(String, String)> = None;
+        let mut rules = std::collections::HashMap::new();
+        if let Some(file) = self.req.files.iter().find(|f| f.tag == tag) {
+            for (p, source) in &file.paths {
+                let mode = source.strip_prefix("rule:").unwrap_or("rw");
+                let p = p
+                    .strip_prefix("~/")
+                    .map(|p| {
+                        std::path::Path::new(&self.req.host_home)
+                            .join(p)
+                            .display()
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| p.clone());
+                rules.insert(p, mode.to_owned());
+            }
+        }
+        for ((t, p), mode) in &self.folder_modes {
+            if t == tag {
+                if mode == "inherit" {
+                    rules.remove(p);
+                } else {
+                    rules.insert(p.clone(), mode.clone());
+                }
+            }
+        }
+        for (p, mode) in rules {
+            if p != path
+                && std::path::Path::new(path).starts_with(&p)
+                && inherited
+                    .as_ref()
+                    .is_none_or(|(old, _)| p.len() > old.len())
+            {
+                inherited = Some((p, mode));
+            }
+        }
+        let detail = inherited
+            .map(|(p, m)| format!("{m} ← {p}"))
+            .unwrap_or_else(|| {
+                self.local("Inherited from home mode", "Наследуется от вида дома")
+                    .to_owned()
+            });
+        column![choices, text(detail).size(10)].spacing(2).into()
+    }
+
+    fn files_view(&self) -> Element<'_, Msg> {
+        let tag = self.container_tag();
+        let Some(file) = self.req.files.iter().find(|f| f.tag == tag) else {
+            return text(self.local(
+                "File access is managed by this container's existing policy.",
+                "Доступ к файлам определяется существующей политикой контейнера.",
+            ))
+            .into();
+        };
+        let home = self.homes.get(tag).unwrap_or(&file.home);
+        let mut page =
+            column![text(self.local("Home directory", "Домашний каталог")).size(17)].spacing(10);
+        for (kind, label) in [
+            (
+                "private",
+                self.local(
+                    "Private home — host files stay hidden",
+                    "Свой дом — файлы настоящего дома скрыты",
+                ),
+            ),
+            (
+                "layer",
+                self.local(
+                    "Overlay over host home — read host files, keep changes in a layer",
+                    "Overlay поверх настоящего дома — чтение файлов хоста, изменения в слое",
+                ),
+            ),
+            (
+                "main",
+                self.local(
+                    "Real home — read and write host files",
+                    "Настоящий дом — чтение и запись файлов хоста",
+                ),
+            ),
+        ] {
+            page = page.push(
+                button(text(format!("{} {label}", if home == kind { "●" } else { "○" })).size(14))
+                    .width(Length::Fill)
+                    .style(if home == kind {
+                        button::primary
+                    } else {
+                        button::secondary
+                    })
+                    .on_press_maybe(file.editable.then(|| Msg::Home(kind.into()))),
+            );
+        }
+        page = page.push(text(self.local("These choices keep network/session isolation. Overlay is not file privacy: ordinary host files are readable. Cellward policy and protected paths remain restricted. Home changes require the container to be stopped; Nix values are edited in Nix.", "Во всех трёх вариантах остаётся изоляция сети и сеанса. Overlay не скрывает файлы: обычные файлы хоста доступны для чтения. Политики Cellward и защищённые пути остаются ограничены. Для смены дома контейнер нужно остановить; значения из Nix меняются в Nix.")).size(13));
+        if !file.paths.is_empty() {
+            page = page.push(text(self.local("Existing access", "Уже выданный доступ")).size(16));
+            for (path, source) in &file.paths {
+                if source.starts_with("rule:") {
+                    page = page.push(
+                        row![
+                            container(text(path).size(13)).width(Length::Fill),
+                            self.folder_choices(path)
+                        ]
+                        .spacing(8),
+                    );
+                } else {
+                    page = page.push(text(format!("{path} · {source}")).size(13));
+                }
+            }
+        }
+        if home != "main" && !tag.starts_with("__tmp") && tag != "__fs__" {
+            page = page.push(
+                text(if home == "layer" {
+                    self.local(
+                        "Folder overrides over the home layer",
+                        "Исключения поверх слоя домашнего каталога",
+                    )
+                } else {
+                    self.local("Folder access rules", "Правила доступа к папкам")
+                })
+                .size(16),
+            );
+            for (i, (line, label)) in self.req.offers.iter().enumerate() {
+                if line.starts_with("folder=") {
+                    page = page.push(
+                        checkbox(self.offered.get(i).copied().unwrap_or(false))
+                            .label(label.as_str())
+                            .on_toggle(move |v| Msg::Offer(i, v)),
+                    );
+                }
+            }
+            if !self.req.host_home.is_empty() {
+                page = page.push(
+                    row![
+                        text(self.local("Browse host folders", "Папки настоящего дома")).size(15),
+                        checkbox(self.hidden_folders)
+                            .label(self.local("Hidden folders", "Скрытые папки"))
+                            .on_toggle(Msg::HiddenFolders)
+                    ]
+                    .spacing(12),
+                );
+                let mut browser = column![].spacing(4);
+                if let Some(parent) = std::path::Path::new(&self.browse).parent() {
+                    browser = browser.push(
+                        button(text(".. ↑"))
+                            .style(button::secondary)
+                            .on_press(Msg::Browse(parent.display().to_string())),
+                    );
+                }
+                browser = browser.push(text(&self.browse).size(12));
+                for path in &self.directories {
+                    let name = std::path::Path::new(path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    browser = browser.push(
+                        row![
+                            button(text(format!("▸ {name}")).size(13))
+                                .width(Length::Fill)
+                                .style(button::text)
+                                .on_press(Msg::Browse(path.clone())),
+                            self.folder_choices(path)
+                        ]
+                        .spacing(8),
+                    );
+                }
+                page = page.push(scrollable(browser).height(Length::Fixed(160.0)));
+            }
+            let input = self
+                .folder_inputs
+                .get(tag)
+                .map(String::as_str)
+                .unwrap_or("");
+            page = page.push(
+                row![
+                    text_input("~/Documents/project or /mnt/data", input)
+                        .on_input(Msg::FolderInput)
+                        .on_submit(Msg::AddFolder)
+                        .padding(7),
+                    button(text(self.local("Add read-only", "Добавить для чтения")))
+                        .on_press(Msg::AddFolder)
+                ]
+                .spacing(8),
+            );
+            if let Some(paths) = self.folders.get(tag) {
+                for (i, path) in paths.iter().enumerate() {
+                    page = page.push(
+                        row![
+                            container(text(path).size(14)).width(Length::Fill),
+                            self.folder_choices(path),
+                            button(text(self.local("Remove", "Убрать")))
+                                .style(button::secondary)
+                                .on_press(Msg::RemoveFolder(i))
+                        ]
+                        .spacing(8),
+                    );
+                }
+            }
+            page = page.push(text(self.local("Use an exact folder, e.g. ~/.config/my-app; granting all ~/.config or host startup/configuration paths is refused. Folder rules apply to all apps in this container and are saved only when Launch is pressed.", "Укажите конкретную папку, например ~/.config/my-app. Выдача всей ~/.config и путей запуска программ хоста запрещена. Правила общие для всех программ контейнера; сохраняется только при нажатии «Запустить».")).size(13));
+        }
+        page = page.push(text(self.local("Read = host files without writes; Real = writes to host; Layer = private changes; Inherit = remove the explicit rule. Rules inherit downwards; nested rules override parents. Later: reopen this launcher or use Cellward → Containers for legacy grants. Newly granted paths may require recreating the running instance. Revoking access does not erase copies or already opened files.", "Чтение — без записи на хост; Запись — прямо на хост; Слой — свои изменения; Наследовать — убрать своё правило. Вложенная папка наследует родителя, пока не задано исключение. Позже: снова откройте это меню запуска; прежние выдачи — в Cellward → Контейнеры. Для нового доступа может потребоваться пересоздать работающий экземпляр. Отзыв доступа не удаляет копии и уже открытые файлы.")).size(13));
         page.into()
     }
 
@@ -1205,6 +1698,7 @@ impl Window {
             && matches!(
                 key,
                 "width"
+                    | "container-width"
                     | "radius"
                     | "outer-radius"
                     | "hover-edge"
@@ -1306,7 +1800,20 @@ impl Window {
             );
             if self.req.frame_preview {
                 if let Some(&(max, initial)) = self.req.frame_sliders.get(&perm.key) {
-                    let number = now.parse::<u32>().unwrap_or(initial).min(max);
+                    if perm.key == "container-width" && now == "default" {
+                        continue;
+                    }
+                    let inherited = if perm.key == "container-width" && now == "inherit" {
+                        self.perm_value("width").0.parse::<u32>().ok().or_else(|| {
+                            self.req.frame_sliders.get("width").map(|(_, value)| *value)
+                        })
+                    } else {
+                        None
+                    };
+                    let number = inherited
+                        .or_else(|| now.parse::<u32>().ok())
+                        .unwrap_or(initial)
+                        .min(max);
                     block = block.push(
                         row![
                             container(text("")).width(Length::Fixed(230.0)),
@@ -1434,7 +1941,17 @@ fn fitted_size(req: &Request) -> Size {
         .layout(&mut tree, &renderer, &limits)
         .size()
         .height;
-    Size::new(width, height.ceil().clamp(MIN_HEIGHT, MAX_HEIGHT))
+    Size::new(
+        width,
+        height.ceil().clamp(
+            if req.mode.is_empty() {
+                480.0
+            } else {
+                MIN_HEIGHT
+            },
+            MAX_HEIGHT,
+        ),
+    )
 }
 
 /// The exit status of a window that could not be shown at all: the caller
@@ -1562,6 +2079,39 @@ fn main() -> iced::Result {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn filesystem_drafts_follow_container_and_never_leak_into_unconfined_launches() {
+        let req = parse_request("net\tunconfined\tHost process\t\nnet\thost\tHost network\tselected\ncontainer\ta\tA\tselected\ncontainer\tb\tB\t\nfiles\ta\tprivate\t1\nfiles\tb\tlayer\t0\n");
+        let mut w = Window::new(req);
+        let _ = w.update(Msg::PickFolder(
+            "/mnt/data/project".into(),
+            "overlay".into(),
+        ));
+        assert!(w.answer().contains("grant\toverlay\t/mnt/data/project\n"));
+        let _ = w.update(Msg::Container(1));
+        let _ = w.update(Msg::Home("main".into()));
+        assert!(!w.answer().contains("grant\t"));
+        assert!(!w.answer().contains("home\t"), "Nix-owned home changed");
+        let _ = w.update(Msg::Container(0));
+        assert!(w.answer().contains("grant\toverlay\t/mnt/data/project\n"));
+        let _ = w.update(Msg::Net(0));
+        assert!(!w.answer().contains("grant\t"));
+        assert!(!w.answer().contains("files-reviewed"));
+    }
+
+    #[test]
+    fn arrows_on_files_page_cannot_silently_change_network_or_container() {
+        let mut w = Window::new(parse_request(
+            "net\toffline\tOffline\tselected\nnet\thost\tHost\t\ncontainer\ta\tA\tselected\n",
+        ));
+        w.launch_tab = 2;
+        let _ = w.key_choose(
+            Key::Named(key::Named::ArrowDown),
+            keyboard::Modifiers::default(),
+        );
+        assert_eq!(w.net, 0);
+    }
     use super::*;
 
     const REQUEST: &str = "title\tЗапуск: Firefox\nnote\tуже работает\n\

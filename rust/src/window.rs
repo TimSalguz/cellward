@@ -83,6 +83,10 @@ pub struct Item {
 /// Everything the window shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Request {
+    /// Effective filesystem access, one entry per offered container.
+    pub files: Vec<FileAccess>,
+    pub host_home: String,
+    pub folder_protected: Vec<String>,
     /// Language of the already-rendered labels and the window chrome.
     pub language: crate::i18n::Language,
     pub title: String,
@@ -114,6 +118,16 @@ pub struct Request {
     pub perms: Vec<Perm>,
     /// Each container's, by its tag.
     pub perm_of: Vec<PermOf>,
+}
+
+/// Trusted filesystem summary supplied by the host picker.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileAccess {
+    pub tag: String,
+    pub home: String,
+    pub editable: bool,
+    /// Existing effective grants, including legacy permissions and their source.
+    pub paths: Vec<(String, String)>,
 }
 
 /// A permission's row: its key, its name, and its choices `(value, text)`.
@@ -527,6 +541,9 @@ pub fn ask_perms(window: &Path, request: &str) -> Option<Vec<(String, String)>> 
 /// What came back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reply {
+    pub files_reviewed: bool,
+    pub home: Option<String>,
+    pub grants: Vec<String>,
     pub net: String,
     pub container: String,
     pub name: Option<String>,
@@ -578,6 +595,28 @@ pub fn render(req: &Request) -> String {
     let mut out = format!("title\t{}\n", clean(&req.title));
     if req.language != crate::i18n::Language::default() {
         out.push_str(&format!("lang\t{}\n", req.language.tag()));
+    }
+    if !req.host_home.is_empty() {
+        out.push_str(&format!("host-home\t{}\n", clean(&req.host_home)));
+    }
+    for path in &req.folder_protected {
+        out.push_str(&format!("file-protected\t{}\n", clean(path)));
+    }
+    for file in &req.files {
+        out.push_str(&format!(
+            "files\t{}\t{}\t{}\n",
+            clean(&file.tag),
+            clean(&file.home),
+            u8::from(file.editable)
+        ));
+        for (path, source) in &file.paths {
+            out.push_str(&format!(
+                "file-path\t{}\t{}\t{}\n",
+                clean(&file.tag),
+                clean(path),
+                clean(source)
+            ));
+        }
     }
     for note in &req.notes {
         out.push_str(&format!("note\t{}\n", clean(note)));
@@ -667,6 +706,9 @@ pub fn parse_reply(text: &str) -> Option<Reply> {
     for line in text.lines() {
         let (key, value) = line.split_once('\t').unwrap_or((line, ""));
         match key {
+            "files-reviewed" => reply.files_reviewed = value == "1",
+            "home" => reply.home = Some(value.to_owned()),
+            "grant" => reply.grants.push(value.to_owned()),
             "net" => net = Some(value.to_owned()),
             "container" => container = Some(value.to_owned()),
             "name" => reply.name = Some(value.to_owned()).filter(|v| !v.is_empty()),
@@ -950,6 +992,7 @@ mod tests {
                 rule: true,
                 offers: vec!["camera=on".to_owned()],
                 perms: vec![("x11".to_owned(), "on".to_owned())],
+                ..Reply::default()
             }
         );
         // The main container is the empty tag — present, and empty.

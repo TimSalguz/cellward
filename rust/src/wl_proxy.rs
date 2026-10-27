@@ -527,6 +527,7 @@ impl Live {
         }
         watch(&config.join(crate::cli::DECLARED_DIR));
         watch(&config.join(crate::container::DECLARED));
+        watch(&config.join(crate::container::POLICY_DIR));
         if let Some(origin) = &setup.origin {
             watch(&origin.state.join(&origin.zone));
             if let Some(container) = &origin.container {
@@ -563,6 +564,29 @@ impl Live {
             > 0
         {}
         if let Some(origin) = &self.setup.origin {
+            if let Some(container) = &origin.container {
+                // A Nix-only or main policy directory may first be created
+                // when its frame editor opens. Watch its parent and re-arm
+                // after creation/replacement, without creating settings here.
+                for dir in [
+                    self.setup.switch.join(crate::container::POLICY_DIR),
+                    crate::container::policy_dir_in(&self.setup.switch, container),
+                ] {
+                    if let Ok(path) = CString::new(dir.as_os_str().as_encoded_bytes()) {
+                        unsafe {
+                            libc::inotify_add_watch(
+                                self.inotify.as_raw_fd(),
+                                path.as_ptr(),
+                                libc::IN_CLOSE_WRITE
+                                    | libc::IN_MOVED_TO
+                                    | libc::IN_MOVED_FROM
+                                    | libc::IN_CREATE
+                                    | libc::IN_DELETE,
+                            );
+                        }
+                    }
+                }
+            }
             let zone = origin.current_zone();
             if self.watched_zone.as_deref() != Some(zone.as_str()) {
                 let path = origin.state.join(&zone);
@@ -3071,7 +3095,7 @@ fn read_panel_reply(fd: RawFd, partial: &mut Vec<u8>) -> io::Result<Option<(u64,
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid panel reply",
-                ))
+                ));
             }
         };
         if partial.len() > size {
@@ -7552,6 +7576,43 @@ mod tests {
     /// the frame to tell the proxy, once — the width alone without colours,
     /// the zone's colour with a memfd of the new ones; Nix's word over the
     /// local one; a change that leaves the frame as it is tells nothing.
+    #[test]
+    fn a_new_container_policy_wakes_only_its_frames_and_cancel_restores_inheritance() {
+        let root =
+            std::env::temp_dir().join(format!("vz-live-container-width-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let config = root.join("config");
+        fs::create_dir_all(&config).unwrap();
+        let setup = Setup {
+            frame: Frame::of_zone(&root, &config, "offline"),
+            title: String::new(),
+            switch: config.clone(),
+            always_focused: false,
+            origin: Some(crate::frame::Origin {
+                state: root.clone(),
+                zone: "offline".into(),
+                container: Some("main".into()),
+            }),
+        };
+        let mut own = Live::watch(&setup).unwrap();
+        let mut other_setup = setup.clone();
+        other_setup.origin.as_mut().unwrap().container = Some("other".into());
+        let mut other = Live::watch(&other_setup).unwrap();
+        let policy = crate::container::policy_dir_in(&config, "main");
+        let mut preview = crate::frame_preview::Session::new(&policy).unwrap();
+        preview.set(crate::frame::WIDTH_SETTING, "1").unwrap();
+        assert!(sys::poll_events_now(own.inotify.as_raw_fd(), libc::POLLIN).unwrap() != 0);
+        assert_eq!(own.changed().unwrap().0.width, 1);
+        assert!(other.changed().is_none());
+        preview.set(crate::frame::WIDTH_SETTING, "2").unwrap();
+        assert!(sys::poll_events_now(own.inotify.as_raw_fd(), libc::POLLIN).unwrap() != 0);
+        assert_eq!(own.changed().unwrap().0.width, 2);
+        drop(preview);
+        assert!(sys::poll_events_now(own.inotify.as_raw_fd(), libc::POLLIN).unwrap() != 0);
+        assert_eq!(own.changed().unwrap().0.width, crate::frame::DEFAULT_WIDTH);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_setting_written_is_the_frame_to_tell() {
         use crate::frame::{Origin, COLOR_FILE, OUTER_RADIUS_SETTING, WIDTH_SETTING};

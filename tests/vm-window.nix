@@ -21,6 +21,8 @@
   # Only measure cold/warm picker mapping on a real compositor.
   startupOnly ? false,
   clipboardOnly ? false,
+  # Default container launches and nested folder mounts, without GUI scenarios.
+  foldersOnly ? false,
 }:
 
 let
@@ -128,7 +130,9 @@ let
       machine.wait_for_unit("multi-user.target")
       machine.wait_for_unit("home-manager-alice.service")
       machine.wait_for_unit("user@1000.service")
-
+    '' + (if foldersOnly then ''
+      exec(open("${./vm-folder-rules.py}").read())
+    '' else ''
       # What the columns show: zones (a directory with a config is a zone to
       # the picker), a named sandbox, a profile. The sandbox where the layout
       # before one name per container kept it: the picker's first look moves
@@ -803,7 +807,7 @@ let
       # again, the tag, and each look of the buttons — a screenshot of each
       # in the output.
       exec(open("${./vm-window-looks.py}").read())
-    '');
+    ''));
   };
 in
 {

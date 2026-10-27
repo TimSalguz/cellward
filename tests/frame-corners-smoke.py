@@ -32,6 +32,7 @@ def main():
     p.add_argument("--hover-edge", type=int, default=2, choices=range(1, 13))
     p.add_argument("--resize-corner", type=int, default=16, choices=range(65))
     p.add_argument("--menu", action="store_true", help="verify menu dismissal and app-level mouse delivery")
+    p.add_argument("--double-click", action="store_true", help="record native compositor behavior after title double clicks")
     args = p.parse_args()
     root = Path(tempfile.mkdtemp(prefix="cellward-corners-"))
     print(f"Artifacts: {root}", flush=True)
@@ -117,6 +118,24 @@ def main():
                 # edge of the close cell (outside the old radius-sized inset).
                 pointer.write(f"move {(left + right) // 2} {top + width + args.hover_edge - 1}\n")
                 time.sleep(0.2)
+                if args.double_click:
+                    def state():
+                        return next(w for w in json.loads(subprocess.check_output(
+                            [args.niri, "msg", "-j", "windows"], env=env)) if w.get("app_id") == name)
+                    before = state()
+                    pointer.write(f"move {(left + right) // 2} {top + width + 12}\n")
+                    time.sleep(.1)
+                    pointer.write("press\nrelease\n")
+                    time.sleep(.12)
+                    pointer.write("press\nrelease\n")
+                    time.sleep(.25)
+                    after = state()
+                    assert before['layout']['window_size'] != after['layout']['window_size'], 'title double click did not change window mode'
+                    (root / f"{name}-double-click.json").write_text(json.dumps({'before': before, 'after': after}, indent=2))
+                    subprocess.run([args.grim, str(root / f"{name}-double-click.png")], env=env, check=True)
+                    print(f'{name} double click: {before.get("layout")} -> {after.get("layout")}', flush=True)
+                    subprocess.run([args.niri, "msg", "action", "set-column-width", "640"], env=env, check=True, stdout=subprocess.DEVNULL)
+                    time.sleep(.2)
                 # Radius clips the row's pixels, not its anchor.
                 safe = 0
                 if args.menu:

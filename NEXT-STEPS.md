@@ -8,11 +8,50 @@
 здесь только вместе с тестом и ссылкой на коммит; противоречащие старые пункты
 `ROADMAP.md` сверять с кодом, а не считать истиной по галочке.
 
+## Проверено 2026-10-27: запуск, файловые виды и рамки
+
+- [x] Вкладки среды/разрешений/файлов с неподвижными кнопками запуска и
+  прокруткой содержимого; встроенный выбор произвольных разрешённых папок.
+- [x] Вложенные ro/rw/overlay-правила для приватного и overlay-дома, один
+  общий mount каждого слоя на экземпляр; источники Real закреплены до HOME.
+  Полный Hide с ENOENT и фильтрацией метаданных остаётся отдельной задачей.
+- [x] Собственная толщина рамки контейнера, локальное переопределение Nix,
+  живой предпросмотр и отмена. Для main также проверено первое создание политики.
+- [x] Старый экземпляр без отдельного PID namespace больше не запускает
+  программу с предупреждением: требуется остановка и новый запуск.
+- Проверки: 1128 тестов ядра, 76 GUI; графический ввод/отмена, независимые
+  user/mount namespace проверки и NixOS VM `--arg foldersOnly true`: оба вида
+  дома, внешний write-through, вложенные исключения, RO и restart persistence.
+
+## Следующий подтверждённый дефект: восстановление из трея (2026-10-27)
+
+- [ ] «Переключиться к открытой» должно сначала показать окно приложения,
+  свёрнутого в трей, затем сфокусировать его. Сейчас `Again::There` вызывает
+  только `raise_running`, который ищет существующее окно; без окна это no-op.
+- [ ] Активировать проверенный StatusNotifierItem/поддерживаемый механизм
+  приложения, привязанный к конкретному живому экземпляру. Не угадывать по
+  заголовку/имени и не запускать произвольно вторую копию вместо восстановления.
+- [ ] Выбирать точный контейнер/экземпляр из диалога, не первый PID программы
+  из всех сетей. Проверить две копии, скрытое окно, уход/смену владельца значка,
+  полноэкранный режим и отсутствие подходящего механизма с явным результатом.
+
 ## Проверенные дополнения 2026-10-24
 
 Новая идея: [скриншоты с замороженным кадром, выбором окна и без рамки](docs/SCREENSHOT-IDEAS.md).
 Также: [настраиваемое переподключение не отвечающего туннеля](docs/TUNNEL-RECONNECT-IDEA.md).
 Это требования к будущей реализации, не готовая функция.
+
+Следующий блок оформления: [запуск без изоляции как встроенный вид среды,
+рамки хоста/служебных окон, игры, пунктир и границы вложенной изоляции](docs/HOST-FRAMES-AND-GAMES.md).
+Совместимость Steam/Proton/Wine/Dolphin не считать подтверждённой без матрицы
+режимов окна, ввода и производительности. Рамки хоста пока не включены.
+
+- [ ] Убрать оставшийся стык hover-панели при compositor opacity. Единая
+  поверхность частей рамки не устраняет наложение на поверхность приложения:
+  niri применяет opacity отдельно к каждой. Воспроизведено на opacity 0.65;
+  подробности и границы исправления — `docs/UNIFIED-ROUNDED-TOP.md`.
+  Прозрачность пользователя автоматически не отключать. Двойной клик по
+  свежему обычному hover-окну проверен реальным вводом на niri (1/4 px).
 
 Это дополнения к срезу выше, не повторный аудит всех пунктов P0–P4.
 
@@ -80,8 +119,9 @@
   ресурсы. Проверить фактическую семантику до удаления дублирующих строк;
   не менять уже выданные права при перестройке интерфейса.
   Устройства с основной строкой разрешений и выбор дома исключены из
-  поздних предложений шаблона. Дополнительная страница — «Файлы и другие
-  ресурсы»; ответ окна ограничен реально предложенным списком.
+  поздних предложений шаблона. Теперь разрешения и файлы — отдельные вкладки
+  единого окна запуска; подробности и границы — docs/FILESYSTEM-VIEWS.md.
+  Ответ для предложений шаблонов ограничен реально предложенным списком.
 - [x] Живой предпросмотр толщины и двух радиусов при перетягивании ползунков;
   сохранение закрепляет локальное переопределение, отмена восстанавливает Nix.
 - [x] Прозрачная подсветка выбора точки вместо непрозрачного белого слоя.
@@ -346,3 +386,49 @@
 4. Единая публикация маршрутов и жизненный цикл звеньев.
 5. DNS предыдущего hop, прокси-звенья, локальные боковые маршруты и
    расширенная схема; затем оставшиеся бэкенды и продуктовые этапы.
+
+### Filesystem view follow-up (2026-10-27)
+
+- [ ] Implement full Hide semantics (ENOENT + omitted directory entry), rather
+  than an empty mount; filter metadata, watches, aliases and rule disclosure.
+- [ ] Audit own `/proc` mount metadata separately from the existing host-PID
+  isolation. Acceptance criteria: [FILESYSTEM-VIEWS.md](docs/FILESYSTEM-VIEWS.md).
+
+- [x] Встроенный запрос «Firefox просит сеть» получает клавиши при настоящем
+  фокусе родительского окна: стрелки/Enter/Esc, задержка без сброса от навигации,
+  поглощение отпусканий и зажатых клавиш при смене фокуса. Регрессия через
+  Wayland-прокси: `b678e0d`, `7f87763`. Полноэкранный smoke остаётся в общем
+  визуальном наборе.
+
+- [ ] Независимые каналы ввода человека/агента: общий механизм владения,
+  виртуальные мышь/клавиатура/геймпад, блокировка физического ввода только в
+  занятое окно, индикация и аварийное освобождение. Не блокировать другие окна.
+- [ ] Живая кнопка «Считать приложение всегда активным» в рамке, отдельно
+  от реального фокуса/владения каналом; базовая CLI/Nix-политика уже существует.
+- [ ] Режим «Первый клик только активирует окно»: поглощать полную пару
+  press/release, не начинать drag/double-click и не обходить занятый канал.
+  Учитывать настоящий фокус композитора, а не always-focused приложения.
+  План и критерии: [INDEPENDENT-INPUT.md](docs/INDEPENDENT-INPUT.md).
+
+### Audit follow-up (2026-10-27)
+
+- [ ] Authenticate typing control clients independently of socket reachability;
+  bind Select/Type/Cancel to the same authorized principal, including unconfined
+  launches. Show verified requester identity during target selection. Merely
+  hiding a socket does not isolate an unrestricted process of the same UID.
+- [x] Proxy rejects CR/LF unless explicitly enabled in the wire request;
+  core tests and graphical typing regression pass (`b678e0d`). This flag is
+  a safety policy, not client authentication.
+- [ ] Bound and validate OpenConnect option values as well as option names.
+- [ ] Add fuzz targets for Wayland, D-Bus and Pulse protocol parsers; run
+  dependency audit and targeted Miri checks with reproducible tool versions.
+- [x] Reproduce and fix transparent pixels at hover/frame joins: 100–200%,
+  border 1–4 px (`a63a5f9`). The independent compositor opacity seam remains
+  open; this fix does not claim to solve per-surface opacity.
+
+- [x] Bind Select continuations to a live requester pidfd and random token;
+  reject a different process's Type/Cancel/replacement Select, release active
+  ownership on Cancel and suppress stale Type (`a011473`, `f09b8c0`). This does
+  not authenticate the first Select; the broader authorization item stays open.
+- [x] Publish the independent-input design in both READMEs (`309d1ed`),
+  explicitly distinguishing implemented foundations from planned devices/leases.

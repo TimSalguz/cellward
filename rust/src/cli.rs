@@ -3746,6 +3746,23 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
                     }
                 };
             }
+            if key == "frame-width" {
+                let width = match value.as_str() {
+                    "default" => None,
+                    "global" => Some("inherit"),
+                    _ => Some(value.as_str()),
+                };
+                return match crate::container::set_frame_width(tools, selector, width) {
+                    Ok(()) => {
+                        println!("Толщина рамки контейнера {selector}: {value} (действует сразу)");
+                        0
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        1
+                    }
+                };
+            }
             if key == "color" {
                 let color = (value != "default").then_some(value.as_str());
                 return match crate::container::set_frame_color(tools, selector, color) {
@@ -4080,6 +4097,26 @@ fn container(tools: &Tools, args: &[OsString]) -> u8 {
             0
         }
         b"expire" => crate::grants::expire(tools),
+        b"folder" => {
+            let (Some(record), Some(mode), Some(path)) =
+                (words.first(), words.get(1), words.get(2))
+            else {
+                eprintln!(
+                    "cellward container folder <контейнер> ro|rw|overlay|hide|inherit <папка>"
+                );
+                return 1;
+            };
+            match crate::folder_rules::set(tools, record, mode, path) {
+                Ok(()) => {
+                    println!("Правило сохранено. Применяется к новым запускам; для отзыва уже открытого доступа остановите контейнер.");
+                    0
+                }
+                Err(why) => {
+                    eprintln!("{why}");
+                    1
+                }
+            }
+        }
         b"grant" | b"revoke" => {
             let grant = sub == "grant";
             const USAGE: &str =

@@ -428,6 +428,89 @@ pub fn frame_color_in(config: &Path, name: &str) -> Option<String> {
     })
 }
 
+/// A visual override may explicitly inherit the global width even when Nix
+/// supplies a container width. Removing the override restores Nix/local policy.
+pub fn parse_frame_width(text: &str) -> Option<Option<i32>> {
+    if text.trim() == "inherit" {
+        return Some(None);
+    }
+    text.trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|w| (0..=crate::frame::MAX_WIDTH).contains(w))
+        .map(Some)
+}
+pub fn declared_frame_width_in(config: &Path, name: &str) -> Option<Option<i32>> {
+    read_declared_in(config, name).and_then(|(conf, _)| {
+        values(&conf, "frame_width")
+            .last()
+            .and_then(parse_frame_width)
+    })
+}
+pub fn frame_width_setting_in(config: &Path, name: &str) -> Option<Sourced<Option<i32>>> {
+    let policy = policy_dir_in(config, name);
+    for text in [
+        crate::frame_preview::read(&policy, crate::frame::WIDTH_SETTING),
+        crate::cli::read_setting(&crate::frame::override_path(
+            &policy,
+            crate::frame::WIDTH_SETTING,
+        )),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(value) = parse_frame_width(&text) {
+            return Some(Sourced {
+                value,
+                source: Source::Local,
+            });
+        }
+    }
+    if let Some(value) = declared_frame_width_in(config, name) {
+        return Some(Sourced {
+            value,
+            source: Source::Nix,
+        });
+    }
+    let local = fs::read_to_string(policy.join(FILE)).ok()?;
+    values(&parse_conf(&local), "frame_width")
+        .last()
+        .and_then(parse_frame_width)
+        .map(|value| Sourced {
+            value,
+            source: Source::Local,
+        })
+}
+
+pub fn frame_width_in(config: &Path, name: &str) -> Option<i32> {
+    frame_width_setting_in(config, name).and_then(|s| s.value)
+}
+
+pub fn set_frame_width(tools: &Tools, selector: &str, value: Option<&str>) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    let path = crate::frame::override_path(&container.policy, crate::frame::WIDTH_SETTING);
+    if let Some(value) = value {
+        let value = if value == "inherit" {
+            "inherit".to_owned()
+        } else {
+            value
+                .parse::<i32>()
+                .ok()
+                .filter(|w| (0..=crate::frame::MAX_WIDTH).contains(w))
+                .ok_or_else(|| format!("толщина должна быть от 0 до {}", crate::frame::MAX_WIDTH))?
+                .to_string()
+        };
+        fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        fs::write(path, value).map_err(|e| e.to_string())
+    } else {
+        match fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+            _ => {}
+        }
+        write_key(&container.policy.join(FILE), "frame_width", None, true)
+    }
+}
+
 fn frame_color_preview(policy: &Path) -> Option<String> {
     crate::cli::read_setting(&crate::frame::override_path(policy, "frame-color"))
         .as_deref()
@@ -499,7 +582,13 @@ pub fn policy_dir_in(config: &Path, name: &str) -> PathBuf {
 }
 
 /// The files a container's policy is made of.
-const POLICY_FILES: [&str; 4] = [FILE, PATHS_FILE, "perms", crate::trust::DIR];
+const POLICY_FILES: [&str; 5] = [
+    FILE,
+    PATHS_FILE,
+    "perms",
+    crate::trust::DIR,
+    crate::folder_rules::FILE,
+];
 
 /// What the move to this layout did, for the one who reads it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1476,6 +1565,18 @@ pub fn prepare_data(container: &Container) -> Result<(), String> {
     // A home of its own is its `home/`, there from the start.
     if container.home == Home::Private {
         fs::create_dir_all(&home).map_err(|e| format!("не создать {}: {e}", home.display()))?;
+    } else if container.home == Home::Layer {
+        use std::os::unix::fs::DirBuilderExt;
+        crate::home_layer::migrate_slots(dir);
+        let (upper, work) = crate::home_layer::layer_dirs(dir);
+        for path in [upper, work] {
+            no_link(&path)?;
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&path)
+                .map_err(|e| format!("не создать {}: {e}", path.display()))?;
+        }
     }
     fs::write(dir.join(DATA_KIND), container.home.setting())
         .map_err(|e| format!("не записать {}: {e}", dir.join(DATA_KIND).display()))
@@ -1785,6 +1886,15 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
                 value,
                 source: Source::Local,
             })
+        })
+        .or_else(|| {
+            fs::read_to_string(policy.join("perms"))
+                .ok()
+                .filter(|text| crate::fs_sandbox::Perms::parse(text).x11)
+                .map(|_| Sourced {
+                    value: true,
+                    source: Source::Local,
+                })
         });
 
     let always = |conf: &[(String, String)]| {
@@ -2104,6 +2214,21 @@ const HOST_RUNS: &[&str] = &[
     ".config/nushell",
     ".config/xonsh",
 ];
+
+/// Paths whose contents or host execution rights cannot be granted by a folder rule.
+pub fn grant_protected_paths(tools: &Tools) -> Vec<PathBuf> {
+    HOST_RUNS
+        .iter()
+        .map(|p| tools.home.join(p))
+        .chain(crate::zone::host_run_places(&tools.home))
+        .chain([
+            tools.config.clone(),
+            tools.state.clone(),
+            tools.profiles.clone(),
+            tools.sandboxes.clone(),
+        ])
+        .collect()
+}
 
 pub fn forbidden_path(home: &Path, path: &Path) -> Option<String> {
     if !path.is_absolute() {
@@ -2660,7 +2785,17 @@ pub fn set_x11(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), St
         "x11",
         on.map(|on| if on { "true" } else { "false" }),
         true,
-    )
+    )?;
+    // The unified permission supersedes the old filesystem checkbox too.
+    let old = container.policy.join("perms");
+    if let Ok(text) = fs::read_to_string(&old) {
+        let mut legacy = crate::fs_sandbox::Perms::parse(&text);
+        if legacy.x11 {
+            legacy.x11 = false;
+            fs::write(old, legacy.render()).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Give a container a focus policy of its own (`None`: none — `input`),
@@ -2922,6 +3057,9 @@ pub fn set_home(tools: &Tools, selector: &str, home: Home) -> Result<(), String>
         return Err(format!(
             "программы контейнера {selector} работают (в сети {busy}) — закрой их, потом меняй дом"
         ));
+    }
+    if home == Home::Main && !crate::folder_rules::load(tools, selector)?.is_empty() {
+        return Err("У контейнера есть правила папок: сначала уберите их (Наследовать), затем выбирайте настоящий дом".into());
     }
     if home == Home::Main
         && fs::read_dir(container.trust_dir()).is_ok_and(|mut d| d.next().is_some())
@@ -3462,8 +3600,78 @@ mod tests {
         Tools::from_entries(Path::new("/m.json"), &entries).unwrap()
     }
 
+    #[test]
+    fn legacy_x11_is_displayed_and_the_unified_off_setting_really_revokes_it() {
+        let t = Tmp::new("legacy-x11-unified");
+        let tools = tools_in(&t.0);
+        create(&tools, "work", Home::Private).unwrap();
+        let path = policy_dir(&tools, "work").join("perms");
+        fs::write(&path, "x11\ndownloads\n").unwrap();
+        assert_eq!(load(&tools, "work").unwrap().x11.unwrap().value, true);
+        set_x11(&tools, "work", Some(false)).unwrap();
+        assert!(!load(&tools, "work").unwrap().x11.unwrap().value);
+        let old = crate::fs_sandbox::Perms::parse(&fs::read_to_string(path).unwrap());
+        assert!(!old.x11);
+        assert!(old.downloads);
+    }
+
     /// A container's own frame colour: set, refused when it is no colour,
     /// taken back to the zone's (`docs/PERMISSIONS.md` §11.10).
+    #[test]
+    fn frame_width_is_scoped_live_and_can_inherit_over_nix_without_changing_it() {
+        let t = Tmp::new("frame-width");
+        let tools = tools_in(&t.0);
+        fs::create_dir_all(tools.config.join(POLICY_DIR)).unwrap();
+        fs::write(tools.config.join(POLICY_DIR).join(LAYOUT_MARK), LAYOUT).unwrap();
+        fs::write(tools.config.join(POLICY_DIR).join(PINS_MOVED), "").unwrap();
+        create(&tools, "work", Home::Private).unwrap();
+        create(&tools, "other", Home::Private).unwrap();
+        fs::create_dir_all(tools.config.join(DECLARED)).unwrap();
+        crate::declared::declare(
+            &declared_file(&tools, "work"),
+            "home = private\nframe_width = 3\n",
+        );
+        let original = fs::read(declared_file(&tools, "work")).unwrap();
+        let setup = crate::frame::Setup {
+            frame: crate::frame::Frame::of_zone(&tools.state, &tools.config, "offline"),
+            title: String::new(),
+            switch: tools.config.clone(),
+            always_focused: false,
+            origin: Some(crate::frame::Origin {
+                state: tools.state.clone(),
+                zone: "offline".into(),
+                container: Some("work".into()),
+            }),
+        };
+        assert_eq!(setup.read_again().width, 3);
+        set_frame_width(&tools, "work", Some("1")).unwrap();
+        assert_eq!(setup.read_again().width, 1);
+        assert_eq!(frame_width_in(&tools.config, "other"), None);
+        assert!(set_frame_width(&tools, "work", Some("33")).is_err());
+        assert_eq!(setup.read_again().width, 1);
+        {
+            let mut preview =
+                crate::frame_preview::Session::new(&policy_dir(&tools, "work")).unwrap();
+            preview.set(crate::frame::WIDTH_SETTING, "2").unwrap();
+            assert_eq!(setup.read_again().width, 2);
+        }
+        assert_eq!(setup.read_again().width, 1);
+        set_frame_width(&tools, "work", Some("inherit")).unwrap();
+        fs::write(tools.config.join(crate::frame::WIDTH_SETTING), "6").unwrap();
+        assert_eq!(setup.read_again().width, 6);
+        set_frame_width(&tools, "work", None).unwrap();
+        assert_eq!(setup.read_again().width, 3);
+        assert_eq!(fs::read(declared_file(&tools, "work")).unwrap(), original);
+        assert_eq!(
+            frame_width_setting_in(&tools.config, "work")
+                .unwrap()
+                .source,
+            Source::Nix
+        );
+        set_frame_width(&tools, MAIN_RECORD, Some("0")).unwrap();
+        assert_eq!(frame_width_in(&tools.config, MAIN_RECORD), Some(0));
+    }
+
     #[test]
     fn a_container_has_a_frame_colour_of_its_own() {
         let t = Tmp::new("colour");
@@ -3661,7 +3869,12 @@ mod tests {
 
         c.home = Home::Layer;
         prepare_data(&c).unwrap();
-        assert!(!c.dir.join("home").exists(), "a private home is no layer");
+        assert!(
+            !c.dir.join("home/.config/x").exists(),
+            "private contents must not become a layer"
+        );
+        assert!(c.dir.join("home/upper").is_dir());
+        assert!(c.dir.join("home/work").is_dir());
         assert_eq!(
             fs::read_to_string(c.dir.join("home.private/.config/x")).unwrap(),
             "private"

@@ -53,6 +53,7 @@ struct Cont {
     color: Option<Color>,
     /// Granted directories, with when they are taken back (0: never).
     paths: Vec<(String, u64)>,
+    folder_rules: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -333,7 +334,13 @@ fn parse(text: &str) -> Data {
                 network: (*network).to_owned(),
                 color: color_of(color),
                 paths: Vec::new(),
+                folder_rules: Vec::new(),
             }),
+            ["folder-rule", of, mode, path] => {
+                if let Some(c) = d.containers.iter_mut().find(|c| c.name == *of) {
+                    c.folder_rules.push(((*mode).into(), (*path).into()));
+                }
+            }
             ["path", of, path, until] => {
                 if let Some(c) = d.containers.iter_mut().find(|c| c.name == *of) {
                     c.paths.push(((*path).to_owned(), num(until)));
@@ -986,6 +993,7 @@ enum Msg {
     Chosen(Option<String>),
     GrantFor(&'static str),
     Revoke(String),
+    FolderRule(String, String),
     MergeAsk,
     MergeInto(String),
     MergeGo,
@@ -1579,6 +1587,16 @@ impl Panel {
                 }
                 self.act(args)
             }
+            Msg::FolderRule(path, mode) => match self.chosen().cloned() {
+                Some(c) => self.act(vec![
+                    "container".into(),
+                    "folder".into(),
+                    c.name,
+                    mode,
+                    path,
+                ]),
+                None => Task::none(),
+            },
             Msg::Revoke(path) => match self.chosen().cloned() {
                 Some(c) => self.act(vec!["container".into(), "revoke".into(), c.name, path]),
                 None => Task::none(),
@@ -2745,6 +2763,30 @@ impl Panel {
                     .align_y(Alignment::Center),
                 );
             }
+            for (mode, path) in &c.folder_rules {
+                let mut choices =
+                    row![container(text(path).size(13)).width(Length::Fill)].spacing(4);
+                for (word, label) in [
+                    ("ro", "Чтение"),
+                    ("rw", "Запись"),
+                    ("overlay", "Слой"),
+                    ("inherit", "Наследовать"),
+                ] {
+                    choices = choices.push(
+                        button(text(label).size(12))
+                            .style(if mode == word {
+                                button::primary
+                            } else {
+                                button::secondary
+                            })
+                            .on_press_maybe(
+                                idle.then(|| Msg::FolderRule(path.clone(), word.into())),
+                            ),
+                    );
+                }
+                page = page.push(choices);
+            }
+            page = page.push(text("Правила общие для контейнера, применяются к новым запускам. Для отзыва доступа у работающих программ остановите контейнер. Вложенные правила переопределяют родительские.").size(12));
             page = page.push(
                 button(text("Выдать каталог…").size(13))
                     .padding([4, 10])

@@ -1341,6 +1341,19 @@ fn ask_window(
     let Some(container) = apply_profile_choice(tools, key, choice, reply.name.clone()) else {
         return Some(None);
     };
+    let container = match with_files(tools, key, &reply, container) {
+        Ok(container) => container,
+        Err(why) => {
+            let _ = window::navigation_question(
+                &tools.window,
+                "Запуск остановлен",
+                &why,
+                &[("close", "Закрыть", false)],
+            );
+            eprintln!("vpn-zone-pick: запуск остановлен при сохранении файловой политики: {why}");
+            return Some(None);
+        }
+    };
     let selector = container.selector();
     if is_new && reply.pin_container {
         remember(&tools.state, ".pinnedprofile", key, &selector);
@@ -1630,6 +1643,11 @@ fn window_request(
         }
     };
     let mut req = window::Request {
+        host_home: tools.home.display().to_string(),
+        folder_protected: crate::container::grant_protected_paths(tools)
+            .into_iter()
+            .map(|p| p.display().to_string())
+            .collect(),
         title: format!("Запуск: {label}"),
         notes: Vec::new(),
         nets: window_nets(&menu_zones(&tools.state), default_net),
@@ -1697,7 +1715,195 @@ fn window_request(
             ))
         })
         .collect();
+    req.files = req
+        .containers
+        .iter()
+        .map(|c| launch_files(tools, key, &c.tag))
+        .collect();
     req
+}
+
+/// Filesystem state is computed by the host, never inferred by the GUI from a
+/// container's friendly label. In particular legacy `home` remains visible.
+fn launch_files(tools: &Tools, key: &str, tag: &str) -> window::FileAccess {
+    let record = match tag {
+        "" => crate::container::MAIN_RECORD.to_owned(),
+        "__ownsb__" => own_name(key),
+        "__new__" | "__newsb__" => String::new(),
+        other => other.to_owned(),
+    };
+    let loaded = crate::container::load(tools, &record);
+    let sandbox =
+        (!record.is_empty() && record != crate::container::MAIN_RECORD).then_some(record.as_str());
+    let legacy = crate::fs_sandbox::saved_permissions(&tools.home, key, sandbox);
+    let mut paths = Vec::new();
+    for (yes, path) in [
+        (legacy.downloads, "~/Downloads"),
+        (legacy.documents, "~/Documents"),
+        (legacy.pictures, "~/Pictures"),
+    ] {
+        if yes {
+            paths.push((path.to_owned(), "legacy · чтение и запись".to_owned()));
+        }
+    }
+    if legacy.home {
+        paths.push((
+            "~ (весь настоящий дом)".to_owned(),
+            "legacy · чтение и запись".to_owned(),
+        ));
+    }
+    if let Some(c) = &loaded {
+        for p in &c.paths {
+            paths.push((
+                p.value.display().to_string(),
+                format!("{} · чтение и запись", p.source.as_str()),
+            ));
+        }
+    }
+    match crate::folder_rules::load(tools, &record) {
+        Ok(rules) => {
+            for rule in rules {
+                paths.push((
+                    rule.path.display().to_string(),
+                    format!("rule:{}", rule.mode.word()),
+                ));
+            }
+        }
+        Err(why) => paths.push(("Политика папок не прочитана".into(), why)),
+    }
+    let persistent = tag == ""
+        || tag == "__ownsb__"
+        || tag == "__new__"
+        || tag == "__newsb__"
+        || loaded.is_some();
+    window::FileAccess {
+        tag: tag.to_owned(),
+        home: if legacy.home {
+            "main".to_owned()
+        } else {
+            loaded
+                .as_ref()
+                .map(|c| c.home.setting().to_owned())
+                .unwrap_or_else(|| {
+                    if tag == "__new__" {
+                        "layer".into()
+                    } else {
+                        "private".into()
+                    }
+                })
+        },
+        editable: persistent
+            && tag != ""
+            && !legacy.home
+            && loaded
+                .as_ref()
+                .is_none_or(|c| c.home_source != crate::container::Source::Nix),
+        paths,
+    }
+}
+
+/// Apply only the policy explicitly returned by the integrated host dialog.
+/// Any refusal stops the launch; it must not silently use broader access.
+fn with_files(
+    tools: &Tools,
+    key: &str,
+    reply: &window::Reply,
+    mut selected: Container,
+) -> Result<Container, String> {
+    if !reply.files_reviewed {
+        return Ok(selected);
+    } // older GUI / CLI fallback
+    let own = own_name(key);
+    let record = if reply.container.is_empty() {
+        crate::container::MAIN_RECORD.to_owned()
+    } else if reply.container == "__ownsb__" {
+        own
+    } else {
+        selected.selector()
+    };
+    let persistent = reply.container.is_empty()
+        || reply.container == "__ownsb__"
+        || crate::container::load(tools, &record).is_some();
+    if !persistent {
+        if !reply.grants.is_empty() || reply.home.is_some() {
+            return Err("Изменения папок для временного контейнера пока недоступны; выберите постоянный контейнер".into());
+        }
+        return Ok(selected);
+    }
+    if crate::container::load(tools, &record).is_none() {
+        crate::container::create(tools, &record, crate::container::Home::Private)?;
+    }
+    // Reject invalid drafts before changing the base home. Launch is one
+    // confirmation, not a sequence of broader partially-applied choices.
+    let current = crate::container::load(tools, &record).ok_or("контейнер не найден")?;
+    let target_home = reply
+        .home
+        .as_deref()
+        .and_then(crate::container::Home::parse)
+        .unwrap_or(current.home);
+    for grant in &reply.grants {
+        let (mode, path) = grant
+            .split_once('\t')
+            .ok_or("неверный формат доступа к папке")?;
+        if mode == "inherit" {
+            continue;
+        }
+        if target_home == crate::container::Home::Main {
+            return Err(
+                "Для правил папок выберите свой дом или слой; настоящий дом уже доступен напрямую"
+                    .into(),
+            );
+        }
+        crate::folder_rules::Mode::parse(mode).ok_or("неизвестный режим папки")?;
+        let path = path
+            .strip_prefix("~/")
+            .map(|p| tools.home.join(p))
+            .unwrap_or_else(|| std::path::PathBuf::from(path));
+        let real = crate::folder_rules::validate(&tools.home, &path)?;
+        for protected in [
+            &tools.config,
+            &tools.state,
+            &tools.profiles,
+            &tools.sandboxes,
+        ] {
+            let canonical = fs::canonicalize(protected).unwrap_or_else(|_| protected.clone());
+            if [&path, &real].iter().any(|p| {
+                p.starts_with(protected)
+                    || protected.starts_with(p)
+                    || p.starts_with(&canonical)
+                    || canonical.starts_with(p)
+            }) {
+                return Err("состояние Cellward не выдаётся".into());
+            }
+        }
+        if current.paths.iter().any(|p| {
+            p.source == crate::container::Source::Nix
+                && (p.value.starts_with(&path) || path.starts_with(&p.value))
+        }) {
+            return Err("пересекающийся доступ задан в Nix — измените его там".into());
+        }
+    }
+    if let Some(home) = &reply.home {
+        let shown = launch_files(tools, key, &reply.container);
+        if !shown.editable {
+            return Err("Вид дома задан в Nix, унаследован из старых разрешений или принадлежит настоящему дому".into());
+        }
+        let home = crate::container::Home::parse(home).ok_or("неизвестный вид дома")?;
+        crate::container::set_home(tools, &record, home)?;
+        selected = Container::from_selector(&record, |n| container_exists(tools, n));
+    }
+    if record != crate::container::MAIN_RECORD {
+        selected = Container::from_selector(&record, |n| container_exists(tools, n));
+    }
+    for grant in &reply.grants {
+        let (mode, path) = grant
+            .split_once('\t')
+            .ok_or("неверный формат доступа к папке")?;
+        crate::folder_rules::set(tools, &record, mode, path)?;
+    }
+    let sandbox = (record != crate::container::MAIN_RECORD).then_some(record.as_str());
+    crate::fs_sandbox::confirm_permissions(&tools.home, key, sandbox)?;
+    Ok(selected)
 }
 
 /// Where the permissions of a container row of the window are.
@@ -2652,8 +2858,12 @@ fn zone_request(
         None => format!("Запрос из сети «{zone}»"),
     };
     req.notes.clear();
-    // A window a zone brought up gives no permission: none offered.
+    // A zone-origin request selects an existing environment only. Its reply
+    // cannot edit host filesystem policy, so never offer editable file grants.
     req.offers.clear();
+    req.files.clear();
+    req.host_home.clear();
+    req.folder_protected.clear();
     let asker = if req.nets.iter().any(|n| n.tag == zone) {
         zone
     } else {
@@ -3587,6 +3797,56 @@ fn launch_argv(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn integrated_file_confirmation_creates_policy_once_and_reports_legacy_real_home() {
+        let root = std::env::temp_dir().join(format!("cw-picker-files-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let entries = Tools::keys()
+            .iter()
+            .map(|key| {
+                let path = match *key {
+                    "home" => home.clone(),
+                    "config" => home.join(".config/vpn-zones"),
+                    "state" => home.join(".local/state/vpn-zones"),
+                    "profiles" | "sandboxes" => home.join(".local/state/vpn-profiles"),
+                    other => root.join("tools").join(other),
+                };
+                ((*key).to_owned(), path.display().to_string())
+            })
+            .collect();
+        let tools = Tools::from_entries(Path::new("/test/manifest"), &entries).unwrap();
+        let key = "synthetic-app";
+        let own = own_name(key);
+        let mut reply = window::Reply {
+            container: "__ownsb__".into(),
+            ..window::Reply::default()
+        };
+        let selected = Container::own_sandbox(key);
+        with_files(&tools, key, &reply, selected.clone()).unwrap();
+        assert!(
+            crate::container::load(&tools, &own).is_none(),
+            "old GUI silently acknowledged file permissions"
+        );
+        let project = home.join("Projects");
+        fs::create_dir_all(&project).unwrap();
+        reply.files_reviewed = true;
+        reply.grants.push(format!("overlay\t{}", project.display()));
+        let got = with_files(&tools, key, &reply, selected).unwrap();
+        assert_eq!(got.selector(), own);
+        assert_eq!(crate::folder_rules::load(&tools, &own).unwrap().len(), 1);
+        let policy = crate::container::policy_dir(&tools, &own).join("perms");
+        assert_eq!(fs::read_to_string(&policy).unwrap(), "");
+        fs::write(&policy, "home\ndownloads\n").unwrap();
+        let shown = launch_files(&tools, key, "__ownsb__");
+        assert_eq!(shown.home, "main");
+        assert!(!shown.editable);
+        reply.home = Some("private".into());
+        assert!(with_files(&tools, key, &reply, got).is_err());
+        assert_eq!(fs::read_to_string(policy).unwrap(), "home\ndownloads\n");
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn hidden_preset_grants_cannot_override_the_main_permission_answer() {

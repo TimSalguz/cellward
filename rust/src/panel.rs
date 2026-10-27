@@ -155,6 +155,16 @@ pub fn data(tools: &Tools) -> String {
                 .map_or(0, |(_, t)| *t);
             line(&["path", &c.name, &path, &until.to_string()]);
         }
+        if let Ok(rules) = crate::folder_rules::load(tools, &c.name) {
+            for rule in rules {
+                line(&[
+                    "folder-rule",
+                    &c.name,
+                    rule.mode.word(),
+                    &rule.path.display().to_string(),
+                ]);
+            }
+        }
         // Its blocked destinations (`netrules::Block`): what the person can
         // take back, and what Nix set.
         for (block, source) in crate::netrules::Rules::load(&tools.config, &c.name).blocks {

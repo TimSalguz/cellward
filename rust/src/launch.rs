@@ -1017,12 +1017,22 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             let color = container_name(&selection)
                 .and_then(|name| crate::container::load(tools, &name))
                 .and_then(|c| c.frame_color.map(|c| c.value));
-            let frame = crate::frame::Frame::of_launch(
+            let frame_record = record_name(&selection).or_else(|| {
+                (selection.sandbox == Sandbox::None && selection.container == Container::Main)
+                    .then(|| crate::container::MAIN_RECORD.to_owned())
+            });
+            let mut frame = crate::frame::Frame::of_launch(
                 &tools.state,
                 &tools.config,
                 &zone_name,
                 color.as_deref(),
             );
+            if let Some(width) = frame_record
+                .as_deref()
+                .and_then(|name| crate::container::frame_width_in(&tools.config, name))
+            {
+                frame.width = width;
+            }
             wrap.push("--frame".into());
             wrap.push(frame.to_arg().into());
             let selector = selector_of(&selection, &container.profile);
@@ -1043,7 +1053,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrap.push(tools.state.clone().into());
             wrap.push("--frame-zone".into());
             wrap.push(zone_name.clone().into());
-            if let Some(name) = container_name(&selection) {
+            if let Some(name) = frame_record {
                 wrap.push("--frame-container".into());
                 wrap.push(name.into());
             }
@@ -1085,6 +1095,22 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         wrap
     });
 
+    let folder_protected = vec![
+        tools.config.clone(),
+        tools.state.clone(),
+        tools.profiles.clone(),
+        tools.sandboxes.clone(),
+    ];
+    let folder_rules = match record_name(&selection)
+        .map(|record| crate::folder_rules::load(tools, &record))
+        .transpose()
+    {
+        Ok(rules) => rules.unwrap_or_default(),
+        Err(why) => {
+            refuse(tools, &format!("Политика папок не прочитана: {why}"));
+            return 1;
+        }
+    };
     if selection.sandbox != Sandbox::None {
         // The permissions belong to the launcher's id when there is one: the
         // shortcut says "discord" while the binary is called "Discord", and two
@@ -1135,14 +1161,23 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 }
             }
         }
+        if !folder_rules.is_empty() && zone != UNCONFINED {
+            wrapped.extend(["--folder-shared".into(), "on".into()]);
+        }
+        for path in &folder_protected {
+            wrapped.push("--folder-protect".into());
+            wrapped.push(path.into());
+        }
+        for rule in &folder_rules {
+            wrapped.push("--folder-rule".into());
+            wrapped.push(format!("{}\t{}", rule.mode.word(), rule.path.display()).into());
+        }
         if let Some(label) = &label {
             wrapped.push("--label".into());
             wrapped.push(label.clone().into());
         }
-        if container_x11 {
-            wrapped.push("--x11".into());
-            wrapped.push("on".into());
-        }
+        wrapped.push("--x11".into());
+        wrapped.push(if container_x11 { "on" } else { "off" }.into());
         // The cameras into its own /dev, where they are let — the real
         // ones, or the black one its `/dev` has then.
         if camera_mode != crate::camera::Mode::No {
@@ -1392,6 +1427,20 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         }
         _ => None,
     };
+    // Prepare mutable layer directories as the desktop user before the
+    // instance's privileged setup mounts them. Its root must not create an
+    // upper directory that the actual program cannot write.
+    if !dryrun && !folder_rules.is_empty() {
+        if let Some(record) = record_name(&selection) {
+            let data = crate::container::data_dir(tools, &record);
+            if let Err(why) =
+                crate::folder_rules::prepare(&tools.home, &data, &folder_rules, &folder_protected)
+            {
+                refuse(tools, &format!("Правила папок не подготовлены: {why}"));
+                return 1;
+            }
+        }
+    }
     if let Some(dir) = storage_dir.as_ref().filter(|_| !dryrun) {
         if let Err(e) = fs::create_dir_all(dir) {
             eprintln!("не создать хранилище контейнера {}: {e}", dir.display());
@@ -1611,6 +1660,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             certutil: &tools.certutil,
             bwrap: &tools.bwrap,
             shares: &shares,
+            folder_protected: &folder_protected,
+            home_shared: network == Network::Instance
+                && matches!(selection.container, Container::Named(_)),
+            folder_rules: if selection.sandbox == Sandbox::None {
+                &folder_rules
+            } else {
+                &[]
+            },
             own_x11,
             camera,
             black_camera: camera_mode.black(),
@@ -1748,6 +1805,9 @@ pub struct Entry<'a> {
     /// Paths of the real home granted to a layer container
     /// (`container grant`): written through its layer (`--share`).
     pub shares: &'a [PathBuf],
+    pub folder_rules: &'a [crate::folder_rules::Rule],
+    pub folder_protected: &'a [PathBuf],
+    pub home_shared: bool,
     /// The container's storage directory, for a launch into an instance:
     /// the instance covers container storage, and `profile-run --storage`
     /// gives this one directory back in the launch's own mount namespace,
@@ -1910,6 +1970,20 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
                 exec.push("--share".into());
                 exec.push(share.into());
             }
+        }
+        if entry.home_shared {
+            exec.push("--home-shared".into());
+        }
+        if in_space && !entry.folder_rules.is_empty() {
+            exec.push("--folder-shared".into());
+        }
+        for path in entry.folder_protected {
+            exec.push("--folder-protect".into());
+            exec.push(path.into());
+        }
+        for rule in entry.folder_rules {
+            exec.push("--folder-rule".into());
+            exec.push(format!("{}\t{}", rule.mode.word(), rule.path.display()).into());
         }
         exec.push(entry.dir.into());
         exec.push(entry.zone.into());
@@ -4500,6 +4574,9 @@ mod tests {
             certutil: Path::new("/t/certutil"),
             bwrap: Path::new("/t/bwrap"),
             shares: &[],
+            folder_rules: &[],
+            folder_protected: &[],
+            home_shared: false,
             storage: None,
             own_x11: false,
             camera: false,

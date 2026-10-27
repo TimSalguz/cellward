@@ -587,6 +587,7 @@ let
       # (defaults.permissions.x11), never the network's (2026-10-15).
       ++ lib.optional (c.permissions.x11 != null) "x11 = ${lib.boolToString c.permissions.x11}"
       ++ lib.optional (c.frameColor != null) "frame_color = ${c.frameColor}"
+      ++ lib.optional (c.frameWidth != null) "frame_width = ${toString c.frameWidth}"
       ++ lib.optional (c.permissions.microphone != null) "microphone = ${c.permissions.microphone}"
       ++ lib.optional (c.permissions.screencast != null) "screencast = ${c.permissions.screencast}"
       # true/false as before (a build of before reads them), the mode's words as they are.
@@ -661,6 +662,12 @@ let
         default = null;
         example = "#d94c4c";
         description = "Цвет рамки окон программ контейнера (#rrggbb). null — цвет его сети (programs.cellward.frame.colors), а у неё — из имени.";
+      };
+      frameWidth = lib.mkOption {
+        type = lib.types.nullOr (lib.types.ints.between 0 32);
+        default = null;
+        example = 1;
+        description = "Толщина рамки этого контейнера в логических пикселях. null — общая frame.width. Меняется на ходу из рамки или cellward container set <имя> frame-width <0..32|global|default>; локальное визуальное переопределение допускается поверх Nix. Полноэкранная толщина same наследует эту толщину.";
       };
       focus = lib.mkOption {
         type = lib.types.nullOr (

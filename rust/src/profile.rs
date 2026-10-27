@@ -232,6 +232,10 @@ pub struct Args {
     /// container (`container grant`) — written through the layer, into the
     /// real home. Checked again here, as written and as resolved.
     pub share: Vec<PathBuf>,
+    pub folder_rules: Vec<crate::folder_rules::Rule>,
+    pub folder_protected: Vec<PathBuf>,
+    pub folder_shared: bool,
+    pub home_shared: bool,
     /// `--trust-extra DIR`, repeated: certificate directories declared in Nix,
     /// besides the container's own.
     pub trust_extra: Vec<PathBuf>,
@@ -287,6 +291,10 @@ impl Args {
             (None, None, None, None, None);
         let mut trust_extra = Vec::new();
         let mut share = Vec::new();
+        let mut folder_rules = Vec::new();
+        let mut folder_protected = Vec::new();
+        let mut folder_shared = false;
+        let mut home_shared = false;
         let mut storage = None;
         let mut camera = false;
         let mut black_camera = false;
@@ -295,6 +303,34 @@ impl Args {
         let mut all_devices = false;
         let mut registered = None;
         while let Some(flag) = positional.first() {
+            if flag == "--home-shared" {
+                home_shared = true;
+                positional = &positional[1..];
+                continue;
+            }
+            if flag == "--folder-shared" {
+                folder_shared = true;
+                positional = &positional[1..];
+                continue;
+            }
+            if flag == "--folder-protect" {
+                folder_protected.push(PathBuf::from(
+                    positional.get(1).ok_or(ArgError::MissingArguments)?,
+                ));
+                positional = positional.get(2..).unwrap_or(&[]);
+                continue;
+            }
+            if flag == "--folder-rule" {
+                let value = positional
+                    .get(1)
+                    .and_then(|s| s.to_str())
+                    .ok_or(ArgError::MissingArguments)?;
+                folder_rules.extend(
+                    crate::folder_rules::parse(value).map_err(|_| ArgError::MissingArguments)?,
+                );
+                positional = positional.get(2..).unwrap_or(&[]);
+                continue;
+            }
             if flag == "--registered" {
                 // One that does not read is none: this process counts as the
                 // launch's own record then, as it did before the flag.
@@ -397,6 +433,10 @@ impl Args {
             devices,
             all_devices,
             share,
+            folder_rules,
+            folder_protected,
+            folder_shared,
+            home_shared,
             trust_extra,
             cmd,
         })
@@ -432,7 +472,7 @@ pub fn home_dir() -> Option<PathBuf> {
 /// storage directories the zone covers, `home_layer::STORAGE`), from the
 /// zone's keep. Outside a zone there is no keep, and nothing covered: the
 /// path is the real one already.
-fn give_storage_back(path: &Path) -> Result<(), String> {
+pub(crate) fn give_storage_back(path: &Path) -> Result<(), String> {
     let home = home_dir().ok_or("no $HOME")?;
     let kept = crate::home_layer::kept_storage_of(&home, path)
         .ok_or_else(|| format!("{} is no container's storage", path.display()))?;
@@ -477,7 +517,10 @@ fn give_storage_back(path: &Path) -> Result<(), String> {
 /// under its layer (the project's state, every zone's key in it), would be a
 /// hole nobody sees. A grant that cannot be given back leaves that path in
 /// the layer, and says so.
-fn mount_profile(profile_dir: &Path, shares: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn mount_profile(
+    profile_dir: &Path,
+    shares: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
     use crate::home_layer::{give_back, keeps_flags, layer_dirs, relative_share, STORAGE};
     let home = home_dir().ok_or("no $HOME")?;
     crate::home_layer::migrate_slots(profile_dir);
@@ -646,7 +689,7 @@ struct CapData {
 }
 
 /// The effective set made the permitted one again.
-fn raise_effective_capabilities() {
+pub(crate) fn raise_effective_capabilities() {
     let mut header = CapHeader {
         version: 0x2008_0522,
         pid: 0,
@@ -1362,10 +1405,69 @@ pub fn run(args: Args) -> u8 {
     // Not given (not asked for, or no root to give it as): its socket goes
     // here — the server, its other end gone, ends.
     drop(black_camera);
+    let mut rules = args.folder_rules.clone();
+    if !rules.is_empty() {
+        for path in &args.share {
+            if !rules.iter().any(|r| &r.path == path) {
+                rules.push(crate::folder_rules::Rule {
+                    path: path.clone(),
+                    mode: crate::folder_rules::Mode::Real,
+                });
+            }
+        }
+    }
+    let folder_mounts = match home_dir().ok_or("no home".to_owned()).and_then(|home| {
+        crate::folder_rules::prepare_for_launch(
+            &home,
+            &args.profile_dir,
+            &rules,
+            &args.folder_protected,
+            args.folder_shared,
+        )
+    }) {
+        Ok(mounts) => mounts,
+        Err(why) => {
+            eprintln!("profile-run: folder policy failed: {why}");
+            return EXIT_NOT_STARTED;
+        }
+    };
+    let mut folder_sources = Vec::new();
+    for m in &folder_mounts {
+        let opened = (|| {
+            let source = crate::sys::open_dir(&m.source)?;
+            let layer = if m.rule.mode == crate::folder_rules::Mode::Overlay && !m.shared {
+                Some((
+                    crate::sys::open_dir(&m.upper)?,
+                    crate::sys::open_dir(&m.work)?,
+                ))
+            } else {
+                None
+            };
+            Ok::<_, std::io::Error>((source, layer))
+        })();
+        match opened {
+            Ok(fds) => folder_sources.push(fds),
+            Err(why) => {
+                eprintln!("profile-run: folder source failed: {why}");
+                return EXIT_NOT_STARTED;
+            }
+        }
+    }
     let mounted = if args.profile_dir.as_os_str().is_empty() {
         Vec::new()
+    } else if args.home_shared {
+        let Some(home) = home_dir()
+            .filter(|home| crate::folder_rules::home_layer_mounted(home, &args.profile_dir))
+        else {
+            eprintln!("profile-run: общего слоя дома нет — остановите контейнер старой сборки и запустите снова");
+            return EXIT_NOT_STARTED;
+        };
+        vec![home]
     } else {
-        match mount_profile(&args.profile_dir, &args.share) {
+        match mount_profile(
+            &args.profile_dir,
+            if rules.is_empty() { &args.share } else { &[] },
+        ) {
             Ok(mounted) => mounted,
             Err(e) => {
                 eprintln!("profile-run: no layer ({e}) — the program is not started");
@@ -1374,6 +1476,59 @@ pub fn run(args: Args) -> u8 {
         }
     };
 
+    for (m, (source, layer)) in folder_mounts.iter().zip(&folder_sources) {
+        use std::os::fd::AsRawFd;
+        let source = PathBuf::from(format!("/proc/self/fd/{}", source.as_raw_fd()));
+        let result = fs::create_dir_all(&m.rule.path)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                use crate::folder_rules::Mode;
+                match m.rule.mode {
+                    Mode::Overlay if m.shared => crate::sys::mount(
+                        source.as_os_str(),
+                        &m.rule.path,
+                        "",
+                        libc::MS_BIND | libc::MS_REC,
+                        "",
+                    )
+                    .map_err(|e| e.to_string()),
+                    Mode::Overlay => {
+                        let (upper, work) = layer.as_ref().ok_or("нет дескрипторов слоя")?;
+                        let upper = PathBuf::from(format!("/proc/self/fd/{}", upper.as_raw_fd()));
+                        let work = PathBuf::from(format!("/proc/self/fd/{}", work.as_raw_fd()));
+                        let options = crate::home_layer::overlay_options(&source, &upper, &work)
+                            .ok_or("недопустимый путь overlayfs")?;
+                        crate::sys::mount(
+                            OsStr::new("overlay"),
+                            &m.rule.path,
+                            "overlay",
+                            libc::MS_NOSUID | libc::MS_NODEV,
+                            &options,
+                        )
+                        .map_err(|e| e.to_string())
+                    }
+                    Mode::ReadOnly | Mode::Real => {
+                        crate::sys::mount(
+                            source.as_os_str(),
+                            &m.rule.path,
+                            "",
+                            libc::MS_BIND | libc::MS_REC,
+                            "",
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if m.rule.mode == Mode::ReadOnly {
+                            crate::sys::read_only_tree(&m.rule.path).map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    }
+                }
+            });
+        if let Err(why) = result {
+            eprintln!("profile-run: folder mount failed: {why}");
+            return EXIT_NOT_STARTED;
+        }
+    }
+    drop(folder_sources);
     // The trust layer: after the home layer (its NSS databases live there) and
     // before anything that starts the program. (`docs/CERTIFICATES.md`)
     if let Some(dir) = &args.trust {
