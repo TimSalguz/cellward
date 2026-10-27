@@ -1432,7 +1432,7 @@ fn pick_and_check(
         return Err("уже открыт другой вопрос о запуске".to_owned());
     };
     begin_asking(origin)?;
-    ask_window(zone, locked, app_id, &cmd, origin, None, timeout).map(|(argv, _)| argv)
+    ask_window(zone, locked, app_id, &cmd, origin, None, None, timeout).map(|(argv, _)| argv)
 }
 
 /// The command a zone asks for as the host runs it: shown whole, someone to
@@ -1475,12 +1475,16 @@ fn ask_window(
     cmd: &[OsString],
     origin: &str,
     offer_rule: Option<&str>,
+    source_container: Option<&str>,
     timeout: Option<std::time::Duration>,
 ) -> Result<(Vec<OsString>, bool), String> {
     let exe = own_binary()?;
     let picker = exe.with_file_name("vpn-zone-pick");
     let mut command = Command::new(&picker);
     command.arg("--from-zone").arg(zone);
+    if let Some(source) = source_container {
+        command.arg("--from-container").arg(source);
+    }
     if locked {
         command.arg("--locked");
     }
@@ -1854,6 +1858,10 @@ fn link_answer(
             &cmd,
             &origin.name(),
             offer.as_deref(),
+            match &asker {
+                Asker::Container(c) => Some(c.name.as_str()),
+                _ => None,
+            },
             question_timeout(tools),
         )
     });

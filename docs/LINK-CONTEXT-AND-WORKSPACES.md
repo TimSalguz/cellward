@@ -1,13 +1,15 @@
 # Links, source environments and shared workspaces
 
-Status: implementation plan, 2026-10-27. This document does not claim the new
+Status: first source-context step implemented, remainder is a plan, 2026-10-27.
+This document does not claim the new
 link chooser or workspace creation flow is implemented.
 
 ## Observed gap
 
-The link broker identifies its source container, selects a handler through the
-system AppChooser, then calls `ask_window` with `--from-zone` only. The picker
-cannot present that verified container as the explicit source environment.
+Previously the link broker identified its source container but called
+`ask_window` with `--from-zone` only. It now also passes the known source
+container as a compatible existing-row proposal. Handler selection still uses
+the system AppChooser; the complete two-step interface remains pending.
 The unconfined/host opener path also needs tracing: it must not manufacture a
 container identity from application-supplied environment variables.
 
@@ -86,3 +88,36 @@ current shared container.
    localhost listener reachability, and malicious forged source metadata.
 6. Graphical checks at 100/125/150/175/200% with small viewports, long translated
    labels, keyboard-only navigation and Back preserving all choices.
+
+## Additional scenarios: preserve A and B, create C
+
+A nondestructive combination is useful and distinct from the existing merge:
+keep A and B intact, create C with a fresh identity, optionally copy explicitly
+selected data from snapshots of stopped sources. Never reuse their writable
+OverlayFS upper/work directories. Resolve duplicate paths explicitly; do not
+choose a credential, profile database or certificate by layer ordering. Record
+provenance and show the storage cost before import. C has its own permissions,
+network and clipboard; do not union A/B permissions or trust automatically.
+
+Scenarios to support separately:
+
+- Try applications together temporarily: empty ephemeral workspace, optional
+  selected import, explicitly save as a named workspace before discarding it.
+- Keep using A and B while working in C: independent copies; later edits do not
+  synchronize. Live database copying requires app-aware export or stopped apps.
+- Share a project, not credentials: grant one selected real project directory
+  to separate containers, keeping homes and clipboards separate. Explain that
+  shared executable code/configuration can influence the other program.
+- Return work from C: explicit selected-file export with conflicts/review, not
+  automatic bidirectional merging of whole homes.
+- Remove an application's assignment from C: removes the default assignment,
+  not files it wrote or knowledge another app obtained there. Creating a clean
+  identity requires a new container or explicit audited data removal.
+- Roll back an experiment: delete C only after confirmation; A/B remain intact.
+  External real-directory writes and network effects are not undone.
+
+Current first implementation step: the broker passes a known source container
+name into the existing picker as a proposal. It selects only an existing row
+compatible with the source network, still asks for confirmation, and saves no
+application assignment. Exact live temporary instance selection, unconfined
+paths and the new combined handler/environment interface remain pending.

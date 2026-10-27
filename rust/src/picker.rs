@@ -160,6 +160,8 @@ pub struct Args {
     /// `--from-zone <zone>`: the broker asks on behalf of a program in that
     /// zone ([`pick_for_zone`]); `--locked`: that zone is locked.
     pub from_zone: Option<String>,
+    /// Broker-provided source identity, used only to propose an existing row.
+    pub from_container: Option<String>,
     pub locked: bool,
     /// `--offer-rule <text>`: with `--from-zone`, a checkbox of its own in
     /// the window — a container's rule for links (`crate::links`); ticked,
@@ -186,6 +188,7 @@ impl Args {
         let mut id = None;
         let mut autostart = false;
         let mut from_zone = None;
+        let mut from_container = None;
         let mut locked = false;
         let mut offer_rule = None;
         let mut at = 0;
@@ -208,6 +211,10 @@ impl Args {
                         .get(at + 1)
                         .map(|z| z.to_string_lossy().into_owned())
                         .filter(|z| !z.is_empty());
+                    at += 2;
+                }
+                b"--from-container" => {
+                    from_container = rest.get(at + 1).map(|c| c.to_string_lossy().into_owned());
                     at += 2;
                 }
                 b"--locked" => {
@@ -234,6 +241,7 @@ impl Args {
             label: label.filter(|v| !v.is_empty()),
             autostart,
             from_zone,
+            from_container,
             locked,
             offer_rule,
             cmd: rest.get(at..).unwrap_or(&[]).to_vec(),
@@ -2281,6 +2289,7 @@ pub fn main() -> ExitCode {
             zone,
             args.locked,
             args.offer_rule.as_deref(),
+            args.from_container.as_deref(),
         );
     }
     let memory = read_memory(&tools, &key);
@@ -2777,6 +2786,7 @@ fn pick_for_zone(
     zone: &str,
     locked: bool,
     offer_rule: Option<&str>,
+    source_container: Option<&str>,
 ) -> ExitCode {
     let refuse = |why: &str| {
         eprintln!("vpn-zone-pick: {why}");
@@ -2793,6 +2803,9 @@ fn pick_for_zone(
     };
     let mut req = zone_request(tools, key, memory, cmd, &shown, zone, locked);
     req.rule = offer_rule.map(str::to_owned);
+    if let Some(source) = source_container {
+        propose_source_container(&mut req, key, source);
+    }
 
     let asked = std::time::Instant::now();
     let reply = match show_window(tools, &req) {
@@ -2837,6 +2850,32 @@ fn pick_for_zone(
         return ExitCode::from(1);
     }
     ExitCode::SUCCESS
+}
+
+/// Source metadata never creates a container or bypasses confirmation. Only an
+/// existing row compatible with the source network may become the proposal.
+fn propose_source_container(req: &mut window::Request, key: &str, source: &str) {
+    let tag = if source == own_name(key) {
+        "__ownsb__"
+    } else {
+        source
+    };
+    let Some(index) = req.containers.iter().position(|c| {
+        c.tag == tag
+            && !c.new
+            && c.bound
+                .as_deref()
+                .is_none_or(|n| Some(n) == req.asker.as_deref())
+            && c.busy
+                .as_deref()
+                .is_none_or(|n| Some(n) == req.asker.as_deref())
+    }) else {
+        return;
+    };
+    for (i, c) in req.containers.iter_mut().enumerate() {
+        c.selected = i == index;
+    }
+    req.notes.push(format!("Исходный контейнер: {source}. Запуск здесь даст программе доступ к его данным и общим каналам; назначение программы не сохраняется."));
 }
 
 /// What the window of [`pick_for_zone`] is asked: the zone's command in a
@@ -5283,5 +5322,63 @@ mod tests {
             .map(|i| i.tag.as_str())
             .collect();
         assert_eq!(chosen, ["__ownsb__"]);
+    }
+}
+
+#[cfg(test)]
+mod source_context_tests {
+    use super::*;
+
+    fn request() -> window::Request {
+        window::Request {
+            asker: Some("host".into()),
+            containers: ["app-browser", "work", "other"]
+                .into_iter()
+                .map(|tag| window::Item {
+                    tag: tag.into(),
+                    selected: tag == "app-browser",
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn source_proposes_existing_identity_without_changing_network_or_creating_rows() {
+        let mut req = request();
+        propose_source_container(&mut req, "browser", "work");
+        assert_eq!(
+            req.containers
+                .iter()
+                .filter(|c| c.selected)
+                .map(|c| c.tag.as_str())
+                .collect::<Vec<_>>(),
+            ["work"]
+        );
+        assert_eq!(req.asker.as_deref(), Some("host"));
+        assert_eq!(req.containers.len(), 3);
+        assert_eq!(req.notes.len(), 1);
+    }
+
+    #[test]
+    fn absent_new_and_other_network_sources_do_not_replace_the_proposal() {
+        for mode in 0..4 {
+            let mut req = request();
+            let source = if mode == 0 { "missing" } else { "work" };
+            if mode == 1 {
+                req.containers[1].new = true;
+            }
+            if mode == 2 {
+                req.containers[1].bound = Some("vpn".into());
+            }
+            if mode == 3 {
+                req.containers[1].busy = Some("vpn".into());
+            }
+            propose_source_container(&mut req, "browser", source);
+            assert!(req.containers[0].selected);
+            assert!(!req.containers[1].selected);
+            assert!(req.notes.is_empty());
+        }
     }
 }
