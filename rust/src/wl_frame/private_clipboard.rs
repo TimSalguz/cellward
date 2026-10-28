@@ -7,6 +7,9 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 
+mod capture;
+use capture::{CaptureData, Payload};
+
 const LIMIT: usize = 64 << 20;
 const QUANTUM: usize = 64 << 10;
 const PENDING: usize = 64;
@@ -43,7 +46,7 @@ pub(crate) fn initialize(bound: Bound) -> io::Result<()> {
             primary: Vec::new(),
             refresh: [true; 2],
             clear: [false; 2],
-            capture: None,
+            capture: [None, None],
             waiting: VecDeque::new(),
             publish: VecDeque::new(),
             reads: VecDeque::new(),
@@ -85,9 +88,9 @@ pub(crate) fn pollfds() -> Vec<libc::pollfd> {
                 fds.push(p(client.socket().as_raw_fd(), client.wants_write()));
                 fds.push(p(s.changed.as_raw_fd(), false));
             }
-            if let Some(capture) = &s.capture {
-                if let Some((file, _)) = &capture.pipe {
-                    fds.push(p(file.as_raw_fd(), false));
+            for capture in s.capture.iter().flatten() {
+                if let Some(fd) = capture.data.fd() {
+                    fds.push(p(fd, false));
                 }
             }
             fds.extend(s.writes.iter().map(|w| p(w.file.as_raw_fd(), true)));
@@ -102,7 +105,7 @@ pub(crate) fn wake_at() -> Option<Instant> {
                 .as_ref()
                 .and_then(BrokerClient::next_deadline)
                 .into_iter()
-                .chain(s.capture.as_ref().map(|c| c.deadline))
+                .chain(s.capture.iter().flatten().map(|c| c.data.wake_at()))
                 .chain(s.writes.iter().map(|w| w.deadline))
                 .min()
         })
@@ -206,9 +209,7 @@ pub(super) fn set(
             let at = index(which);
             s.waiting.retain(|(w, _, _)| index(*w) != at);
             s.publish.retain(|p| index(p.which) != at);
-            if s.capture.as_ref().is_some_and(|c| index(c.which) == at) {
-                s.capture = None;
-            }
+            s.capture[at] = None;
             if let Some(source) = source {
                 s.clear[at] = false;
                 if !overflow && !types.is_empty() {
@@ -227,10 +228,6 @@ struct Snapshot {
     types: Rc<Vec<String>>,
     which: Selection,
 }
-struct Payload {
-    mime: String,
-    bytes: Bytes,
-}
 struct Publication {
     which: Selection,
     contents: Vec<Payload>,
@@ -238,10 +235,7 @@ struct Publication {
 struct Capture {
     which: Selection,
     source: SourceRef,
-    types: VecDeque<String>,
-    contents: Vec<Payload>,
-    pipe: Option<(File, Payload)>,
-    deadline: Instant,
+    data: CaptureData,
 }
 struct ReadRequest {
     revision: u64,
@@ -270,7 +264,7 @@ struct State {
     primary: Vec<(Weak<ZwpPrimarySelectionDeviceV1>, bool)>,
     refresh: [bool; 2],
     clear: [bool; 2],
-    capture: Option<Capture>,
+    capture: [Option<Capture>; 2],
     waiting: VecDeque<(Selection, SourceRef, Vec<String>)>,
     publish: VecDeque<Publication>,
     reads: VecDeque<ReadRequest>,
@@ -281,7 +275,7 @@ impl State {
     fn disable(&mut self) {
         self.client = None;
         self.operation = None;
-        self.capture = None;
+        self.capture = [None, None];
         self.waiting.clear();
         self.publish.clear();
         self.reads.clear();
@@ -389,29 +383,52 @@ impl State {
             }
             w.written < w.bytes.as_slice().len()
         });
-        if self.capture.is_none() {
-            if let Some((which, source, types)) = self.waiting.pop_front() {
-                self.capture = Some(Capture {
-                    which,
-                    source,
-                    types: types.into(),
-                    contents: Vec::new(),
-                    pipe: None,
-                    deadline: now + Duration::from_secs(3),
-                });
-            }
-        }
-        if let Some(capture) = &mut self.capture {
-            match capture.tick(now) {
-                Ok(true) => {
-                    let c = self.capture.take().unwrap();
-                    self.publish.push_back(Publication {
-                        which: c.which,
-                        contents: c.contents,
+        // PRIMARY must never hold a new explicit copy behind a stalled
+        // selection. Both captures share one read quantum and payload budget.
+        let mut budget = QUANTUM;
+        for at in 0..2 {
+            if self.capture[at].is_none() {
+                if let Some(pos) = self.waiting.iter().position(|(w, _, _)| index(*w) == at) {
+                    let (which, source, types) = self.waiting.remove(pos).unwrap();
+                    self.capture[at] = Some(Capture {
+                        which,
+                        source,
+                        data: CaptureData::new(types, now),
                     });
                 }
-                Ok(false) => {}
-                Err(_) => self.capture = None,
+            }
+            let other = self.capture[1 - at]
+                .as_ref()
+                .map_or(0, |c| c.data.allocated());
+            let queued: usize = self
+                .publish
+                .iter()
+                .flat_map(|p| &p.contents)
+                .map(Payload::allocated)
+                .sum();
+            if let Some(capture) = &mut self.capture[at] {
+                let source = &capture.source;
+                if capture.data.tick(
+                    now,
+                    source.alive(),
+                    &mut budget,
+                    LIMIT.saturating_sub(other + queued),
+                    |mime, fd| source.send(mime, fd),
+                ) {
+                    let c = self.capture[at].take().unwrap();
+                    if c.data.failures() != 0 {
+                        // Counts only: no MIME strings or clipboard contents.
+                        eprintln!("wl-sandbox: private {} capture: {} completed formats, {} failed formats",
+                            if at == 0 { "CLIPBOARD" } else { "PRIMARY" },
+                            c.data.contents.len(), c.data.failures());
+                    }
+                    if !c.data.contents.is_empty() {
+                        self.publish.push_back(Publication {
+                            which: c.which,
+                            contents: c.data.contents,
+                        });
+                    }
+                }
             }
         }
         let Some(client) = &mut self.client else {
@@ -476,57 +493,6 @@ impl State {
 
 fn nonblocking(fd: RawFd) -> io::Result<()> {
     crate::sys::set_nonblocking(fd)
-}
-impl Capture {
-    fn tick(&mut self, now: Instant) -> io::Result<bool> {
-        if now >= self.deadline || !self.source.alive() {
-            return Err(io::Error::from(io::ErrorKind::TimedOut));
-        }
-        let mut budget = QUANTUM;
-        while budget > 0 {
-            if self.pipe.is_none() {
-                let Some(mime) = self.types.pop_front() else {
-                    return Ok(true);
-                };
-                let (read, write) = crate::sys::pipe()?;
-                let write = Rc::new(write);
-                nonblocking(read.as_raw_fd())?;
-                self.source.send(&mime, &write);
-                self.pipe = Some((
-                    File::from(read),
-                    Payload {
-                        mime,
-                        bytes: Bytes::default(),
-                    },
-                ));
-            }
-            let remaining =
-                LIMIT.saturating_sub(self.contents.iter().map(|p| p.bytes.allocated()).sum());
-            let (file, payload) = self.pipe.as_mut().unwrap();
-            let mut buffer = [0; 8192];
-            let n = match file.read(&mut buffer[..budget.min(8192)]) {
-                Ok(n) => n,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    return Ok(false)
-                }
-                Err(e) => return Err(e),
-            };
-            if n == 0 {
-                self.contents.push(self.pipe.take().unwrap().1);
-                continue;
-            }
-            let result = payload.bytes.append(&buffer[..n], remaining);
-            crate::clipboard_client::erase_slice(&mut buffer);
-            result?;
-            budget -= n;
-        }
-        Ok(false)
-    }
 }
 
 fn receive(snapshot: &Snapshot, mime: &str, fd: &Rc<OwnedFd>) {

@@ -62,6 +62,16 @@ pub enum Key {
     TunnelSilent,
     BusyInNetwork,
     BoundToNetwork,
+    PreviewOpen,
+    PreviewBack,
+    PreviewFit,
+    PreviewNative,
+    PreviewMaximize,
+    PreviewHelp,
+    PreviewLoading,
+    PreviewUnsupported,
+    PreviewTooLarge,
+    HistoryUnavailable,
 }
 
 /// English is the source text; the Russian arm is the complete translation
@@ -128,6 +138,26 @@ pub fn text(language: Language, key: Key) -> &'static str {
         (Language::Russian, BusyInNetwork) => "открыт в сети",
         (Language::English, BoundToNetwork) => "bound to network",
         (Language::Russian, BoundToNetwork) => "привязан к сети",
+        (Language::English, PreviewOpen) => "Open preview",
+        (Language::Russian, PreviewOpen) => "Открыть предпросмотр",
+        (Language::English, PreviewBack) => "← Back · Esc",
+        (Language::Russian, PreviewBack) => "← Назад · Esc",
+        (Language::English, PreviewFit) => "Fit to window",
+        (Language::Russian, PreviewFit) => "Вписать",
+        (Language::English, PreviewNative) => "Actual size · 1:1",
+        (Language::Russian, PreviewNative) => "Размер 1:1",
+        (Language::English, PreviewMaximize) => "Maximize window",
+        (Language::Russian, PreviewMaximize) => "Развернуть окно",
+        (Language::English, PreviewHelp) => "Scroll to zoom, drag to pan",
+        (Language::Russian, PreviewHelp) => "Колесо — масштаб, перетаскивание — перемещение",
+        (Language::English, PreviewLoading) => "Loading image…",
+        (Language::Russian, PreviewLoading) => "Загрузка картинки…",
+        (Language::English, PreviewUnsupported) => "Large previews currently support PNG images",
+        (Language::Russian, PreviewUnsupported) => "Крупный предпросмотр пока поддерживает PNG",
+        (Language::English, PreviewTooLarge) => "Image exceeds preview limits",
+        (Language::Russian, PreviewTooLarge) => "Картинка слишком большая для предпросмотра",
+        (Language::English, HistoryUnavailable) => "No response from clipboard history service",
+        (Language::Russian, HistoryUnavailable) => "Нет ответа от службы истории",
     }
 }
 
@@ -171,6 +201,16 @@ mod tests {
             TunnelSilent,
             BusyInNetwork,
             BoundToNetwork,
+            PreviewOpen,
+            PreviewBack,
+            PreviewFit,
+            PreviewNative,
+            PreviewMaximize,
+            PreviewHelp,
+            PreviewLoading,
+            PreviewUnsupported,
+            PreviewTooLarge,
+            HistoryUnavailable,
         ] {
             assert!(!text(Language::English, key).is_empty());
             assert!(!text(Language::Russian, key).is_empty());

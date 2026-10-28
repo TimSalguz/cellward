@@ -36,11 +36,16 @@ use iced::{Alignment, Color, Element, Font, Length, Size, Subscription, Task};
 use crate::clip_type;
 use crate::clipd::{self, Entry, Filter, PAGE};
 use crate::days;
+use crate::i18n::{self, Key as UiKey, Language};
 use crate::pattern::{self, Alphabet, Builder, Kind, Tag, Times, Tried};
 use crate::type_input::{Mode as TypeMode, Timing};
 
 const FEED: &str = "clip-feed";
 const SEARCH: &str = "clip-search";
+
+fn ui(key: UiKey) -> &'static str {
+    i18n::text(Language::default(), key)
+}
 
 /// How long typing rests before the search is asked.
 const DEBOUNCE_MS: u64 = 150;
@@ -189,6 +194,16 @@ pub enum Press {
 #[derive(Debug, Clone)]
 pub enum Msg {
     Appearance,
+    LivePoll,
+    LiveLoaded {
+        gen: u64,
+        result: Result<Vec<Entry>, String>,
+    },
+    Preview(u64),
+    PreviewLoaded(String, u64, Result<crate::thumb::Thumb, String>),
+    PreviewNative(bool),
+    PreviewMaximize,
+    PreviewClose,
     Opened(iced::window::Id),
     Loaded {
         gen: u64,
@@ -281,6 +296,22 @@ pub enum Msg {
     Unapply,
 }
 
+struct LiveRefresh {
+    gen: u64,
+    history: String,
+    filter: Filter,
+    oldest: Option<u64>,
+    before: Option<u64>,
+    entries: Vec<Entry>,
+}
+
+struct ImagePreview {
+    id: u64,
+    history: String,
+    image: Option<Result<(iced::widget::image::Handle, u32, u32), String>>,
+    native: bool,
+}
+
 pub struct Clip {
     history: String,
     /// The host manager shows histories as tabs; a frame-opened history stays
@@ -305,6 +336,8 @@ pub struct Clip {
     /// Older entries than the first are left to load.
     older: bool,
     loading: bool,
+    live: Option<LiveRefresh>,
+    image_preview: Option<ImagePreview>,
     /// The search's generation: an answer to an older one is dropped.
     gen: u64,
     /// The typing's: a rest of an older one asks nothing.
@@ -437,6 +470,23 @@ fn later(ms: u64, then: Msg) -> Task<Msg> {
     )
 }
 
+/// One bounded wake-up per second while a history window exists. All daemon
+/// I/O is off-thread and only one live refresh may be in flight. Closing the
+/// window drops the receiver and stops this worker within one interval.
+fn live_updates() -> Subscription<()> {
+    fn events() -> impl iced::futures::Stream<Item = ()> {
+        let (mut sender, receiver) = iced::futures::channel::mpsc::channel(1);
+        std::thread::spawn(move || {
+            while !sender.is_closed() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let _ = sender.try_send(());
+            }
+        });
+        receiver
+    }
+    Subscription::run(events)
+}
+
 fn dim(theme: &iced::Theme) -> text::Style {
     text::Style {
         color: Some(
@@ -511,6 +561,7 @@ impl Clip {
     }
 
     fn switch_shelf(&mut self) -> Task<Msg> {
+        self.image_preview = None;
         self.entries.clear();
         self.selected = None;
         self.whole.clear();
@@ -580,6 +631,8 @@ impl Clip {
             entries: Vec::new(),
             older: false,
             loading: false,
+            live: None,
+            image_preview: None,
             gen: 0,
             typed: 0,
             selected: None,
@@ -644,6 +697,12 @@ impl Clip {
 
     /// Ask a page: the newest (a new search), or older than the first shown.
     fn load(&mut self, older: bool) -> Task<Msg> {
+        self.live = None;
+        if older {
+            // An older-page load changes the visible span a live snapshot
+            // must cover. Invalidate any earlier background reply.
+            self.gen += 1;
+        }
         let now = now_ms();
         let filter = match self.filter(now) {
             Ok(f) => f,
@@ -684,6 +743,160 @@ impl Clip {
         self.gen += 1;
         self.loading = false;
         self.load(false)
+    }
+
+    fn live_paused(&self) -> bool {
+        self.type_busy
+            || self.image_preview.is_some()
+            || self.moving.is_some()
+            || self.deleting.is_some()
+            || self.secreting.is_some()
+            || self.copying_secret.is_some()
+            || self.editing_secret.is_some()
+            || self.transferring_secret.is_some()
+    }
+
+    fn poll_live(&mut self) -> Task<Msg> {
+        if self.loading || self.live.is_some() || self.live_paused() {
+            return Task::none();
+        }
+        let Ok(filter) = self.filter(now_ms()) else {
+            return Task::none();
+        };
+        self.live = Some(LiveRefresh {
+            gen: self.gen,
+            history: self.active_history(),
+            filter,
+            oldest: if self.following_newest() {
+                // An idle window follows one bounded newest page instead of
+                // accumulating every copy in memory for its whole lifetime.
+                None
+            } else {
+                self.entries.first().map(|e| e.id)
+            },
+            before: None,
+            entries: Vec::new(),
+        });
+        self.live_page()
+    }
+
+    fn live_page(&self) -> Task<Msg> {
+        let Some(live) = &self.live else {
+            return Task::none();
+        };
+        let request = clipd::search_request(&live.history, &live.filter, live.before, PAGE);
+        let socket = self.socket.clone();
+        let gen = live.gen;
+        Task::perform(
+            clipd::off_thread(move || {
+                clipd::ask_text(&socket, &request)
+                    .map_err(|f| f.text())
+                    .and_then(|a| clipd::parse_entries(&a))
+            }),
+            move |r| Msg::LiveLoaded {
+                gen,
+                result: r.unwrap_or_else(|| Err("служба истории не ответила".to_owned())),
+            },
+        )
+    }
+
+    fn following_newest(&self) -> bool {
+        self.view.0 < 24.0 && self.selected == self.entries.len().checked_sub(1)
+    }
+
+    fn live_loaded(&mut self, gen: u64, result: Result<Vec<Entry>, String>) -> Task<Msg> {
+        if gen != self.gen || self.live.as_ref().is_none_or(|live| live.gen != gen) {
+            return Task::none();
+        }
+        let Ok(page) = result else {
+            // Retry after service recovery without clearing the current feed
+            // or repeatedly replacing a person's validation/error message.
+            self.live = None;
+            return Task::none();
+        };
+        if self.live_paused()
+            || (self.live.as_ref().is_some_and(|live| live.oldest.is_none())
+                && !self.entries.is_empty()
+                && !self.following_newest())
+        {
+            self.live = None;
+            return Task::none();
+        }
+        let live = self.live.as_mut().unwrap();
+        let before = page.last().map(|e| e.id);
+        let full = page.len() >= PAGE;
+        // Each background request is bounded to one page. A burst larger
+        // than PAGE is followed back to the previously visible span before
+        // committing it, so there is no hidden gap between old and new rows.
+        let more = full
+            && live
+                .oldest
+                .zip(before)
+                .is_some_and(|(oldest, id)| id > oldest);
+        if more
+            && live
+                .before
+                .is_some_and(|previous| before.is_none_or(|id| id >= previous))
+        {
+            self.live = None;
+            return Task::none();
+        }
+        live.entries.extend(page);
+        live.before = before;
+        if more {
+            return self.live_page();
+        }
+        let mut live = self.live.take().unwrap();
+        self.older = match live.oldest {
+            Some(oldest) => live.entries.iter().any(|e| e.id < oldest) || (full && self.older),
+            None => full,
+        };
+        // Catch-up may fetch part of an older page. Leave that part for
+        // explicit upward scrolling instead of walking the entire history
+        // backwards on every new copy.
+        live.entries
+            .retain(|e| live.oldest.is_none_or(|oldest| e.id >= oldest));
+        live.entries.reverse();
+        if live.entries == self.entries {
+            return Task::none();
+        }
+        let following = self.following_newest();
+        let selected = self
+            .selected
+            .and_then(|i| self.entries.get(i))
+            .map(|e| e.id);
+        let newest = self.entries.last().map(|e| e.id);
+        let bottom = self.view.0 < 24.0;
+        let added: f32 = live
+            .entries
+            .iter()
+            .filter(|e| newest.is_none_or(|id| e.id > id))
+            .map(|e| guessed_height(e, None, false, (self.lines, self.image_lines)) + 10.0)
+            .sum();
+        self.entries = live.entries;
+        self.selected = selected.and_then(|id| self.entries.iter().position(|e| e.id == id));
+        if following || (selected.is_none() && bottom) {
+            self.selected = self.entries.len().checked_sub(1);
+        }
+        self.now = now_ms();
+        self.whole
+            .retain(|id, _| self.entries.iter().any(|e| e.id == *id));
+        self.thumbs
+            .retain(|id, _| self.entries.iter().any(|e| e.id == *id));
+        let page = self.entries.clone();
+        let thumbs = self.thumbs_of(&page);
+        let scroll = if bottom || added > 0.0 {
+            operation::scroll_to(
+                FEED,
+                AbsoluteOffset {
+                    x: None,
+                    y: Some(if bottom { 0.0 } else { self.view.0 + added }),
+                },
+            )
+        } else {
+            Task::none()
+        };
+        Task::batch([thumbs, scroll])
     }
 
     fn load_tabs(&self) -> Task<Msg> {
@@ -838,6 +1051,53 @@ impl Clip {
     pub fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
             Msg::Appearance => {}
+            Msg::Preview(id) => {
+                if self.secrets || self.type_busy {
+                    return Task::none();
+                }
+                let Some((mime, size)) = self.entry(id).and_then(Entry::image).cloned() else {
+                    return Task::none();
+                };
+                let history = self.active_history();
+                let error = if mime != "image/png" {
+                    Some(ui(UiKey::PreviewUnsupported).to_owned())
+                } else if size > MAX_THUMB_SOURCE {
+                    Some(ui(UiKey::PreviewTooLarge).to_owned())
+                } else { None };
+                self.image_preview = Some(ImagePreview {
+                    id, history: history.clone(), image: error.clone().map(Err), native: false,
+                });
+                self.selected = self.entries.iter().position(|e| e.id == id);
+                if error.is_some() {
+                    return Task::none();
+                }
+                let socket = self.socket.clone();
+                let request = clipd::get_request(&history, id, &mime);
+                return Task::perform(clipd::off_thread(move || {
+                    clipd::ask(&socket, &request).map_err(|e| e.text())
+                        .and_then(|bytes| clipd::read_got(bytes.as_slice()))
+                        .and_then(|png| crate::thumb::full_png(&png))
+                }), move |r| Msg::PreviewLoaded(history.clone(), id,
+                    r.unwrap_or_else(|| Err(ui(UiKey::HistoryUnavailable).into()))));
+            }
+            Msg::PreviewLoaded(history, id, result) => {
+                if let Some(preview) = self.image_preview.as_mut()
+                    .filter(|p| p.id == id && p.history == history) {
+                    preview.image = Some(result.map(|p| (
+                        iced::widget::image::Handle::from_rgba(p.width, p.height, p.rgba),
+                        p.width, p.height,
+                    )));
+                }
+            }
+            Msg::PreviewNative(native) => {
+                if let Some(preview) = &mut self.image_preview { preview.native = native; }
+            }
+            Msg::PreviewMaximize => return iced::window::latest().then(|window| {
+                window.map_or_else(Task::none, |id| iced::window::maximize(id, true))
+            }),
+            Msg::PreviewClose => { self.image_preview = None; }
+            Msg::LivePoll => return self.poll_live(),
+            Msg::LiveLoaded { gen, result } => return self.live_loaded(gen, result),
             Msg::Opened(window) => {
                 let focus = iced::window::gain_focus(window);
                 return if self.type_enabled {
@@ -893,6 +1153,8 @@ impl Clip {
                     return Task::none();
                 }
                 self.words = w;
+                self.gen += 1;
+                self.live = None;
                 self.typed += 1;
                 return later(DEBOUNCE_MS, Msg::Rested(self.typed));
             }
@@ -1563,6 +1825,12 @@ impl Clip {
     }
 
     pub fn key(&mut self, press: Press) -> Task<Msg> {
+        if self.image_preview.is_some() {
+            if press == Press::Escape {
+                self.image_preview = None;
+            }
+            return Task::none();
+        }
         match press {
             Press::Escape => {
                 if self.type_busy {
@@ -1641,6 +1909,9 @@ impl Clip {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
+        if let Some(preview) = &self.image_preview {
+            return self.view_image_preview(preview);
+        }
         let mut page = column![].spacing(8).padding(12);
         if self.manager {
             let mut tabs = row![text("Буферы:").size(13)]
@@ -1977,14 +2248,20 @@ impl Clip {
             match self.thumbs.get(&e.id) {
                 Some(Ok(handle)) => {
                     body = body.push(
-                        iced::widget::image(handle.clone())
-                            .height(Length::Shrink)
-                            .content_fit(iced::ContentFit::None),
+                        button(
+                            iced::widget::image(handle.clone())
+                                .height(Length::Shrink)
+                                .content_fit(iced::ContentFit::None),
+                        )
+                        .style(button::text)
+                        .padding(0)
+                        .on_press(Msg::Preview(e.id)),
                     );
                 }
                 _ => {
                     body = body
                         .push(text(format!("🖼 картинка {kind} · {}", size_words(*size))).size(15));
+                    body = body.push(button(ui(UiKey::PreviewOpen)).on_press(Msg::Preview(e.id)));
                 }
             }
         } else if let Some(whole) = self.whole.get(&e.id) {
@@ -2016,6 +2293,48 @@ impl Clip {
             .max_width(540)
             .style(move |t| card(t, chosen, i % 2 == 1));
         mouse_area(bubble).on_press(Msg::Select(i)).into()
+    }
+
+    fn view_image_preview<'a>(&'a self, preview: &'a ImagePreview) -> Element<'a, Msg> {
+        let controls = row![
+            button(ui(UiKey::PreviewBack)).on_press(Msg::PreviewClose),
+            button(if preview.native {
+                ui(UiKey::PreviewFit)
+            } else {
+                ui(UiKey::PreviewNative)
+            })
+            .on_press(Msg::PreviewNative(!preview.native)),
+            button(ui(UiKey::PreviewMaximize)).on_press(Msg::PreviewMaximize),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let content: Element<'a, Msg> = match &preview.image {
+            Some(Ok((handle, width, height))) => column![
+                text(format!("{width} × {height} · {}", ui(UiKey::PreviewHelp))).size(12),
+                iced::widget::image::viewer(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(if preview.native {
+                        iced::ContentFit::None
+                    } else {
+                        iced::ContentFit::Contain
+                    })
+                    .min_scale(0.05)
+                    .max_scale(20.0),
+            ]
+            .spacing(8)
+            .into(),
+            Some(Err(why)) => container(text(why)).center(Length::Fill).into(),
+            None => container(text(ui(UiKey::PreviewLoading)))
+                .center(Length::Fill)
+                .into(),
+        };
+        column![controls, content]
+            .spacing(10)
+            .padding(12)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn actions<'a>(&'a self, e: &'a Entry) -> Element<'a, Msg> {
@@ -2643,6 +2962,7 @@ impl Clip {
                 _ => None,
             }),
             crate::appearance::watch().map(|_| Msg::Appearance),
+            live_updates().map(|_| Msg::LivePoll),
         ])
     }
 }
@@ -2652,7 +2972,7 @@ fn clip_window_settings() -> iced::window::Settings {
     iced::window::Settings {
         size: Size::new(640.0, 760.0),
         position: iced::window::Position::Centered,
-        resizable: false,
+        resizable: true,
         exit_on_close_request: false,
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {
@@ -2770,6 +3090,193 @@ mod tests {
 
     fn clip() -> Clip {
         Clip::new("main".to_owned(), true, PathBuf::from("/nonexistent/sock"))
+    }
+
+    #[test]
+    fn live_copies_preserve_selection_search_destination_and_expanded_text() {
+        let mut c = clip();
+        c.entries = vec![entry(1, 10), entry(2, 20)];
+        c.selected = Some(0);
+        c.view = (120.0, 400.0);
+        c.words = "e".into();
+        c.target = ClipboardTarget::Instance("chosen-instance".into());
+        c.whole.insert(1, "expanded text".into());
+        let _ = c.update(Msg::LivePoll);
+        assert!(c.live.is_some());
+        let _ = c.update(Msg::LiveLoaded {
+            gen: c.gen,
+            result: Ok(vec![entry(3, 30), entry(2, 20), entry(1, 10)]),
+        });
+        assert_eq!(
+            c.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(c.selected, Some(0));
+        assert_eq!(c.words, "e");
+        assert_eq!(
+            c.target,
+            ClipboardTarget::Instance("chosen-instance".into())
+        );
+        assert_eq!(c.whole.get(&1).map(String::as_str), Some("expanded text"));
+    }
+
+    #[test]
+    fn live_burst_is_paged_back_to_the_visible_span_without_gaps() {
+        let mut c = clip();
+        c.entries = (1..=4).map(|id| entry(id, id as i64)).collect();
+        c.selected = Some(1);
+        c.view = (200.0, 400.0);
+        let _ = c.update(Msg::LivePoll);
+        let _ = c.update(Msg::LiveLoaded {
+            gen: c.gen,
+            result: Ok((14..=63).rev().map(|id| entry(id, id as i64)).collect()),
+        });
+        assert_eq!(c.entries.len(), 4, "do not commit an incomplete catch-up");
+        assert_eq!(c.live.as_ref().unwrap().before, Some(14));
+        let _ = c.update(Msg::LiveLoaded {
+            gen: c.gen,
+            result: Ok((1..=13).rev().map(|id| entry(id, id as i64)).collect()),
+        });
+        assert_eq!(
+            c.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            (1..=63).collect::<Vec<_>>()
+        );
+        assert_eq!(c.selected, Some(1));
+        assert!(c.live.is_none());
+    }
+
+    #[test]
+    fn live_catch_up_does_not_automatically_load_older_history() {
+        let mut c = clip();
+        c.entries = (51..=100).map(|id| entry(id, id as i64)).collect();
+        c.selected = Some(3);
+        c.older = true;
+        c.view = (200.0, 400.0);
+        let _ = c.update(Msg::LivePoll);
+        let _ = c.update(Msg::LiveLoaded {
+            gen: c.gen,
+            result: Ok((52..=101).rev().map(|id| entry(id, id as i64)).collect()),
+        });
+        let _ = c.update(Msg::LiveLoaded {
+            gen: c.gen,
+            result: Ok((2..=51).rev().map(|id| entry(id, id as i64)).collect()),
+        });
+        assert_eq!(c.entries.first().unwrap().id, 51);
+        assert_eq!(c.entries.last().unwrap().id, 101);
+        assert_eq!(c.entries.len(), 51);
+        assert!(c.older);
+    }
+
+    #[test]
+    fn idle_live_feed_follows_a_bounded_newest_page() {
+        let mut c = clip();
+        c.entries = (1..=50).map(|id| entry(id, id as i64)).collect();
+        c.selected = Some(49);
+        let _ = c.update(Msg::LivePoll);
+        assert_eq!(c.live.as_ref().unwrap().oldest, None);
+        let _ = c.update(Msg::LiveLoaded {
+            gen: c.gen,
+            result: Ok((52..=101).rev().map(|id| entry(id, id as i64)).collect()),
+        });
+        assert_eq!(c.entries.len(), PAGE);
+        assert_eq!(c.entries.last().unwrap().id, 101);
+        assert_eq!(c.selected, Some(49));
+        assert!(c.older);
+    }
+
+    #[test]
+    fn stale_live_replies_cannot_cross_histories_or_a_changed_search() {
+        let mut c = clip();
+        c.manager = true;
+        c.tabs = vec!["main".into(), "other".into()];
+        let _ = c.update(Msg::LivePoll);
+        let old = c.gen;
+        let _ = c.update(Msg::Switch("other".into()));
+        let _ = c.update(Msg::LiveLoaded {
+            gen: old,
+            result: Ok(vec![entry(99, 99)]),
+        });
+        assert!(c.entries.is_empty());
+        c.loading = false;
+        let _ = c.update(Msg::LivePoll);
+        let old = c.gen;
+        let _ = c.update(Msg::Words("new query".into()));
+        let _ = c.update(Msg::LiveLoaded {
+            gen: old,
+            result: Ok(vec![entry(99, 99)]),
+        });
+        assert!(c.entries.is_empty());
+    }
+
+    #[test]
+    fn live_refresh_is_single_flight_pauses_for_confirmation_and_recovers() {
+        let mut c = clip();
+        c.entries = vec![entry(1, 1)];
+        c.selected = Some(0);
+        c.deleting = Some(1);
+        let _ = c.update(Msg::LivePoll);
+        assert!(c.live.is_none());
+        c.deleting = None;
+        let _ = c.update(Msg::LivePoll);
+        let gen = c.live.as_ref().unwrap().gen;
+        let _ = c.update(Msg::LivePoll);
+        assert_eq!(c.live.as_ref().unwrap().gen, gen);
+        let _ = c.update(Msg::LiveLoaded {
+            gen,
+            result: Err("temporarily unavailable".into()),
+        });
+        assert_eq!(c.entries.len(), 1);
+        assert!(c.live.is_none());
+        let _ = c.update(Msg::LivePoll);
+        let _ = c.update(Msg::LiveLoaded {
+            gen: c.gen,
+            result: Ok(vec![entry(2, 2), entry(1, 1)]),
+        });
+        assert_eq!(c.entries.len(), 2);
+    }
+
+    #[test]
+    fn large_preview_is_explicit_closes_on_escape_and_ignores_stale_histories() {
+        let mut c = clip();
+        let mut image = entry(1, 10);
+        image.types = vec![("image/png".into(), 100)];
+        c.entries = vec![image];
+        let _ = c.update(Msg::Preview(1));
+        assert_eq!(c.image_preview.as_ref().unwrap().id, 1);
+        assert!(c.image_preview.as_ref().unwrap().image.is_none());
+        let _ = c.update(Msg::PreviewLoaded(
+            "other".into(),
+            1,
+            Err("another history's image".into()),
+        ));
+        assert!(c.image_preview.as_ref().unwrap().image.is_none());
+        let _ = c.update(Msg::LivePoll);
+        assert!(c.live.is_none(), "do not disturb an open preview");
+        let _ = c.key(Press::Escape);
+        assert!(c.image_preview.is_none());
+        let _ = c.update(Msg::PreviewLoaded(
+            "main".into(),
+            1,
+            Err("late reply".into()),
+        ));
+        assert!(c.image_preview.is_none());
+        assert_eq!(c.entries.len(), 1);
+    }
+
+    #[test]
+    fn preview_never_reveals_secrets_and_is_invalidated_on_shelf_change() {
+        let mut c = clip();
+        let mut image = entry(1, 10);
+        image.types = vec![("image/png".into(), 100)];
+        c.entries = vec![image];
+        c.secrets = true;
+        let _ = c.update(Msg::Preview(1));
+        assert!(c.image_preview.is_none());
+        c.secrets = false;
+        let _ = c.update(Msg::Preview(1));
+        assert!(c.image_preview.is_some());
+        let _ = c.update(Msg::Shelf(true));
+        assert!(c.image_preview.is_none());
     }
 
     #[test]

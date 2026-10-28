@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- Open clipboard windows automatically refresh their current history without
+  resetting searches or a deliberately selected older row. Newest-page following
+  stays bounded, and large bursts are paged without gaps.
+- PNG thumbnails open an original-resolution viewer with wheel zoom, panning,
+  fit/actual size and window maximization. Escape returns to the history; secret
+  shelves cannot open previews. PNG decode/allocation limits remain enforced.
+- Private clipboard capture retains complete text/image formats when another
+  advertised format stalls, fails, or exceeds its budget. CLIPBOARD and PRIMARY
+  no longer block one another; incomplete prefixes are discarded, secret and
+  restored-entry hints remain effective, and a wholly failed copy preserves
+  the previous selection. Existing application proxies require a restart.
 - History opened from a frame can explicitly copy regular entries and images
   to the desktop clipboard without pasting or closing the manager. The action
   also stays available with typing controls open. Its label/warning identifies

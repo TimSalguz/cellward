@@ -29,6 +29,43 @@ through the updated launcher to get private active selections. History paste
 refuses an unverified isolated target rather than exporting to the host.
 Unconfined programs continue to use the desktop clipboard.
 
+## Partial or stalled copies
+
+CLIPBOARD and PRIMARY are captured independently with a shared 64 MiB memory
+budget and bounded work per event-loop turn. Portable text/image formats are
+requested before legacy aliases. A format completes only at EOF: its unfinished
+prefix is never offered or recorded. One second without progress skips that
+format; the whole capture is bounded to three seconds. Completed formats survive
+another format's timeout, read error, size rejection, or the source disappearing.
+If nothing completes, the previous active selection is retained. No failed copy
+enables access to the host clipboard.
+
+Secret and restored-entry hints remain present even if their payload could not
+be read, so partial capture cannot accidentally record a password or restored
+entry. Normal history reads only completed formats from the private broker.
+Failure diagnostics contain format counts, never copied data or MIME strings.
+`tests/private-clipboard-smoke.py` exercises these cases through real proxy and
+broker connections, with history both enabled and disabled, on a private
+compositor. Capture unit tests also cover size limits, deadlines and binary data.
+
+## Live history and image inspection
+
+An open history window checks for new entries once a second, off the UI thread,
+with at most one refresh in flight. At the newest row it follows a bounded newest
+page. While reading older rows it preserves the selected entry, expanded text,
+search, filters and copy destination; large arrivals are paged without gaps.
+Background replies from an old search or history are ignored. Confirmation,
+password editing and image inspection pause refresh until they are closed.
+
+Click a PNG thumbnail to inspect the original pixels across the window. The
+viewer supports zoom with the wheel, drag to pan, fit/actual size and maximizing
+the resizable window. Escape returns to the same history instead of closing it.
+Only the explicitly opened image is decoded at full resolution, off-thread and
+under the existing PNG size/allocation limits. Other image types remain copyable
+but currently have no large preview. Secret shelves never reveal image contents.
+`tests/clipboard-window-live-smoke.py` verifies automatic arrival and the large
+preview in the actual GUI on a private compositor, without clipboard mutation.
+
 ## Legacy proxies (programs started before this update)
 
 The Wayland proxy of each launch (`rust/src/clip.rs`, `wl_frame.rs`):

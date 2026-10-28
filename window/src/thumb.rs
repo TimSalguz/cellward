@@ -26,6 +26,16 @@ pub struct Thumb {
 /// `png` scaled down to `height` pixels high (never up), at most
 /// [`MAX_WIDTH`] wide; `Err` says why not.
 pub fn of_png(png: &[u8], height: u32) -> Result<Thumb, String> {
+    decode_png(png, height, MAX_WIDTH)
+}
+
+/// A separate, explicitly opened preview keeps the original pixels. Never
+/// enlarge the already reduced list thumbnail to inspect screenshot text.
+pub fn full_png(png: &[u8]) -> Result<Thumb, String> {
+    decode_png(png, MAX_SIDE, MAX_SIDE)
+}
+
+fn decode_png(png: &[u8], height: u32, max_width: u32) -> Result<Thumb, String> {
     let mut decoder =
         png::Decoder::new_with_limits(Cursor::new(png), png::Limits { bytes: MAX_DECODED });
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -57,8 +67,13 @@ pub fn of_png(png: &[u8], height: u32) -> Result<Thumb, String> {
             _ => [p[0], p[1], p[2], p[3]],
         }
     };
-    let (tw, th) = fit(info.width, info.height, height.max(1), MAX_WIDTH);
-    let mut rgba = Vec::with_capacity(tw as usize * th as usize * 4);
+    let (tw, th) = fit(info.width, info.height, height.max(1), max_width);
+    let output_size = (tw as usize)
+        .checked_mul(th as usize)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|n| *n <= MAX_DECODED)
+        .ok_or("картинка слишком большая")?;
+    let mut rgba = Vec::with_capacity(output_size);
     // Each pixel of the thumbnail the mean of the block of the image under
     // it: a scaled-down screenshot keeps its text readable as a texture.
     for ty in 0..th {
@@ -127,6 +142,19 @@ mod tests {
         assert_eq!(fit(4000, 100, 60, 480), (480, 12));
         assert_eq!(fit(20, 10, 60, 480), (20, 10), "never scaled up");
         assert_eq!(fit(1, 10_000, 60, 480), (1, 60));
+    }
+
+    #[test]
+    fn full_preview_keeps_original_pixels_instead_of_enlarging_a_thumbnail() {
+        let data: Vec<u8> = (0..800).map(|i| (i % 256) as u8).collect();
+        let png = png_of(800, 1, png::ColorType::Grayscale, &data);
+        let small = of_png(&png, 60).unwrap();
+        let full = full_png(&png).unwrap();
+        assert_eq!(small.width, MAX_WIDTH);
+        assert_eq!((full.width, full.height), (800, 1));
+        for (pixel, value) in full.rgba.chunks_exact(4).zip(data) {
+            assert_eq!(pixel, &[value, value, value, 255]);
+        }
     }
 
     #[test]

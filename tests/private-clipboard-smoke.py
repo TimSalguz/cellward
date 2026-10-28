@@ -35,14 +35,41 @@ PNG = (b'\x89PNG\r\n\x1a\n'
        + reverse.fixtures.png_chunk(b'IEND', b''))
 
 
-def owner():
+def owner(control=None):
     sock = socket.socket(socket.AF_UNIX)
     sock.connect(str(Path(os.environ['XDG_RUNTIME_DIR']) / os.environ['WAYLAND_DISPLAY']))
     send = lambda obj, op, body=b'': wire.packet(sock, obj, op, body)
     send(1, 1, struct.pack('=I', 2))
     send(1, 0, struct.pack('=I', 3))
     names, buffered, fds = {}, b'', []
+    initialized, epoch, next_source = False, None, 20
+    sources, stalled = {}, []
+
+    def command():
+        nonlocal epoch, next_source
+        if not initialized or control is None:
+            return
+        try:
+            spec = json.loads(Path(control).read_text())
+        except (FileNotFoundError, ValueError):
+            return
+        if spec['epoch'] == epoch:
+            return
+        epoch = spec['epoch']
+        # An existing proxy sees repeated copies, not a fresh launch per test.
+        source = next_source
+        next_source += 1
+        primary = spec.get('primary', False)
+        send(8 if primary else 5, 0, struct.pack('=I', source))
+        sources[source] = spec
+        for mime in spec['types']:
+            send(source, 0, wire.wl_string(mime))
+        send(9 if primary else 6, 0 if primary else 1, struct.pack('=II', source, 0))
+
     while True:
+        command()
+        if not select.select([sock], [], [], .05)[0]:
+            continue
         data, ancillary, flags, _ = sock.recvmsg(65536, socket.CMSG_SPACE(64 * 4))
         if not data:
             return
@@ -69,25 +96,35 @@ def owner():
                                                    ('zwp_primary_selection_device_manager_v1', 8, 1)]:
                     send(2, 0, struct.pack('=I', names[interface]) + wire.wl_string(interface) + struct.pack('=II', version, ident))
                 send(5, 1, struct.pack('=II', 6, 4))
-                send(5, 0, struct.pack('=I', 7))
-                for mime in ('text/plain', 'image/png'):
-                    send(7, 0, wire.wl_string(mime))
-                send(6, 1, struct.pack('=II', 7, 0))
                 send(8, 1, struct.pack('=II', 9, 4))
-                send(8, 0, struct.pack('=I', 10))
-                for mime in ('text/plain', 'image/png'):
-                    send(10, 0, wire.wl_string(mime))
-                send(9, 0, struct.pack('=II', 10, 0))
-            if obj in (7, 10) and op == (1 if obj == 7 else 0):
+                initialized = True
+                if control is None:
+                    for manager, device, source, primary in [(5, 6, 7, False), (8, 9, 10, True)]:
+                        send(manager, 0, struct.pack('=I', source))
+                        sources[source] = {'types': {'text/plain': 'large', 'image/png': 'png'}}
+                        for mime in sources[source]['types']:
+                            send(source, 0, wire.wl_string(mime))
+                        send(device, 0 if primary else 1, struct.pack('=II', source, 0))
+            if obj in sources and op == (0 if sources[obj].get('primary', obj == 10) else 1):
                 length = struct.unpack_from('=I', body)[0]
                 mime = body[4:4 + length - 1].decode()
                 fd = fds.pop(0)
+                spec = sources[obj]
+                kind = spec['types'][mime]
+                payload = (TEXT if kind == 'large' else PNG if kind == 'png'
+                           else b'unfinished prefix' if kind == 'stall'
+                           else kind.encode())
                 try:
-                    payload = {'text/plain': TEXT, 'image/png': PNG}[mime]
                     while payload:
                         payload = payload[os.write(fd, payload):]
+                    if kind == 'stall':
+                        stalled.append(fd)
+                        fd = None
+                except BrokenPipeError:
+                    pass
                 finally:
-                    os.close(fd)
+                    if fd is not None:
+                        os.close(fd)
 
 
 def main():
@@ -217,6 +254,64 @@ def main():
             assert ask(f'copy-to\tmain\t{entry}\tmissing-instance').startswith('error\t')
         else:
             assert not (root / '.local/state/vpn-zones/.clipboard').exists(), 'active broker created disk history'
+        # A single long-lived proxy must survive Firefox/GTK-style partial
+        # offers, recover on subsequent copies and preserve history policy.
+        control = root / 'fault-command.json'
+        faulty = start([args.core, 'wl-sandbox', 'fault-owner', *binding, '--',
+                        sys.executable, __file__, 'fault-owner', str(control)], 'fault-owner')
+        epoch = 0
+
+        def copy_fault(types, primary=False):
+            nonlocal epoch
+            epoch += 1
+            control.write_text(json.dumps({'epoch': epoch, 'types': types, 'primary': primary}))
+
+        def history_count():
+            return len(ask('list\tmain\t100').splitlines())
+
+        copy_fault({'TEXT': 'stall', 'text/plain': 'copy with stalled TEXT', 'image/png': 'png'})
+        wire.wait_for(lambda: body('same.json', 'text/plain') == reverse.digest(b'copy with stalled TEXT'))
+        assert 'TEXT' not in status('same.json')['types'], 'incomplete alias was published'
+        wire.wait_for(lambda: body('same.json', 'image/png') == reverse.digest(PNG))
+        if not args.without_history:
+            wire.wait_for(lambda: 'copy with stalled TEXT' in ask('list\tmain\t100'))
+        copy_fault({'text/plain;charset=utf-8': 'stall', 'text/plain': 'plain fallback'})
+        wire.wait_for(lambda: body('same.json', 'text/plain') == reverse.digest(b'plain fallback'))
+        assert 'text/plain;charset=utf-8' not in status('same.json')['types']
+        if not args.without_history:
+            wire.wait_for(lambda: 'plain fallback' in ask('list\tmain\t100'))
+        copy_fault({'text/plain': 'valid MIME fallback', 'application/x-invalid\n': 'must not be read'})
+        wire.wait_for(lambda: body('same.json', 'text/plain') == reverse.digest(b'valid MIME fallback'))
+        if not args.without_history:
+            wire.wait_for(lambda: 'valid MIME fallback' in ask('list\tmain\t100'))
+        # A completely failed copy must not replace a good active selection.
+        copy_fault({'text/plain': 'stall'})
+        time.sleep(1.5)
+        assert body('same.json', 'text/plain') == reverse.digest(b'valid MIME fallback')
+        for hint in ('x-kde-passwordManagerHint', 'application/x-cellward-restored'):
+            before = history_count() if not args.without_history else 0
+            text = 'synthetic confidential ' + hint
+            copy_fault({'text/plain': text, hint: 'stall'})
+            wire.wait_for(lambda: body('same.json', 'text/plain') == reverse.digest(text.encode()))
+            assert hint in status('same.json')['types'], 'failed policy hint was lost'
+            if not args.without_history:
+                time.sleep(.4)
+                assert history_count() == before, 'secret/restored copy entered history'
+        # A slow PRIMARY source cannot hold up an explicit CLIPBOARD copy.
+        copy_fault({'text/plain': 'stall'}, primary=True)
+        time.sleep(.2)
+        copy_fault({'text/plain': 'recovered copy'})
+        wire.wait_for(lambda: body('same.json', 'text/plain') == reverse.digest(b'recovered copy'), timeout=.7)
+        assert faulty.poll() is None, 'faults terminated the proxy/source'
+        if not args.without_history:
+            wire.wait_for(lambda: 'recovered copy' in ask('list\tmain\t100'))
+        # Preserve the original assertions below after restoring both channels.
+        copy_fault({'text/plain': 'large', 'image/png': 'png'}, primary=True)
+        wire.wait_for(lambda: body('primary.json', 'text/plain') == reverse.digest(TEXT))
+        copy_fault({'text/plain': 'large', 'image/png': 'png'})
+        wire.wait_for(lambda: body('same.json', 'text/plain') == reverse.digest(TEXT))
+        assert body('host.json', 'text/plain') == reverse.digest(sentinel)
+        print('PASS: stalled aliases/preferred MIME, failed-copy recovery, independent PRIMARY, secret/restored hints and history', flush=True)
         # A host update must not become an implicit import, even on a paste key.
         replacement = b'host replacement must stay outside'
         start([args.wl_copy, '--foreground', '--type', 'text/plain'], 'host-update', replacement)
@@ -259,5 +354,7 @@ def main():
 if __name__ == '__main__':
     if sys.argv[1:] == ['owner']:
         owner()
+    elif sys.argv[1:2] == ['fault-owner']:
+        owner(sys.argv[2])
     else:
         main()
