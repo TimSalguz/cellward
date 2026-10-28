@@ -15,6 +15,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   full frame. The host manifest pins `grim`, without granting capture to apps.
 
 ### Fixed
+- Cross-network application warnings compare the actual container selector.
+  Fresh throwaway containers no longer conflict with home or other throwaway
+  launches sharing a legacy registry directory; same-container and real-home
+  guards remain effective, and unrelated live records are preserved.
 - A physical paste in a private container can preview the latest copy from
   another private instance: Enter confirms transfer and insertion, Escape
   cancels. Repeated local pastes stay direct; secrets need separate consent.

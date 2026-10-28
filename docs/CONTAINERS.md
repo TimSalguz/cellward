@@ -318,6 +318,14 @@ vpn-zone-core container-enter --instance <id> --   the WAITER: joins the instanc
       └─ vpn-zone-core profile-run --cwd <dir> …    steps 1–6 as above
 ```
 
+The cross-network "already running" warning compares the selected container's
+registry selector, including its unique throwaway id. Legacy files can contain
+both main-home and throwaway records: their shared bookkeeping directory does
+not mean they share a running process. A new throwaway therefore does not warn
+about Firefox in the home container. Live records of other containers remain
+intact. The one-container/one-network refusal and the real-home process guard
+still apply independently.
+
 The instance's id is its container's name; `main:offline` for the main home
 (and `<c>:offline` for a container of the main home whose network is
 `ask`); `:tmp:<layer>` for a throwaway container; `:fs:<pid>-<start>` for a

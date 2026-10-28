@@ -148,6 +148,33 @@ pub fn rewrite_live<F>(reg: &Path, zone: &str, is_alive: F) -> io::Result<Option
 where
     F: Fn(i32) -> bool,
 {
+    rewrite_live_matching(reg, zone, None, is_alive)
+}
+
+/// Clean all live records, but report a network conflict only for the actual
+/// selected container. Legacy main-home directories also contain throwaway
+/// sandbox records; sharing that directory does not share a process instance.
+pub fn rewrite_live_for_selector<F>(
+    reg: &Path,
+    zone: &str,
+    selector: &str,
+    is_alive: F,
+) -> io::Result<Option<String>>
+where
+    F: Fn(i32) -> bool,
+{
+    rewrite_live_matching(reg, zone, Some(selector), is_alive)
+}
+
+fn rewrite_live_matching<F>(
+    reg: &Path,
+    zone: &str,
+    selector: Option<&str>,
+    is_alive: F,
+) -> io::Result<Option<String>>
+where
+    F: Fn(i32) -> bool,
+{
     let text = match fs::read_to_string(reg) {
         Ok(text) => text,
         // No file means nobody has ever launched this program: not an error,
@@ -172,7 +199,7 @@ where
             "{} {} {}\n",
             record.pid, record.zone, record.selector
         ));
-        if record.zone != zone {
+        if record.zone != zone && selector.is_none_or(|selector| record.selector == selector) {
             busy = Some(record.zone);
         }
     }
@@ -660,6 +687,53 @@ mod tests {
         assert_eq!(
             rewrite_live(&dir.0.join("never-run"), "nl", alive(&[1])).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn fresh_throwaway_does_not_conflict_with_home_or_other_throwaways() {
+        let dir = Dir::new("throwaway-conflicts");
+        let reg = dir.file(
+            "firefox",
+            "10 vpn \n11 host __fs__:first\n12 vpn __fs__:second\n13 offline __fs__:dead\n",
+        );
+        assert_eq!(
+            rewrite_live_for_selector(&reg, "host", "__fs__:new", alive(&[10, 11, 12])).unwrap(),
+            None
+        );
+        // Ignoring an unrelated conflict must not erase its live launch.
+        assert_eq!(
+            fs::read_to_string(&reg).unwrap(),
+            "10 vpn \n11 host __fs__:first\n12 vpn __fs__:second\n"
+        );
+        assert_eq!(
+            rewrite_live_for_selector(&reg, "host", "__fs__:first", alive(&[10, 11, 12])).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn same_container_conflict_remains_visible_in_a_shared_registry_file() {
+        let dir = Dir::new("same-container-conflicts");
+        let reg = dir.file(
+            "firefox",
+            "10 vpn \n11 host __fs__:first\n12 other __fs__:second\n",
+        );
+        assert_eq!(
+            rewrite_live_for_selector(&reg, "host", "", alive(&[10, 11, 12]))
+                .unwrap()
+                .as_deref(),
+            Some("vpn")
+        );
+        assert_eq!(
+            rewrite_live_for_selector(&reg, "vpn", "", alive(&[10, 11, 12])).unwrap(),
+            None
+        );
+        assert_eq!(
+            rewrite_live_for_selector(&reg, "vpn", "__fs__:first", alive(&[10, 11, 12]))
+                .unwrap()
+                .as_deref(),
+            Some("host")
         );
     }
 

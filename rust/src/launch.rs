@@ -1288,14 +1288,23 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         },
     };
 
+    // Throwaway sandboxes have distinct instance selectors even though their
+    // legacy registry files live beside the main home's. Compare the selector,
+    // not just the application id/binary in that shared directory.
+    let warning_selector = selector_of(&selection, &container.profile);
     let busy = match registry::lock(&regdir) {
         Ok(_guard) => {
             let live = |file: &Path| {
-                registry::rewrite_live(file, &zone_name, |pid| registry::alive(&running, pid))
-                    .unwrap_or_else(|e| {
-                        eprintln!("реестр запусков {}: {e}", file.display());
-                        None
-                    })
+                registry::rewrite_live_for_selector(
+                    file,
+                    &zone_name,
+                    &warning_selector.to_string_lossy(),
+                    |pid| registry::alive(&running, pid),
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("реестр запусков {}: {e}", file.display());
+                    None
+                })
             };
             let by_id = live(reg.as_path());
             let by_binary = binreg.as_deref().and_then(live);
@@ -3686,6 +3695,20 @@ pub fn restrict_compositor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fresh_throwaway_warning_uses_the_same_identity_as_its_launch_record() {
+        let home = Selection::parse(&argv(&["vpn", "--", "firefox"])).unwrap();
+        let fresh = Selection::parse(&argv(&["host", "--fs-sandbox", "--", "firefox"])).unwrap();
+        let home_selector = selector_of(&home, OsStr::new(""));
+        let fresh_selector = selector_of(&fresh, OsStr::new(""));
+        assert!(home_selector.is_empty());
+        assert_ne!(fresh_selector, home_selector);
+        assert_eq!(fresh_selector, selector_of(&fresh, OsStr::new("")));
+        let mut joined = fresh.clone();
+        joined.sandbox = Sandbox::Throwaway(Some(throwaway_name(None).into()));
+        assert_eq!(fresh_selector, selector_of(&joined, OsStr::new("")));
+    }
 
     #[test]
     fn only_independent_terminal_forms_skip_single_instance_guards() {
