@@ -11,7 +11,8 @@ for as long as it runs, and moves and clicks it as the lines written to the
 FIFO say:
 
     move <x> <y>       to (x, y), logical pixels of the layout
-    press | release [right]    the left button, or the right one
+    press | release [right|middle]    the left, right or middle button
+    wheel <steps>             vertical wheel steps (negative scrolls up)
 
 Usage: python3 vm-pointer.py <fifo> <layout width> <layout height>, with
 WAYLAND_DISPLAY and XDG_RUNTIME_DIR. Raw Wayland on the socket: the VM has
@@ -86,6 +87,7 @@ send(5, 0, struct.pack("=II", 4, 6))
 
 BTN_LEFT = 0x110
 BTN_RIGHT = 0x111
+BTN_MIDDLE = 0x112
 start = time.monotonic()
 
 
@@ -103,8 +105,12 @@ def act(line):
         send(6, 1, struct.pack("=IIIII", now(), x, y, extent_w, extent_h))
     elif words[0] in ("press", "release"):
         # button(time, button, state): the left one, or `right`
-        button = BTN_RIGHT if words[1:] == ["right"] else BTN_LEFT
+        button = BTN_MIDDLE if words[1:] == ["middle"] else BTN_RIGHT if words[1:] == ["right"] else BTN_LEFT
         send(6, 2, struct.pack("=III", now(), button, 1 if words[0] == "press" else 0))
+    elif words[0] == "wheel":
+        steps = int(words[1])
+        send(6, 5, struct.pack("=I", 0))  # axis_source: wheel
+        send(6, 7, struct.pack("=IIii", now(), 0, steps * 10 * 256, steps))
     else:
         print(f"vm-pointer: what is {line!r}?", file=sys.stderr)
         return

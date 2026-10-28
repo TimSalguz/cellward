@@ -395,6 +395,15 @@ def main():
         wait_editor()
         frozen = max(root.glob('frozen-*.png'), key=lambda p: p.stat().st_mtime_ns).read_bytes()
         control.touch()
+        move(500, 400)
+        pointer.write('wheel -5\n')
+        time.sleep(.2)
+        key(11)  # 0 restores fit without changing the frozen image.
+        pointer.write('wheel -5\n')
+        time.sleep(.2)
+        pointer.write('press middle\n')
+        move(580, 440)
+        pointer.write('release middle\n')
         move(100, 120)
         pointer.write('press\n')
         move(900, 700)
@@ -405,7 +414,7 @@ def main():
         key(28)
         wire.wait_for(lambda: not editor())
         revision, png = wire.wait_for(lambda: value if (value := snapshot())[0] != previous else None)
-        assert decode_png(png)[0] > 500 and decode_png(png)[1] > 400, 'drag collapsed to a point'
+        assert 250 < decode_png(png)[0] < 650 and 150 < decode_png(png)[1] < 500, 'zoomed drag did not map to original pixels'
         assert is_crop(frozen, png), 'region was recaptured after the live image changed'
         (root / 'region.png').write_bytes(png)
         print('window preview/Escape preserve clipboard; region crops immutable pre-editor pixels', flush=True)

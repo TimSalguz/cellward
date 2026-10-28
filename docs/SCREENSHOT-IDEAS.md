@@ -7,6 +7,11 @@ editor selects only from that immutable image; Enter confirms the private copy,
 Escape cancels. All modes require confirmation in the trusted host editor:
 the confined proxy's request alone must never export screen pixels to an app.
 
+Wheel zooms around the pointer, middle-button dragging pans, and `0` restores
+fit. Selection stays in original image coordinates, including after zoom/pan;
+the encoded crop is never a resampled view. See the prioritized
+[UX follow-up plan](CLIPBOARD-UX.md).
+
 For hover capture only the originating window is shaded. Its shade has an empty
 input region, so real pointer motion reaches the application. The proxy consumes
 both halves of the first left click, removes the shade and waits for compositor

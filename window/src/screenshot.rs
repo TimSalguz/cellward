@@ -6,7 +6,9 @@ use crate::i18n::{text as tr, Key as UiKey, Language};
 use iced::keyboard::{key, Key};
 use iced::mouse;
 use iced::widget::{button, canvas, column, container, row, text};
-use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme};
+use iced::{
+    Color, Element, Length, Point, Rectangle, Renderer, Size, Subscription, Task, Theme, Vector,
+};
 
 const LIMIT: usize = 64 << 20;
 fn label(key: UiKey) -> &'static str {
@@ -174,7 +176,12 @@ impl Editor {
         let canvas = canvas::Canvas::new(Picture { editor: self })
             .width(Length::Fill)
             .height(Length::Fill);
-        let mut content = column![toolbar, canvas].spacing(12);
+        let mut content = column![
+            toolbar,
+            text(label(UiKey::ScreenshotInspect)).size(12),
+            canvas
+        ]
+        .spacing(12);
         if self.error.is_some() {
             content = content.push(text(label(UiKey::ScreenshotFailed)));
         }
@@ -193,6 +200,61 @@ struct Picture<'a> {
 struct Drag {
     start: Option<Point>,
     cursor: Option<Point>,
+    view: View,
+    pan: Option<(Point, Vector)>,
+}
+
+#[derive(Clone, Copy)]
+struct View {
+    zoom: f32,
+    offset: Vector,
+}
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            offset: Vector::ZERO,
+        }
+    }
+}
+impl View {
+    fn rect(self, size: Size, w: u32, h: u32) -> Rectangle {
+        let base = fitted(size, w, h);
+        Rectangle {
+            x: base.x + self.offset.x,
+            y: base.y + self.offset.y,
+            width: base.width * self.zoom,
+            height: base.height * self.zoom,
+        }
+    }
+    fn clamp(&mut self, size: Size, w: u32, h: u32) {
+        let base = fitted(size, w, h);
+        let rect = self.rect(size, w, h);
+        self.offset.x = if rect.width <= size.width {
+            (size.width - rect.width) / 2.0 - base.x
+        } else {
+            rect.x.clamp(size.width - rect.width, 0.0) - base.x
+        };
+        self.offset.y = if rect.height <= size.height {
+            (size.height - rect.height) / 2.0 - base.y
+        } else {
+            rect.y.clamp(size.height - rect.height, 0.0) - base.y
+        };
+    }
+    fn zoom_at(&mut self, size: Size, w: u32, h: u32, cursor: Point, amount: f32) {
+        if !amount.is_finite() || !cursor.x.is_finite() || !cursor.y.is_finite() {
+            return;
+        }
+        let before = self.rect(size, w, h);
+        let next = (self.zoom * (amount.clamp(-10.0, 10.0) * 0.15).exp()).clamp(1.0, 32.0);
+        let ratio = next / self.zoom;
+        self.offset = Vector::new(
+            cursor.x - (cursor.x - before.x) * ratio - fitted(size, w, h).x,
+            cursor.y - (cursor.y - before.y) * ratio - fitted(size, w, h).y,
+        );
+        self.zoom = next;
+        self.clamp(size, w, h);
+    }
 }
 
 fn fitted(size: Size, w: u32, h: u32) -> Rectangle {
@@ -210,6 +272,20 @@ fn fitted(size: Size, w: u32, h: u32) -> Rectangle {
 
 impl canvas::Program<Msg> for Picture<'_> {
     type State = Drag;
+    fn mouse_interaction(
+        &self,
+        state: &Drag,
+        bounds: Rectangle,
+        cursor: mouse::Cursor,
+    ) -> mouse::Interaction {
+        if !cursor.is_over(bounds) {
+            mouse::Interaction::None
+        } else if state.pan.is_some() {
+            mouse::Interaction::Grabbing
+        } else {
+            mouse::Interaction::Crosshair
+        }
+    }
     fn update(
         &self,
         state: &mut Drag,
@@ -218,7 +294,7 @@ impl canvas::Program<Msg> for Picture<'_> {
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Msg>> {
         let image = &self.editor.pixels;
-        let rect = fitted(bounds.size(), image.width, image.height);
+        let rect = state.view.rect(bounds.size(), image.width, image.height);
         // Use each motion's own position. The toolkit can batch a press and
         // several motions with `cursor` already at the newest position.
         if let canvas::Event::Mouse(mouse::Event::CursorMoved { position }) = event {
@@ -233,7 +309,49 @@ impl canvas::Program<Msg> for Picture<'_> {
             )
         });
         match event {
+            canvas::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: Key::Character(c),
+                ..
+            }) if c == "0" => {
+                state.view = View::default();
+                state.pan = None;
+                state.start = None;
+                Some(canvas::Action::request_redraw().and_capture())
+            }
+            canvas::Event::Mouse(mouse::Event::WheelScrolled { delta })
+                if state.start.is_none() && state.pan.is_none() =>
+            {
+                let anchor = local?;
+                if !Rectangle::with_size(bounds.size()).contains(anchor) {
+                    return None;
+                }
+                let amount = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => *y,
+                    mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                };
+                state
+                    .view
+                    .zoom_at(bounds.size(), image.width, image.height, anchor, amount);
+                Some(canvas::Action::request_redraw().and_capture())
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle))
+                if state.start.is_none() =>
+            {
+                let at = local?;
+                if !Rectangle::with_size(bounds.size()).contains(at) {
+                    return None;
+                }
+                state.pan = Some((at, state.view.offset));
+                Some(canvas::Action::request_redraw().and_capture())
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => {
+                state.pan.take()?;
+                Some(canvas::Action::request_redraw().and_capture())
+            }
             canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if state.pan.is_some() {
+                    return None;
+                }
                 let cursor = local?;
                 if !rect.contains(cursor) {
                     return None;
@@ -242,6 +360,11 @@ impl canvas::Program<Msg> for Picture<'_> {
                 Some(canvas::Action::publish(Msg::Crop(None)).and_capture())
             }
             canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let Some((from, offset)) = state.pan {
+                    state.view.offset = offset + (local? - from);
+                    state.view.clamp(bounds.size(), image.width, image.height);
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
                 let (a, b) = (state.start?, point?);
                 Some(
                     canvas::Action::publish(Msg::Crop(crop_between(
@@ -270,7 +393,7 @@ impl canvas::Program<Msg> for Picture<'_> {
     }
     fn draw(
         &self,
-        _: &Drag,
+        state: &Drag,
         renderer: &Renderer,
         _: &Theme,
         bounds: Rectangle,
@@ -278,49 +401,51 @@ impl canvas::Program<Msg> for Picture<'_> {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let pixels = &self.editor.pixels;
-        let image = fitted(bounds.size(), pixels.width, pixels.height);
-        frame.draw_image(image, &self.editor.image);
-        if let Some(crop) = self.editor.crop {
-            let scale = image.width / pixels.width as f32;
-            let selected = Rectangle {
-                x: image.x + crop.x as f32 * scale,
-                y: image.y + crop.y as f32 * scale,
-                width: crop.w as f32 * scale,
-                height: crop.h as f32 * scale,
-            };
-            let dim = Color::from_rgba(0.0, 0.0, 0.0, 0.55);
-            for rect in [
-                Rectangle {
-                    height: selected.y - image.y,
-                    ..image
-                },
-                Rectangle {
-                    y: selected.y + selected.height,
-                    height: image.y + image.height - selected.y - selected.height,
-                    ..image
-                },
-                Rectangle {
-                    x: image.x,
-                    y: selected.y,
-                    width: selected.x - image.x,
-                    height: selected.height,
-                },
-                Rectangle {
-                    x: selected.x + selected.width,
-                    y: selected.y,
-                    width: image.x + image.width - selected.x - selected.width,
-                    height: selected.height,
-                },
-            ] {
-                frame.fill_rectangle(Point::new(rect.x, rect.y), rect.size(), dim);
+        let image = state.view.rect(bounds.size(), pixels.width, pixels.height);
+        frame.with_clip(Rectangle::with_size(bounds.size()), |frame| {
+            frame.draw_image(image, &self.editor.image);
+            if let Some(crop) = self.editor.crop {
+                let scale = image.width / pixels.width as f32;
+                let selected = Rectangle {
+                    x: image.x + crop.x as f32 * scale,
+                    y: image.y + crop.y as f32 * scale,
+                    width: crop.w as f32 * scale,
+                    height: crop.h as f32 * scale,
+                };
+                let dim = Color::from_rgba(0.0, 0.0, 0.0, 0.55);
+                for rect in [
+                    Rectangle {
+                        height: selected.y - image.y,
+                        ..image
+                    },
+                    Rectangle {
+                        y: selected.y + selected.height,
+                        height: image.y + image.height - selected.y - selected.height,
+                        ..image
+                    },
+                    Rectangle {
+                        x: image.x,
+                        y: selected.y,
+                        width: selected.x - image.x,
+                        height: selected.height,
+                    },
+                    Rectangle {
+                        x: selected.x + selected.width,
+                        y: selected.y,
+                        width: image.x + image.width - selected.x - selected.width,
+                        height: selected.height,
+                    },
+                ] {
+                    frame.fill_rectangle(Point::new(rect.x, rect.y), rect.size(), dim);
+                }
+                frame.stroke(
+                    &canvas::Path::rectangle(Point::new(selected.x, selected.y), selected.size()),
+                    canvas::Stroke::default()
+                        .with_width(2.0)
+                        .with_color(Color::from_rgb(0.2, 0.9, 0.8)),
+                );
             }
-            frame.stroke(
-                &canvas::Path::rectangle(Point::new(selected.x, selected.y), selected.size()),
-                canvas::Stroke::default()
-                    .with_width(2.0)
-                    .with_color(Color::from_rgb(0.2, 0.9, 0.8)),
-            );
-        }
+        });
         vec![frame.into_geometry()]
     }
 }
@@ -389,6 +514,78 @@ pub fn run(whole: bool) -> iced::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn zoom_stays_under_the_pointer_and_panning_cannot_lose_the_image() {
+        let size = Size::new(1000.0, 800.0);
+        let mut view = View::default();
+        let cursor = Point::new(250.0, 200.0);
+        view.zoom_at(size, 1000, 800, cursor, 2.0_f32.ln() / 0.15);
+        let rect = view.rect(size, 1000, 800);
+        assert!(((cursor.x - rect.x) / rect.width * 1000.0 - 250.0).abs() < 0.001);
+        assert!(((cursor.y - rect.y) / rect.height * 800.0 - 200.0).abs() < 0.001);
+        view.offset = Vector::new(-100000.0, 100000.0);
+        view.clamp(size, 1000, 800);
+        let rect = view.rect(size, 1000, 800);
+        assert!(rect.x <= 0.0 && rect.x + rect.width >= size.width);
+        assert!(rect.y <= 0.0 && rect.y + rect.height >= size.height);
+        view.zoom_at(size, 1000, 800, cursor, -10.0);
+        assert_eq!(view.zoom, 1.0);
+        assert_eq!(view.offset, Vector::ZERO);
+    }
+
+    #[test]
+    fn zoomed_selection_uses_original_pixel_coordinates() {
+        use iced::widget::canvas::Program;
+        let editor = Editor {
+            pixels: crate::thumb::Thumb {
+                width: 1000,
+                height: 800,
+                rgba: vec![0; 1000 * 800 * 4],
+            },
+            image: iced::widget::image::Handle::from_rgba(1, 1, vec![0; 4]),
+            crop: None,
+            error: None,
+            focused: true,
+            touched: std::time::Instant::now(),
+        };
+        let picture = Picture { editor: &editor };
+        let mut drag = Drag {
+            view: View {
+                zoom: 2.0,
+                offset: Vector::new(-250.0, -200.0),
+            },
+            ..Default::default()
+        };
+        let bounds = Rectangle::with_size(Size::new(1000.0, 800.0));
+        let cursor = mouse::Cursor::Available(Point::new(550.0, 500.0));
+        let motion = |x, y| {
+            canvas::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(x, y),
+            })
+        };
+        let _ = picture.update(&mut drag, &motion(150.0, 100.0), bounds, cursor);
+        let _ = picture.update(
+            &mut drag,
+            &canvas::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            cursor,
+        );
+        let action = picture
+            .update(&mut drag, &motion(550.0, 500.0), bounds, cursor)
+            .unwrap();
+        let (Some(Msg::Crop(crop)), _, _) = action.into_inner() else {
+            panic!()
+        };
+        assert_eq!(
+            crop,
+            Some(Crop {
+                x: 200,
+                y: 150,
+                w: 200,
+                h: 200
+            })
+        );
+    }
     #[test]
     fn a_background_or_just_focused_preview_cannot_confirm_a_copy() {
         let mut editor = Editor {
