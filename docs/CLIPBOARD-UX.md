@@ -18,6 +18,12 @@ that the installed desktop is fixed.
 | P1 | Diagnose capture failures and frame freezes | Opt-in diagnostics record request timing, completion counts and focus/frame transitions. Never record clipboard contents, URLs, passwords or screenshot pixels. A failed copy should be distinguishable from a successfully captured previous selection. |
 | P2 | More convenient history navigation | Explore keyboard-first selection, temporary pinning, and preview beside the selected row. Preserve search and selection while new clips arrive. Keep secrets out of passive previews and automatic exports. |
 
+The isolated-window capture item also excludes background showing through
+desktop opacity: the current output-crop backend cannot provide that guarantee.
+Its acceptance test places a contrasting unrelated window behind the target.
+Application alpha must be preserved or flattened against an explicit solid
+background, not against other desktop content.
+
 ## Screenshot inspection: implemented in this iteration
 
 The frozen-region editor supports wheel zoom around the pointer, middle-button
