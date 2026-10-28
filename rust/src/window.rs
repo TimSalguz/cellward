@@ -298,6 +298,26 @@ pub fn navigation_question(
     question_controlled(window, None, title, text, None, answers, (None, None, 0))
 }
 
+/// A preview opened by a physical paste shortcut. The opening V/Insert is
+/// consumed by the proxy; a short guard covers its trailing modifier events.
+/// Secret transfer consent still uses the ordinary guarded question.
+pub(crate) fn paste_question(
+    window: &Path,
+    title: &str,
+    text: &str,
+    answers: &[(&str, &str, bool)],
+) -> Asked {
+    question_controlled(
+        window,
+        None,
+        title,
+        text,
+        None,
+        answers,
+        (Some(std::time::Duration::from_secs(40)), None, 250),
+    )
+}
+
 /// [`question`] on the compositor `display` (`WAYLAND_DISPLAY`; none: the
 /// one this process has) — an instance's keeper asks on its launch's,
 /// whatever its unit's environment says (`crate::netask`).

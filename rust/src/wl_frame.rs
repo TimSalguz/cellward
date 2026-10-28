@@ -221,6 +221,7 @@ use wl_proxy::protocols::wp_primary_selection_unstable_v1::zwp_primary_selection
 use wl_proxy::protocols::wayland::wl_keyboard::{
     WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState, WlKeyboardKeymapFormat,
 };
+pub(crate) mod smart_paste;
 pub(crate) mod typing;
 use wl_proxy::protocols::wayland::wl_output::{WlOutput, WlOutputTransform};
 use wl_proxy::protocols::wayland::wl_pointer::{
@@ -4679,6 +4680,18 @@ impl WlKeyboardHandler for Keyboard {
             }
         }
         if !self.menu {
+            if pressed
+                && self.typing.borrow().on
+                && private_clipboard::smart_enabled()
+                && crate::clip::is_simple_paste(&self.paste, key, self.depressed)
+                && !self.down.contains(&key)
+            {
+                self.prompt_keys.push(key);
+                if self.f.first(serial) {
+                    smart_paste::begin(slf, &self.typing, key, self.depressed);
+                }
+                return;
+            }
             if state == WlKeyboardKeyState::PRESSED {
                 self.f.questions.touch();
                 if crate::clip::is_paste(&self.paste, key, self.depressed) {
@@ -6808,7 +6821,6 @@ impl WlDataDeviceHandler for DataDevice {
             return;
         }
         if private_clipboard::enabled() {
-            private_clipboard::ready(slf);
             let selected = source.and_then(|s| {
                 s.try_get_handler_ref::<Source>().ok().map(|h| {
                     (
@@ -6829,6 +6841,7 @@ impl WlDataDeviceHandler for DataDevice {
                 types,
                 overflow,
             );
+            private_clipboard::ready(slf);
             return;
         }
         // Reserve zero on this private connection for launch-local copies.
@@ -7088,7 +7101,6 @@ impl ZwpPrimarySelectionDeviceV1Handler for PrimaryDevice {
             return;
         }
         if private_clipboard::enabled() {
-            private_clipboard::ready_primary(slf);
             let selected = source.and_then(|s| {
                 s.try_get_handler_ref::<PrimarySource>().ok().map(|h| {
                     (
@@ -7109,6 +7121,7 @@ impl ZwpPrimarySelectionDeviceV1Handler for PrimaryDevice {
                 types,
                 overflow,
             );
+            private_clipboard::ready_primary(slf);
         } else {
             slf.send_set_selection(source, serial);
         }

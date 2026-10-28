@@ -9,6 +9,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Content;
 
+mod paste;
+pub use paste::{PasteCandidate, PasteDecision};
+
 /// Opaque connection scope, allocated only by the trusted host supervisor.
 /// Not a wire authentication token: the transport owns the mapping to peers.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -99,6 +102,7 @@ pub struct Broker {
     next: u64,
     bytes: usize,
     instances: HashMap<Instance, [Option<Offer>; 2]>,
+    paste: paste::PasteState,
 }
 
 impl Default for Broker {
@@ -114,6 +118,7 @@ impl Broker {
             next: 0,
             bytes: 0,
             instances: HashMap::new(),
+            paste: Default::default(),
         }
     }
 
@@ -139,6 +144,7 @@ impl Broker {
             .remove(&instance)
             .ok_or(Error::UnknownInstance)?;
         self.bytes -= offers.iter().flatten().map(|o| o.bytes).sum::<usize>();
+        self.paste.remove(instance);
         Ok(())
     }
 
@@ -185,6 +191,14 @@ impl Broker {
             return Err(Error::Limit);
         }
         let revision = Revision(self.serial()?);
+        self.cancel_capture(instance, selection);
+        if candidate
+            .contents
+            .iter()
+            .any(|c| c.mime == "application/x-cellward-restored")
+        {
+            self.paste.explicit_selection(instance);
+        }
         candidate.revision = revision;
         candidate.bytes = bytes;
         self.instances.get_mut(&instance).unwrap()[selection.index()] = Some(candidate);
@@ -193,6 +207,7 @@ impl Broker {
     }
 
     pub fn clear(&mut self, instance: Instance, selection: Selection) -> Result<(), Error> {
+        self.cancel_capture(instance, selection);
         let offers = self
             .instances
             .get_mut(&instance)

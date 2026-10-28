@@ -24,11 +24,26 @@ pub enum Selection {
     Primary,
 }
 
+#[derive(Clone, Copy)]
 pub enum Request<'a> {
     Types,
     Set(&'a [(&'a str, &'a [u8])]),
-    Read { revision: u64, mime: &'a str },
+    Read {
+        revision: u64,
+        mime: &'a str,
+    },
     Clear,
+    BeginCapture {
+        user_copy: bool,
+    },
+    FinishCapture {
+        epoch: u64,
+        parts: &'a [(&'a str, &'a [u8])],
+    },
+    AbortCapture {
+        epoch: u64,
+    },
+    Capabilities,
 }
 
 /// Payloads are never printed by Debug and are erased through spare capacity.
@@ -81,6 +96,8 @@ pub enum Reply {
     Set(u64),
     Data(Bytes),
     Cleared,
+    Begun(u64),
+    Capabilities(u8),
     /// Valid protocol refusal, not a reason to consult the host clipboard.
     Rejected(u8),
 }
@@ -160,10 +177,20 @@ impl Client {
             Request::Set(_) => 2,
             Request::Read { .. } => 3,
             Request::Clear => 4,
+            Request::BeginCapture { .. } => 6,
+            Request::FinishCapture { .. } => 7,
+            Request::AbortCapture { .. } => 8,
+            Request::Capabilities => 9,
         };
         let mut length = 2usize;
         match &request {
-            Request::Set(parts) => {
+            Request::Set(parts) | Request::FinishCapture { parts, .. } => {
+                if let Request::FinishCapture { epoch, .. } = &request {
+                    if *epoch == 0 {
+                        return Err(invalid());
+                    }
+                    length += 8;
+                }
                 if !(1..=64).contains(&parts.len()) {
                     return Err(invalid());
                 }
@@ -182,6 +209,18 @@ impl Client {
                 if total > CONTENT {
                     return Err(invalid());
                 }
+            }
+            Request::BeginCapture { user_copy } => {
+                if *user_copy && !matches!(selection, Selection::Clipboard) {
+                    return Err(invalid());
+                }
+                length += 1;
+            }
+            Request::AbortCapture { epoch } => {
+                if *epoch == 0 {
+                    return Err(invalid());
+                }
+                length += 8;
             }
             Request::Read { revision, mime } => {
                 if *revision == 0 || !valid_mime(mime) {
@@ -216,7 +255,10 @@ impl Client {
             b.extend_from_slice(s.as_bytes());
         };
         match request {
-            Request::Set(parts) => {
+            Request::Set(parts) | Request::FinishCapture { parts, .. } => {
+                if let Request::FinishCapture { epoch, .. } = request {
+                    b.extend_from_slice(&epoch.to_le_bytes());
+                }
                 b.extend_from_slice(&(parts.len() as u16).to_le_bytes());
                 for (m, data) in parts {
                     mime(b, m);
@@ -228,6 +270,8 @@ impl Client {
                 b.extend_from_slice(&revision.to_le_bytes());
                 mime(b, m);
             }
+            Request::BeginCapture { user_copy } => b.push(u8::from(user_copy)),
+            Request::AbortCapture { epoch } => b.extend_from_slice(&epoch.to_le_bytes()),
             _ => {}
         }
         self.opcode = opcode;
@@ -408,7 +452,10 @@ fn decode(opcode: u8, bytes: &[u8]) -> io::Result<Reply> {
                 }
                 _ => return Err(invalid()),
             },
-            2 => Reply::Set(d.revision()?),
+            2 | 7 => Reply::Set(d.revision()?),
+            6 => Reply::Begun(d.revision()?),
+            8 => Reply::Cleared,
+            9 => Reply::Capabilities(d.byte()?),
             3 => {
                 let n = u32::from_le_bytes(d.take(4)?.try_into().unwrap()) as usize;
                 if n > CONTENT {

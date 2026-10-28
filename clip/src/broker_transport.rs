@@ -132,6 +132,28 @@ impl Transport {
         self.broker.transfer_explicit(from, to, selection, revision)
     }
 
+    pub fn prepare_paste(
+        &self,
+        to: Instance,
+        expected: u64,
+        now: Instant,
+    ) -> Result<crate::broker::PasteDecision, Error> {
+        self.broker.prepare_paste(to, expected, now)
+    }
+
+    pub fn commit_paste(
+        &mut self,
+        to: Instance,
+        epoch: u64,
+        from_revision: Revision,
+        to_revision: u64,
+        allow_secret: bool,
+        now: Instant,
+    ) -> Result<Revision, Error> {
+        self.broker
+            .commit_paste(to, epoch, from_revision, to_revision, allow_secret, now)
+    }
+
     /// One fair, nonblocking turn, at most QUANTUM bytes in/out per peer.
     /// A slow or malformed peer is closed without stalling other instances.
     pub fn tick(&mut self, now: Instant) {
@@ -378,10 +400,11 @@ fn dispatch(broker: &mut Broker, instance: Instance, bytes: &[u8], limit: usize)
                 }
                 Ok(response(&answer, limit))
             }
-            2 => {
+            2 | 7 => {
                 if limit < 13 {
                     return Err(Error::Limit);
                 }
+                let epoch = if opcode == 7 { Some(d.number()?) } else { None };
                 let count = d.short()?;
                 if !(1..=64).contains(&count) {
                     return Err(Error::InvalidTypes);
@@ -400,7 +423,11 @@ fn dispatch(broker: &mut Broker, instance: Instance, bytes: &[u8], limit: usize)
                         data: data.to_vec(),
                     })
                     .collect();
-                let revision = broker.set(instance, selection, contents)?;
+                let revision = if let Some(epoch) = epoch {
+                    broker.finish_capture(instance, selection, epoch, contents, Instant::now())?
+                } else {
+                    broker.set(instance, selection, contents)?
+                };
                 let mut answer = vec![0];
                 answer.extend_from_slice(&revision.wire().to_le_bytes());
                 Ok(response(&answer, limit))
@@ -424,6 +451,31 @@ fn dispatch(broker: &mut Broker, instance: Instance, bytes: &[u8], limit: usize)
                 d.done()?;
                 broker.clear(instance, selection)?;
                 Ok(response(&[0], limit))
+            }
+            6 => {
+                let user_copy = match d.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(Error::InvalidTypes),
+                };
+                d.done()?;
+                if limit < 13 {
+                    return Err(Error::Limit);
+                }
+                let epoch = broker.begin_capture(instance, selection, user_copy, Instant::now())?;
+                let mut answer = vec![0];
+                answer.extend_from_slice(&epoch.to_le_bytes());
+                Ok(response(&answer, limit))
+            }
+            8 => {
+                let epoch = d.number()?;
+                d.done()?;
+                broker.abort_capture(instance, selection, epoch);
+                Ok(response(&[0], limit))
+            }
+            9 => {
+                d.done()?;
+                Ok(response(&[0, 3], limit))
             }
             _ => Err(Error::InvalidTypes),
         }

@@ -9,6 +9,8 @@ use std::os::fd::{AsRawFd, RawFd};
 
 mod capture;
 use capture::{CaptureData, Payload};
+mod metadata;
+use metadata::Metadata;
 
 const LIMIT: usize = 64 << 20;
 const QUANTUM: usize = 64 << 10;
@@ -39,6 +41,10 @@ pub(crate) fn initialize(bound: Bound) -> io::Result<()> {
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             client: Some(client),
+            metadata: bound.captures.map(Metadata::new).transpose()?,
+            local: [0; 2],
+            changing: [None; 2],
+            epochs: [None; 2],
             changed: File::from(bound.changed),
             operation: None,
             selections: [None, None],
@@ -51,8 +57,9 @@ pub(crate) fn initialize(bound: Bound) -> io::Result<()> {
             publish: VecDeque::new(),
             reads: VecDeque::new(),
             writes: VecDeque::new(),
-        })
-    });
+        });
+        Ok::<_, io::Error>(())
+    })?;
     Ok(())
 }
 
@@ -63,6 +70,9 @@ pub(crate) fn keep_fds() -> Vec<RawFd> {
             if let Some(client) = &s.client {
                 fds.push(client.socket().as_raw_fd());
             }
+            if let Some(meta) = &s.metadata {
+                fds.push(meta.fd());
+            }
             fds
         })
     })
@@ -72,6 +82,40 @@ pub(crate) fn data_fd() -> Option<RawFd> {
         s.borrow()
             .as_ref()
             .and_then(|s| s.client.as_ref().map(|c| c.socket().as_raw_fd()))
+    })
+}
+
+pub(crate) fn socket_fds() -> Vec<RawFd> {
+    let mut fds: Vec<_> = data_fd().into_iter().collect();
+    STATE.with(|s| {
+        if let Some(meta) = s.borrow().as_ref().and_then(|s| s.metadata.as_ref()) {
+            fds.push(meta.fd());
+        }
+    });
+    fds
+}
+
+pub(crate) fn smart_enabled() -> bool {
+    STATE.with(|s| {
+        s.borrow().as_ref().is_some_and(|s| {
+            s.client.is_some()
+                && s.metadata
+                    .as_ref()
+                    .and_then(|m| m.caps)
+                    .is_some_and(|caps| caps & 2 != 0)
+        })
+    })
+}
+
+pub(crate) fn revision() -> Option<u64> {
+    STATE.with(|s| {
+        s.borrow().as_ref().and_then(|s| {
+            (s.client.is_some()
+                && s.changing[0].is_none()
+                && !s.refresh[0]
+                && !matches!(s.operation, Some(Operation::Types(Selection::Clipboard))))
+            .then(|| s.selections[0].as_ref().map_or(0, |s| s.revision))
+        })
     })
 }
 
@@ -94,6 +138,9 @@ pub(crate) fn pollfds() -> Vec<libc::pollfd> {
                 }
             }
             fds.extend(s.writes.iter().map(|w| p(w.file.as_raw_fd(), true)));
+            if let Some(meta) = &s.metadata {
+                fds.push(meta.pollfd());
+            }
             fds
         })
     })
@@ -106,6 +153,7 @@ pub(crate) fn wake_at() -> Option<Instant> {
                 .and_then(BrokerClient::next_deadline)
                 .into_iter()
                 .chain(s.capture.iter().flatten().map(|c| c.data.wake_at()))
+                .chain(s.metadata.as_ref().and_then(Metadata::deadline))
                 .chain(s.writes.iter().map(|w| w.deadline))
                 .min()
         })
@@ -152,7 +200,9 @@ pub(super) fn ready(device: &Rc<WlDataDevice>) {
             {
                 if !*ready {
                     *ready = true;
-                    announce(device, s.selections[0].as_ref());
+                    if s.changing[0].is_none() {
+                        announce(device, s.selections[0].as_ref());
+                    }
                 }
             }
         }
@@ -168,7 +218,9 @@ pub(super) fn ready_primary(device: &Rc<ZwpPrimarySelectionDeviceV1>) {
             {
                 if !*ready {
                     *ready = true;
-                    announce_primary(device, s.selections[1].as_ref());
+                    if s.changing[1].is_none() {
+                        announce_primary(device, s.selections[1].as_ref());
+                    }
                 }
             }
         }
@@ -207,13 +259,32 @@ pub(super) fn set(
                 return;
             }
             let at = index(which);
+            let Some(local) = s.local[at].checked_add(1) else {
+                s.disable();
+                return;
+            };
+            s.local[at] = local;
+            s.changing[at] = Some(local);
+            if let Some(meta) = &mut s.metadata {
+                meta.forget(which);
+                if let Some((_, epoch)) = s.epochs[at].take() {
+                    meta.abort(which, epoch);
+                }
+            }
             s.waiting.retain(|(w, _, _)| index(*w) != at);
             s.publish.retain(|p| index(p.which) != at);
             s.capture[at] = None;
             if let Some(source) = source {
                 s.clear[at] = false;
+                if let Some(meta) = &mut s.metadata {
+                    let user_copy =
+                        at == 0 && !types.iter().any(|t| t == "application/x-cellward-restored");
+                    meta.begin(which, local, user_copy);
+                }
                 if !overflow && !types.is_empty() {
                     s.waiting.push_back((which, source, types));
+                } else {
+                    s.changing[at] = None;
                 }
             } else {
                 s.clear[at] = true;
@@ -231,11 +302,13 @@ struct Snapshot {
 struct Publication {
     which: Selection,
     contents: Vec<Payload>,
+    local: u64,
 }
 struct Capture {
     which: Selection,
     source: SourceRef,
     data: CaptureData,
+    local: u64,
 }
 struct ReadRequest {
     revision: u64,
@@ -251,12 +324,16 @@ struct Transfer {
 }
 enum Operation {
     Types(Selection),
-    Clear(Selection),
-    Set(Selection, Rc<Vec<String>>),
+    Clear(Selection, u64),
+    Set(Selection, Rc<Vec<String>>, u64),
     Read(ReadRequest),
 }
 struct State {
     client: Option<BrokerClient>,
+    metadata: Option<Metadata>,
+    local: [u64; 2],
+    changing: [Option<u64>; 2],
+    epochs: [Option<(u64, u64)>; 2],
     changed: File,
     operation: Option<Operation>,
     selections: [Option<Snapshot>; 2],
@@ -274,6 +351,8 @@ struct State {
 impl State {
     fn disable(&mut self) {
         self.client = None;
+        self.metadata = None;
+        self.changing = [None; 2];
         self.operation = None;
         self.capture = [None, None];
         self.waiting.clear();
@@ -294,6 +373,13 @@ impl State {
             types: Rc::new(types),
             which,
         });
+        if self.changing[at].is_none() {
+            self.announce(which);
+        }
+    }
+
+    fn announce(&self, which: Selection) {
+        let at = index(which);
         if at == 0 {
             for device in self
                 .devices
@@ -316,7 +402,39 @@ impl State {
             }
         }
     }
+
+    fn release_local(&mut self, which: Selection, local: u64, failed: bool) {
+        let at = index(which);
+        if self.changing[at] == Some(local) {
+            self.changing[at] = None;
+            if let Some((generation, epoch)) = self.epochs[at].take() {
+                if failed && generation == local {
+                    if let Some(meta) = &mut self.metadata {
+                        meta.abort(which, epoch);
+                    }
+                }
+            }
+            self.announce(which);
+        }
+    }
     fn tick(&mut self, now: Instant) {
+        if let Some(meta) = &mut self.metadata {
+            match meta.tick(now) {
+                Ok(Some(begun)) => {
+                    let at = index(begun.which);
+                    if self.changing[at] == Some(begun.local) {
+                        self.epochs[at] = Some((begun.local, begun.epoch));
+                    } else {
+                        meta.abort(begun.which, begun.epoch);
+                    }
+                }
+                Ok(None) => {}
+                Err(()) => {
+                    self.metadata = None;
+                    self.epochs = [None; 2];
+                }
+            }
+        }
         let Some(client) = &mut self.client else {
             return;
         };
@@ -337,11 +455,15 @@ impl State {
             };
             match (self.operation.take(), reply) {
                 (Some(Operation::Types(which)), Reply::Types(value)) => self.selected(which, value),
-                (Some(Operation::Set(which, types)), Reply::Set(revision)) => {
+                (Some(Operation::Set(which, types, local)), Reply::Set(revision)) => {
                     self.selected(which, Some((revision, types.as_ref().clone())));
+                    self.release_local(which, local, false);
                     self.refresh[index(which)] = true;
                 }
-                (Some(Operation::Clear(which)), Reply::Cleared) => self.selected(which, None),
+                (Some(Operation::Clear(which, local)), Reply::Cleared) => {
+                    self.selected(which, None);
+                    self.release_local(which, local, false);
+                }
                 (Some(Operation::Read(read)), Reply::Data(bytes)) => {
                     let allocated: usize = self.writes.iter().map(|w| w.bytes.allocated()).sum();
                     if allocated.saturating_add(bytes.allocated()) <= LIMIT {
@@ -352,6 +474,13 @@ impl State {
                             deadline: now + Duration::from_secs(3),
                         });
                     }
+                }
+                (
+                    Some(Operation::Set(which, _, local) | Operation::Clear(which, local)),
+                    Reply::Rejected(_),
+                ) => {
+                    self.release_local(which, local, true);
+                    self.refresh[index(which)] = true;
                 }
                 (Some(_), Reply::Rejected(_)) => {}
                 _ => {
@@ -394,6 +523,7 @@ impl State {
                         which,
                         source,
                         data: CaptureData::new(types, now),
+                        local: self.local[at],
                     });
                 }
             }
@@ -426,7 +556,10 @@ impl State {
                         self.publish.push_back(Publication {
                             which: c.which,
                             contents: c.data.contents,
+                            local: c.local,
                         });
+                    } else {
+                        self.release_local(c.which, c.local, true);
                     }
                 }
             }
@@ -444,22 +577,33 @@ impl State {
                 self.disable();
                 return;
             }
-            Some(Operation::Clear(which))
-        } else if let Some(publish) = self.publish.pop_front() {
+            Some(Operation::Clear(which, self.local[at]))
+        } else if self.publish.front().is_some_and(|p| {
+            self.metadata.is_none()
+                || self.epochs[index(p.which)].is_some_and(|(local, _)| local == p.local)
+        }) {
+            let publish = self.publish.pop_front().unwrap();
             let parts: Vec<_> = publish
                 .contents
                 .iter()
                 .map(|p| (p.mime.as_str(), p.bytes.as_slice()))
                 .collect();
-            if client
-                .start(publish.which, Request::Set(&parts), now)
-                .is_err()
-            {
+            let request = if self.metadata.is_some() {
+                Request::FinishCapture {
+                    epoch: self.epochs[index(publish.which)].unwrap().1,
+                    parts: &parts,
+                }
+            } else {
+                Request::Set(&parts)
+            };
+            if client.start(publish.which, request, now).is_err() {
+                self.release_local(publish.which, publish.local, true);
                 return;
             }
             Some(Operation::Set(
                 publish.which,
                 Rc::new(publish.contents.iter().map(|p| p.mime.clone()).collect()),
+                publish.local,
             ))
         } else if let Some(at) = self.refresh.iter().position(|v| *v) {
             self.refresh[at] = false;

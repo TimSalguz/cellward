@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Fixed
+- A physical paste in a private container can preview the latest copy from
+  another private instance: Enter confirms transfer and insertion, Escape
+  cancels. Repeated local pastes stay direct; secrets need separate consent.
+  Copy epochs prevent fast pastes and delayed MIME captures from selecting an
+  older copy. Confirmation and replay bind both revisions and the exact target
+  window, surface, keyboard and shortcut; desktop clipboard contents stay private.
 - Open clipboard windows automatically refresh their current history without
   resetting searches or a deliberately selected older row. Newest-page following
   stays bounded, and large bursts are paged without gaps.

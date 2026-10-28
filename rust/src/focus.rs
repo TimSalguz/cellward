@@ -43,6 +43,7 @@ use std::process::{Child, Command, Stdio};
 use crate::json::{self, Value};
 use crate::registry;
 use crate::tools::Tools;
+pub(crate) mod paste;
 
 /// The focused window as the compositor tells it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

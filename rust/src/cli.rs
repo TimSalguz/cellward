@@ -137,6 +137,7 @@ pub fn main() -> ExitCode {
         b"window-menu" => crate::focus::menu(&tools, rest),
         b"window-focus" => crate::focus::attention(&tools, rest),
         b"clip-window" => crate::focus::clip_window(&tools, rest),
+        b"smart-paste" => crate::focus::paste::run(&tools, rest),
         b"tasks" => crate::tasks::run(&tools, rest),
         b"scheme" => crate::scheme::run(&tools, rest),
         b"kill" => crate::kill::run(&tools, rest),

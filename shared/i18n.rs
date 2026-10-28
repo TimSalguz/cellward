@@ -72,6 +72,12 @@ pub enum Key {
     PreviewUnsupported,
     PreviewTooLarge,
     HistoryUnavailable,
+    PastePreview,
+    PasteConfirm,
+    PasteSecret,
+    PasteSecretConfirm,
+    PasteUnavailable,
+    PasteTransferred,
 }
 
 /// English is the source text; the Russian arm is the complete translation
@@ -80,6 +86,18 @@ pub enum Key {
 pub fn text(language: Language, key: Key) -> &'static str {
     use Key::*;
     match (language, key) {
+        (Language::English, PastePreview) => "Clipboard transfer",
+        (Language::Russian, PastePreview) => "Перенос из буфера обмена",
+        (Language::English, PasteConfirm) => "Transfer and paste  Enter",
+        (Language::Russian, PasteConfirm) => "Перенести и вставить  Enter",
+        (Language::English, PasteSecret) => "Password or private content. Preview is hidden. Confirm the destination before transferring.",
+        (Language::Russian, PasteSecret) => "Пароль или приватные данные. Предпросмотр скрыт. Проверьте получателя перед переносом.",
+        (Language::English, PasteSecretConfirm) => "Transfer private content",
+        (Language::Russian, PasteSecretConfirm) => "Перенести приватные данные",
+        (Language::English, PasteUnavailable) => "Paste cancelled: the clipboard or target changed, or the copy is unavailable. Copy again and retry.",
+        (Language::Russian, PasteUnavailable) => "Вставка отменена: буфер или получатель изменились либо копия недоступна. Скопируйте заново и повторите.",
+        (Language::English, PasteTransferred) => "Clipboard transferred",
+        (Language::Russian, PasteTransferred) => "Буфер передан",
         (Language::English, Launch) => "Launch",
         (Language::Russian, Launch) => "Запуск",
         (Language::English, Network) => "Network",
@@ -211,6 +229,12 @@ mod tests {
             PreviewUnsupported,
             PreviewTooLarge,
             HistoryUnavailable,
+            PastePreview,
+            PasteConfirm,
+            PasteSecret,
+            PasteSecretConfirm,
+            PasteUnavailable,
+            PasteTransferred,
         ] {
             assert!(!text(Language::English, key).is_empty());
             assert!(!text(Language::Russian, key).is_empty());

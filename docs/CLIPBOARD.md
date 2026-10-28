@@ -7,6 +7,37 @@ managers such as CopyQ. Another launch in the same instance shares those
 selections; another instance does not. Changing the instance's network keeps
 its selections; stopping its holder clears both.
 
+## Paste between private containers
+
+Copy normally in the source, focus the destination and press Ctrl+V (or
+Ctrl+Shift+V / Shift+Insert). If the latest private copy belongs to another
+instance, a trusted host window shows the source, destination and a bounded
+text preview. **Enter transfers and pastes; Escape cancels.** Password content
+is never shown and requires a separate guarded confirmation. Notifications
+contain only the direction, never the copied text. Once transferred, ordinary
+repeat pastes use the destination's local selection without another prompt.
+
+The intercepted shortcut is consumed, including its release. Confirmation is
+bound to the copy epoch and both selection revisions. Changes while the preview
+is open cancel the transfer rather than substituting another copy. The proxy
+replays the original chord only on its original keyboard and surface, after the
+exact offered revision and real compositor focus return. A closed window, dead
+source, stale result or expired request cannot redirect insertion to another
+window. The helper restores the original compositor window id, never whichever
+window of that launch happens to be newest.
+
+Copy epochs travel over a second pre-bound **same-scope** socket before source
+capture. A fast paste waits for that announced copy; delayed MIME completion
+cannot reorder copies from different instances. The scoped wire still has no
+cross-instance transfer operation. Prepare/commit are authenticated host-only
+controller operations. Older brokers without the capability retain ordinary
+copying and do not enable the new shortcut interception.
+
+This shortcut handles running private instances. Unconfined desktop applications
+keep their desktop clipboard behaviour; host export/import remains an explicit
+manager action. It does not merge or rebroadcast Noctalia's clipboard. Existing
+proxies must be restarted through the updated launcher to gain this behaviour.
+
 The manager's **Copy to** selector explicitly chooses a running instance or
 the shared host clipboard. Changing history tabs does not transfer anything.
 The history window opened from a frame starts with that exact instance as
@@ -20,7 +51,7 @@ event in history.
 records private selections directly from scoped broker endpoints; it does
 not mirror them through the desktop. The controller authenticates host peers
 by credentials, a live peer pidfd and matching user/pid/mount namespaces.
-Confined proxies receive only an already-bound data socket and change eventfd,
+Confined proxies receive only already-bound same-scope data sockets and a change eventfd,
 not the registration socket. Broker failure clears offers and never enables
 the host clipboard as a fallback. A private launch requires its proxy.
 

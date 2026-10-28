@@ -342,6 +342,115 @@ impl Pending {
     fn dispatch(&mut self, controller: &mut Controller) -> io::Result<Vec<u8>> {
         let mut bytes = &self.body[1..];
         match self.body[0] {
+            b'P' if bytes.first() == Some(&1) && self.owner.is_none() => {
+                bytes = &bytes[1..];
+                let target = endpoint::take_string(&mut bytes)?;
+                let revision = endpoint::take_number(&mut bytes)?;
+                if !bytes.is_empty() {
+                    return Err(endpoint::invalid());
+                }
+                let to = controller
+                    .scopes
+                    .get(target)
+                    .ok_or_else(endpoint::invalid)?;
+                if !endpoint::alive(to.owner.as_fd()) {
+                    return Err(endpoint::invalid());
+                }
+                let mut answer = vec![0];
+                match controller
+                    .transport
+                    .prepare_paste(to.instance, revision, Instant::now())
+                    .map_err(|_| endpoint::invalid())?
+                {
+                    crate::broker::PasteDecision::Current(revision) => {
+                        answer.push(0);
+                        answer.extend_from_slice(&revision.to_le_bytes());
+                    }
+                    crate::broker::PasteDecision::Pending(epoch) => {
+                        answer.push(1);
+                        answer.extend_from_slice(&epoch.to_le_bytes());
+                    }
+                    crate::broker::PasteDecision::Transfer(candidate) => {
+                        let (source, from) = controller
+                            .scopes
+                            .iter()
+                            .find(|(_, s)| s.instance == candidate.source)
+                            .ok_or_else(endpoint::invalid)?;
+                        if !endpoint::alive(from.owner.as_fd()) {
+                            return Err(endpoint::invalid());
+                        }
+                        answer.push(2);
+                        for n in [
+                            candidate.epoch,
+                            candidate.revision.wire(),
+                            candidate.target_revision,
+                        ] {
+                            answer.extend_from_slice(&n.to_le_bytes());
+                        }
+                        answer.push(u8::from(candidate.secret));
+                        for text in [source.as_str(), from.history.as_str(), to.history.as_str()] {
+                            endpoint::put_string(&mut answer, text);
+                        }
+                        endpoint::put_text(&mut answer, &candidate.preview);
+                        answer.extend_from_slice(&(candidate.types.len() as u16).to_le_bytes());
+                        for (mime, size) in candidate.types {
+                            endpoint::put_text(&mut answer, &mime);
+                            answer.extend_from_slice(&size.to_le_bytes());
+                        }
+                    }
+                }
+                Ok(answer)
+            }
+            b'J' if bytes.first() == Some(&1) && self.owner.is_none() => {
+                bytes = &bytes[1..];
+                let target = endpoint::take_string(&mut bytes)?;
+                let epoch = endpoint::take_number(&mut bytes)?;
+                let source_revision = endpoint::take_number(&mut bytes)?;
+                let target_revision = endpoint::take_number(&mut bytes)?;
+                let allow_secret = match bytes {
+                    [0] => false,
+                    [1] => true,
+                    _ => return Err(endpoint::invalid()),
+                };
+                let target = controller
+                    .scopes
+                    .get(target)
+                    .ok_or_else(endpoint::invalid)?;
+                if !endpoint::alive(target.owner.as_fd()) {
+                    return Err(endpoint::invalid());
+                }
+                // The source can exit after the preview, before the next
+                // lifetime sweep. Never authorize from that stale registration.
+                let crate::broker::PasteDecision::Transfer(candidate) = controller
+                    .transport
+                    .prepare_paste(target.instance, target_revision, Instant::now())
+                    .map_err(|_| endpoint::invalid())?
+                else {
+                    return Err(endpoint::invalid());
+                };
+                let source = controller
+                    .scopes
+                    .values()
+                    .find(|scope| scope.instance == candidate.source)
+                    .ok_or_else(endpoint::invalid)?;
+                if !endpoint::alive(source.owner.as_fd()) {
+                    return Err(endpoint::invalid());
+                }
+                let revision = controller
+                    .transport
+                    .commit_paste(
+                        target.instance,
+                        epoch,
+                        crate::broker::Revision::from_wire(source_revision),
+                        target_revision,
+                        allow_secret,
+                        Instant::now(),
+                    )
+                    .map_err(|_| endpoint::invalid())?;
+                let mut answer = vec![0];
+                answer.extend_from_slice(&revision.wire().to_le_bytes());
+                Ok(answer)
+            }
             b'V' | b'X' if bytes.len() == 33 && bytes[0] == 1 => {
                 let key = crate::input_authority::Capability::from_bytes(
                     bytes[1..].try_into().map_err(|_| endpoint::invalid())?,
@@ -684,6 +793,69 @@ mod tests {
         .unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert!(recorder.try_recv().is_err());
+    }
+
+    #[test]
+    fn preview_and_confirm_bind_the_same_copy_and_both_live_scopes() {
+        let h = Harness::new();
+        let source = Lease::new();
+        let target = Lease::new();
+        let mut client = Client::new(
+            endpoint::bind_capture(&h.runtime, "source", "source", source.fd.as_fd())
+                .unwrap()
+                .data,
+        )
+        .unwrap();
+        let _target = endpoint::bind(&h.runtime, "target", "target", target.fd.as_fd()).unwrap();
+        let Reply::Begun(epoch) =
+            exchange(&mut client, Request::BeginCapture { user_copy: true }).unwrap()
+        else {
+            panic!()
+        };
+        assert!(
+            matches!(endpoint::prepare_paste(&h.runtime, "target", 0).unwrap(), endpoint::PastePlan::Pending(e) if e == epoch)
+        );
+        exchange(
+            &mut client,
+            Request::FinishCapture {
+                epoch,
+                parts: &[("text/plain", b"synthetic preview")],
+            },
+        )
+        .unwrap();
+        let endpoint::PastePlan::Transfer(preview) =
+            endpoint::prepare_paste(&h.runtime, "target", 0).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(preview.preview, "synthetic preview");
+        assert_eq!(preview.source_history, "source");
+        assert_eq!(preview.target_history, "target");
+        let revision = endpoint::commit_paste(&h.runtime, "target", &preview, false).unwrap();
+        assert!(
+            matches!(endpoint::prepare_paste(&h.runtime, "target", revision).unwrap(), endpoint::PastePlan::Current(r) if r == revision)
+        );
+        assert!(endpoint::commit_paste(&h.runtime, "target", &preview, false).is_err());
+        let Reply::Begun(epoch) =
+            exchange(&mut client, Request::BeginCapture { user_copy: true }).unwrap()
+        else {
+            panic!()
+        };
+        exchange(
+            &mut client,
+            Request::FinishCapture {
+                epoch,
+                parts: &[("text/plain", b"new synthetic copy")],
+            },
+        )
+        .unwrap();
+        let endpoint::PastePlan::Transfer(preview) =
+            endpoint::prepare_paste(&h.runtime, "target", revision).unwrap()
+        else {
+            panic!()
+        };
+        drop(source);
+        assert!(endpoint::commit_paste(&h.runtime, "target", &preview, false).is_err());
     }
 
     #[test]

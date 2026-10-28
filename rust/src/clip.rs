@@ -276,6 +276,14 @@ pub fn is_paste(keys: &PasteKeys, key: u32, depressed: u32) -> bool {
         || (keys.insert.contains(&key) && depressed & SHIFT != 0)
 }
 
+/// Only the ordinary paste shortcuts may open the trusted transfer preview.
+/// Alt/Super/level-switch combinations remain the application's shortcuts.
+pub fn is_simple_paste(keys: &PasteKeys, key: u32, depressed: u32) -> bool {
+    depressed & !(CONTROL | SHIFT) == 0
+        && ((keys.v.contains(&key) && depressed & CONTROL != 0)
+            || (keys.insert.contains(&key) && depressed == SHIFT))
+}
+
 /// The person pastes now: a foreign selection may be read for a moment. A
 /// key pastes either selection (Shift+Insert is the primary one in some
 /// programs).
@@ -487,6 +495,27 @@ pub fn token_for(runtime: &Path, key: &str, history: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_preview_uses_only_ordinary_paste_shortcuts() {
+        let keys = PasteKeys::default();
+        for (key, mods) in [
+            (KEY_V, CONTROL),
+            (KEY_V, CONTROL | SHIFT),
+            (KEY_INSERT, SHIFT),
+        ] {
+            assert!(is_simple_paste(&keys, key, mods));
+        }
+        for (key, mods) in [
+            (KEY_V, CONTROL | 8),
+            (KEY_V, CONTROL | 64),
+            (KEY_V, SHIFT),
+            (KEY_INSERT, CONTROL | SHIFT),
+            (KEY_INSERT, SHIFT | 128),
+        ] {
+            assert!(!is_simple_paste(&keys, key, mods));
+        }
+    }
 
     #[test]
     fn favourites_can_be_selected_but_not_used_as_a_recording_history() {

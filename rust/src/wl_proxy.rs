@@ -399,6 +399,8 @@ const TYPE_CONTROL: u8 = b'G';
 /// Proxy → supervisor: the clipboard history's window for this launch —
 /// a row of the ≡'s dropdown (`cellward clip-window --pid`). No answer.
 const CLIP: u8 = b'h';
+const SMART_PASTE: u8 = b'B';
+const SMART_RESULT: u8 = b'D';
 /// A frame's line at most.
 const MAX_FRAME_ARG: usize = 512;
 
@@ -473,6 +475,7 @@ pub struct Proxy {
     display: Option<OsString>,
     /// The `systemd-run` starting a window menu, while it runs.
     menu: MenuStart,
+    paste_menu: MenuStart,
     /// The launch's focus policy (`crate::wl_focus`): whether the proxy's
     /// [`ATTENTION`] is to be answered, and how.
     focus: FocusPolicy,
@@ -481,6 +484,7 @@ pub struct Proxy {
     attention: MenuStart,
     /// The launch's socket of questions and the instances asking on it.
     asking: Asking,
+    smart_partial: Vec<u8>,
     /// The frame's settings watched, and the frame as the proxy has it.
     live: Option<Live>,
 }
@@ -1075,9 +1079,11 @@ pub(crate) fn start_private(
         frame: frame.map(|setup| setup.switch),
         display,
         menu: MenuStart::default(),
+        paste_menu: MenuStart::default(),
         focus,
         attention: MenuStart::default(),
         asking: Asking::default(),
+        smart_partial: Vec::new(),
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -1356,6 +1362,7 @@ impl Proxy {
                 Some(pid) => {
                     told.remove(&pid);
                     self.menu.reaped(pid);
+                    self.paste_menu.reaped(pid);
                     self.attention.reaped(pid);
                     if pid == main {
                         *main_status = Some(status);
@@ -1389,6 +1396,31 @@ impl Proxy {
     /// One request of the proxy. False when the channel is gone.
     fn answer(&mut self) -> bool {
         if let Some(fd) = self.channel.as_ref().map(AsRawFd::as_raw_fd) {
+            let mut first = [0u8; 1];
+            if !self.smart_partial.is_empty()
+                || matches!(recv_peek(fd, &mut first), Ok(1)) && first[0] == SMART_PASTE
+            {
+                let mut bytes = [0u8; 17];
+                let left = 17 - self.smart_partial.len();
+                match sys::recv_into_with_fds(fd, &mut bytes[..left], 0) {
+                    Ok((0, _, _)) => return false,
+                    Ok((n, _, _)) => self.smart_partial.extend_from_slice(&bytes[..n]),
+                    Err(e) => {
+                        return matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        )
+                    }
+                }
+                if self.smart_partial.len() == 17 {
+                    let ticket = u64::from_le_bytes(self.smart_partial[1..9].try_into().unwrap());
+                    let revision =
+                        u64::from_le_bytes(self.smart_partial[9..17].try_into().unwrap());
+                    self.smart_partial.clear();
+                    self.smart_paste(ticket, revision);
+                }
+                return true;
+            }
             if !self.asking.reply.is_empty() {
                 return self.replied(fd);
             }
@@ -1541,6 +1573,19 @@ impl Proxy {
     fn pastes(&mut self) {
         let waiting = std::mem::take(&mut self.asking.waiting);
         for (stream, buf) in waiting {
+            if let Some(payload) = asked_of(&buf).and_then(|p| p.strip_prefix(b"\0smart-paste")) {
+                let sent = payload.len() == 17
+                    && payload[0] <= 1
+                    && !of_this_launch(stream.as_raw_fd())
+                    && self.channel.as_ref().is_some_and(|c| {
+                        let mut message = vec![SMART_RESULT];
+                        message.extend_from_slice(payload);
+                        sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_ok()
+                    });
+                self.asking
+                    .say(&stream, if sent { ASK_YES } else { ASK_NOWHERE });
+                continue;
+            }
             if let Some(payload) = asked_of(&buf) {
                 if let Some(request @ crate::type_input::Request::Cancel { .. }) =
                     crate::type_input::Request::parse(payload)
@@ -1678,6 +1723,25 @@ impl Proxy {
                 self.display.as_deref(),
                 std::process::id(),
                 ask,
+            )
+        });
+    }
+
+    fn smart_paste(&self, ticket: u64, revision: u64) {
+        self.start_unit(&self.paste_menu, "clipboard preview", |tools, manifest| {
+            user_unit_argv(
+                &tools.systemd_run,
+                &tools.core,
+                manifest,
+                self.display.as_deref(),
+                &format!("cellward-paste-{}-{ticket}", std::process::id()),
+                &["--wait"],
+                vec![
+                    "smart-paste".into(),
+                    std::process::id().to_string().into(),
+                    ticket.to_string().into(),
+                    revision.to_string().into(),
+                ],
             )
         });
     }
@@ -2364,10 +2428,10 @@ fn confine(
     limit(libc::RLIMIT_NOFILE, MAX_FDS)?;
     limit(libc::RLIMIT_DATA, MAX_DATA)?;
     let border = drawing.and_then(prepare_border);
-    filter_scoped(
+    filter_sockets(
         ScmpAction::KillProcess,
         title_writer(border.as_ref()),
-        crate::wl_frame::private_clipboard::data_fd(),
+        &crate::wl_frame::private_clipboard::socket_fds(),
     )
     .and_then(|f| f.load())
     .map_err(|e| format!("seccomp: {e}"))?;
@@ -2569,6 +2633,14 @@ fn filter_scoped(
     title: Option<RawFd>,
     clipboard: Option<RawFd>,
 ) -> Result<ScmpFilterContext, libseccomp::error::SeccompError> {
+    filter_sockets(default, title, &clipboard.into_iter().collect::<Vec<_>>())
+}
+
+fn filter_sockets(
+    default: ScmpAction,
+    title: Option<RawFd>,
+    clipboard: &[RawFd],
+) -> Result<ScmpFilterContext, libseccomp::error::SeccompError> {
     let mut ctx = ScmpFilterContext::new(default)?;
     ctx.set_ctl_nnp(true)?;
     // A foreign architecture's table (int 0x80 on x86_64) is not in the
@@ -2618,7 +2690,7 @@ fn filter_scoped(
             ctx.add_rule(ScmpAction::Allow, call)?;
         }
     }
-    if let Some(fd) = clipboard {
+    for &fd in clipboard {
         for name in ["recvfrom", "sendto", "shutdown"] {
             if let Ok(call) = ScmpSyscall::from_name(name) {
                 ctx.add_rule_conditional(
@@ -2632,6 +2704,8 @@ fn filter_scoped(
                 )?;
             }
         }
+    }
+    if !clipboard.is_empty() {
         for cmd in [libc::F_GETFL, libc::F_DUPFD_CLOEXEC] {
             ctx.add_rule_conditional(
                 ScmpAction::Allow,
@@ -2773,6 +2847,7 @@ fn serve(
             .iter()
             .filter_map(|c| c.frames.as_ref().and_then(|f| f.wake_at()))
             .chain(crate::wl_frame::typing::wake_at())
+            .chain(crate::wl_frame::smart_paste::wake_at())
             .chain(crate::wl_frame::private_clipboard::wake_at())
             .min();
         for until in [paused, wake].into_iter().flatten() {
@@ -2839,6 +2914,9 @@ fn serve(
                         crate::wl_frame::typing::retract(seq);
                     }
                     Answer::Paste => crate::wl_frame::paste_now(),
+                    Answer::SmartResult(ticket, revision) => {
+                        crate::wl_frame::smart_paste::finish(ticket, revision)
+                    }
                     Answer::TypeControl(seq, request, fd) => match request {
                         crate::type_input::Request::Cancel { token } => {
                             crate::wl_frame::typing::cancel_token(token)
@@ -2902,6 +2980,17 @@ fn serve(
             }
         }
         crate::wl_frame::typing::tick(Instant::now());
+        crate::wl_frame::smart_paste::tick(Instant::now());
+        if let Some((ticket, revision)) = crate::wl_frame::smart_paste::request() {
+            if let Some(c) = &channel {
+                let mut message = vec![SMART_PASTE];
+                message.extend_from_slice(&ticket.to_le_bytes());
+                message.extend_from_slice(&revision.to_le_bytes());
+                if sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_err() {
+                    crate::wl_frame::smart_paste::finish(ticket, None);
+                }
+            }
+        }
         // The clicks of this round on the frames' ≡ and ⇄, to the
         // supervisor: a byte each on the channel (`sendmsg`, as a request
         // for an upstream). The program gone, the launch's menu is too: they
@@ -2973,6 +3062,7 @@ enum Answer {
     Question(Question),
     Retract(u64),
     Paste,
+    SmartResult(u64, Option<u64>),
     TypeControl(u64, crate::type_input::Request, Option<OwnedFd>),
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
@@ -2992,6 +3082,15 @@ fn answer(channel: &UnixStream) -> Answer {
         },
         Ok((1, _, _)) if byte[0] == REFUSED => Answer::Refused,
         Ok((1, _, _)) if byte[0] == PASTE => Answer::Paste,
+        Ok((1, _, _)) if byte[0] == SMART_RESULT => {
+            let mut body = [0u8; 17];
+            if !recv_exact(channel.as_raw_fd(), &mut body) {
+                return Answer::Closed;
+            }
+            let ticket = u64::from_le_bytes(body[1..9].try_into().unwrap());
+            let revision = u64::from_le_bytes(body[9..17].try_into().unwrap());
+            Answer::SmartResult(ticket, (body[0] == 1).then_some(revision))
+        }
         Ok((1, mut fds, _)) if byte[0] == TYPE_CONTROL => {
             let mut head = [0u8; 10];
             if !recv_exact(channel.as_raw_fd(), &mut head) {

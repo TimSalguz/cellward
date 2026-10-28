@@ -898,8 +898,13 @@ pub fn run(args: Args) -> u8 {
                 if sys::process_stamp(*pid).as_deref() != Some(stamp.as_str()) {
                     return Err("clipboard owner has changed".to_owned());
                 }
-                crate::clipboard_endpoint::bind(&runtime_dir, id, &args.clip_history, owner.as_fd())
-                    .map_err(|e| format!("private clipboard unavailable ({e})"))
+                crate::clipboard_endpoint::bind_capture(
+                    &runtime_dir,
+                    id,
+                    &args.clip_history,
+                    owner.as_fd(),
+                )
+                .map_err(|e| format!("private clipboard unavailable ({e})"))
             })
             .transpose()
         {
