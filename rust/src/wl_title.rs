@@ -199,6 +199,9 @@ pub enum Button {
     /// Fullscreen inside the window, on or off: the program is told it is
     /// fullscreen, the window stays where it is.
     InWindow,
+    ScreenshotWindow,
+    ScreenshotArea,
+    ScreenshotHover,
 }
 
 /// A colour of the look, made from the frame's own (the zone's, or the
@@ -276,7 +279,7 @@ pub struct ButtonLook {
 }
 
 /// The most buttons a row has: menu, network, both fullscreens, close.
-pub const MAX_BUTTONS: usize = 6;
+pub const MAX_BUTTONS: usize = 9;
 
 /// What an unused place of a [`Row`] holds.
 const NO_BUTTON: ButtonLook = button(Button::Close, ' ', Paint::Frame, Paint::Frame, Paint::Frame);
@@ -377,6 +380,19 @@ impl ButtonsLook {
             ],
             FullscreenButton::None => &[],
         };
+        self.with_added(add, fs)
+    }
+
+    pub fn with_screenshots(self) -> Self {
+        let add = [
+            (Button::ScreenshotWindow, '▧'),
+            (Button::ScreenshotArea, '⌗'),
+            (Button::ScreenshotHover, '◎'),
+        ];
+        self.with_added(&add, self.fullscreen)
+    }
+
+    fn with_added(self, add: &[(Button, char)], fs: FullscreenButton) -> Self {
         let Some(like) = self
             .order
             .iter()
@@ -901,7 +917,9 @@ impl Look {
         Self {
             interaction: frame.interaction,
             style: frame.style,
-            buttons: buttons_look(frame.buttons).with_fullscreen(frame.fullscreen_button),
+            buttons: buttons_look(frame.buttons)
+                .with_fullscreen(frame.fullscreen_button)
+                .with_screenshots(),
             radius: bottom.clamp(0, MAX_DRAWN_RADIUS),
             radius_top: if follows_title { bottom } else { top }.clamp(0, MAX_DRAWN_RADIUS),
             top_inset: if follows_title { HEIGHT } else { 0 },
@@ -2032,7 +2050,9 @@ impl Prepared {
                 for style in [Style::Full, Style::Soft, Style::Tag] {
                     let look = Look {
                         style,
-                        buttons: buttons_look(buttons).with_fullscreen(fullscreen),
+                        buttons: buttons_look(buttons)
+                            .with_fullscreen(fullscreen)
+                            .with_screenshots(),
                         radius: MAX_DRAWN_RADIUS,
                         radius_top: MAX_DRAWN_RADIUS,
                         ..LOOK
@@ -3061,7 +3081,13 @@ mod tests {
                 Button::Close
             ]
         );
-        assert_eq!(two.order.len(), MAX_BUTTONS);
+        assert_eq!(two.order.len(), 6);
+        let screenshots = two.with_screenshots();
+        assert_eq!(screenshots.order.len(), MAX_BUTTONS);
+        assert!(screenshots
+            .order
+            .iter()
+            .any(|b| b.button == Button::ScreenshotHover));
         assert_eq!(two.order[3].glyph, '▣');
         let mac = MACOS.with_fullscreen(FullscreenButton::Two);
         assert_eq!(
@@ -3367,7 +3393,9 @@ mod tests {
             Look::of(&frame),
             Look {
                 style: Style::Soft,
-                buttons: MACOS.with_fullscreen(crate::frame::FullscreenButton::One),
+                buttons: MACOS
+                    .with_fullscreen(crate::frame::FullscreenButton::One)
+                    .with_screenshots(),
                 radius: 12,
                 radius_top: 12,
                 ..LOOK

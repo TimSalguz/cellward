@@ -1,4 +1,40 @@
-# Screenshot ideas (requested, not implemented)
+# Private frame screenshots
+
+The frame provides three controls: `▧` (visible window), `⌗` (region) and
+`◎` (hover, freeze, then region).
+The host helper captures PNG pixels to memory before opening the editor. The
+editor selects only from that immutable image; Enter confirms the private copy,
+Escape cancels. All modes require confirmation in the trusted host editor:
+the confined proxy's request alone must never export screen pixels to an app.
+
+For hover capture only the originating window is shaded. Its shade has an empty
+input region, so real pointer motion reaches the application. The proxy consumes
+both halves of the first left click, removes the shade and waits for compositor
+processing before asking the host to capture. Escape on that window cancels;
+the mode also expires. It injects no input into another application.
+
+The selected PNG becomes a new ordinary copy in the originating launch's live
+private scope. Its existing history policy applies. No image is written to disk
+or to the desktop clipboard, and no screen-capture protocol is granted to the
+container. A dead source, failed capture, oversized image, editor cancellation
+or broker refusal must preserve the previous selection.
+
+The visible-window path currently has verified geometry only through Sway IPC.
+Other compositors use the region editor on a full frozen frame rather than
+guessing a window position. In particular, niri's native screenshot action is
+unsuitable for private copies because it also writes the desktop clipboard.
+The host tools manifest pins `grim`; older manifests without it fail closed.
+Niri's clipboard behaviour is documented in its
+[screenshot actions](https://github.com/niri-wm/niri/blob/main/docs/wiki/Configuration%3A-Key-Bindings.md#screenshot-screenshot-screen-screenshot-window).
+
+`tests/screenshot-smoke.py` exercises the real frame, capture helper, editor and
+broker on an isolated Sway. A synthetic Wayland subsurface tooltip disappears on
+pointer leave, so the test checks capture before editor focus, removal of the
+shade, consumption of both click halves, exact frozen-image crops, cancellation,
+source exit and an unchanged desktop clipboard. Window tests also cover batched
+pointer coordinates and confirmation with real focus after the guard interval.
+
+Original requirements and further refinements:
 
 - Freeze a captured frame **before** opening selection UI. Area/window selection
   must crop that immutable frame, not capture a later moment after interaction.

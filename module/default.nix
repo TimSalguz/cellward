@@ -316,6 +316,8 @@ let
       opener = "${vpn-zone-opener}";
       # Окно запуска: пикер спрашивает им вместо двух меню kdialog.
       window = "${vpn-zone-window}/bin/vpn-zone-window";
+      # Host-side capture only. No desktop clipboard writes or sandbox grants.
+      grim = "${pkgs.grim}/bin/grim";
       # Выбор программы для ссылки из зоны: окно бэкенда портала
       # (AppChooser), зовёт брокер (rust/src/links.rs).
       busctl = "${pkgs.systemd}/bin/busctl";

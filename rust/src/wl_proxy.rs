@@ -401,6 +401,9 @@ const TYPE_CONTROL: u8 = b'G';
 const CLIP: u8 = b'h';
 const SMART_PASTE: u8 = b'B';
 const SMART_RESULT: u8 = b'D';
+const SCREENSHOT_WINDOW: u8 = b'I';
+const SCREENSHOT_AREA: u8 = b'J';
+const SCREENSHOT_HOVER: u8 = b'K';
 /// A frame's line at most.
 const MAX_FRAME_ARG: usize = 512;
 
@@ -411,6 +414,9 @@ fn ask_byte(ask: Ask) -> u8 {
         Ask::Network => NETWORK,
         Ask::Restart => RESTART,
         Ask::Clip => CLIP,
+        Ask::ScreenshotWindow => SCREENSHOT_WINDOW,
+        Ask::ScreenshotArea => SCREENSHOT_AREA,
+        Ask::ScreenshotHover => SCREENSHOT_HOVER,
     }
 }
 
@@ -421,6 +427,9 @@ fn ask_of(byte: u8) -> Option<Ask> {
         NETWORK => Some(Ask::Network),
         RESTART => Some(Ask::Restart),
         CLIP => Some(Ask::Clip),
+        SCREENSHOT_WINDOW => Some(Ask::ScreenshotWindow),
+        SCREENSHOT_AREA => Some(Ask::ScreenshotArea),
+        SCREENSHOT_HOVER => Some(Ask::ScreenshotHover),
         _ => None,
     }
 }
@@ -476,6 +485,7 @@ pub struct Proxy {
     /// The `systemd-run` starting a window menu, while it runs.
     menu: MenuStart,
     paste_menu: MenuStart,
+    shots: MenuStart,
     /// The launch's focus policy (`crate::wl_focus`): whether the proxy's
     /// [`ATTENTION`] is to be answered, and how.
     focus: FocusPolicy,
@@ -1059,6 +1069,12 @@ pub(crate) fn start_private(
                     return 1;
                 }
             }
+            if drawing.is_some() {
+                match sealed_memfd(c"cw-hover-shade", &[0, 0, 0, 96], 4) {
+                    Ok(fd) => crate::wl_frame::screenshot::initialize(fd),
+                    Err(e) => eprintln!("wl-sandbox: hover shade unavailable: {e}"),
+                }
+            }
             child(listener, theirs, supervisor, drawing, opened, focus)
         }))
         .unwrap_or(101);
@@ -1080,6 +1096,7 @@ pub(crate) fn start_private(
         display,
         menu: MenuStart::default(),
         paste_menu: MenuStart::default(),
+        shots: MenuStart::default(),
         focus,
         attention: MenuStart::default(),
         asking: Asking::default(),
@@ -1363,6 +1380,7 @@ impl Proxy {
                     told.remove(&pid);
                     self.menu.reaped(pid);
                     self.paste_menu.reaped(pid);
+                    self.shots.reaped(pid);
                     self.attention.reaped(pid);
                     if pid == main {
                         *main_status = Some(status);
@@ -1715,16 +1733,28 @@ impl Proxy {
     /// writing the byte in a loop gets one `systemd-run`, not a flood of
     /// them (review 2026-09-27).
     fn ask(&self, ask: Ask) {
-        self.start_unit(&self.menu, "window menu", |tools, manifest| {
-            menu_argv(
-                &tools.systemd_run,
-                &tools.core,
-                manifest,
-                self.display.as_deref(),
-                std::process::id(),
-                ask,
-            )
-        });
+        let shot = matches!(
+            ask,
+            Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover
+        );
+        self.start_unit(
+            if shot { &self.shots } else { &self.menu },
+            if shot {
+                "screenshot preview"
+            } else {
+                "window menu"
+            },
+            |tools, manifest| {
+                menu_argv(
+                    &tools.systemd_run,
+                    &tools.core,
+                    manifest,
+                    self.display.as_deref(),
+                    std::process::id(),
+                    ask,
+                )
+            },
+        );
     }
 
     fn smart_paste(&self, ticket: u64, revision: u64) {
@@ -1904,6 +1934,18 @@ pub(crate) fn menu_argv(
         Ask::Network => verb.push("--network".into()),
         Ask::Restart => verb.push("--restart".into()),
         Ask::Clip => verb[0] = "clip-window".into(),
+        Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover => {
+            let mode = match ask {
+                Ask::ScreenshotWindow => "window",
+                Ask::ScreenshotArea => "area",
+                _ => "hover",
+            };
+            verb = vec![
+                "window-screenshot".into(),
+                pid.to_string().into(),
+                mode.into(),
+            ];
+        }
         Ask::Menu => {}
     }
     user_unit_argv(
@@ -1911,8 +1953,22 @@ pub(crate) fn menu_argv(
         core,
         manifest,
         display,
-        &format!("cellward-window-menu-{pid}"),
-        &["--property=KillMode=process"],
+        &if matches!(
+            ask,
+            Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover
+        ) {
+            format!("cellward-screenshot-{pid}")
+        } else {
+            format!("cellward-window-menu-{pid}")
+        },
+        if matches!(
+            ask,
+            Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover
+        ) {
+            &["--wait"]
+        } else {
+            &["--property=KillMode=process"]
+        },
         verb,
     )
 }
@@ -2418,6 +2474,7 @@ fn confine(
     let mut keep = vec![0, 1, 2, listener.as_raw_fd(), channel.as_raw_fd()];
     keep.extend(opened);
     keep.extend(crate::wl_frame::private_clipboard::keep_fds());
+    keep.extend(crate::wl_frame::screenshot::keep_fds());
     close_all_but(&mut keep)?;
     if let Some(fd) = opened {
         OPENED.store(fd, Ordering::SeqCst);
@@ -2821,6 +2878,7 @@ fn serve(
             return 0;
         }
         crate::wl_frame::private_clipboard::tick(Instant::now());
+        crate::wl_frame::screenshot::expire(Instant::now());
         conns.retain_mut(Conn::flush);
         let now = Instant::now();
         if paused.is_some_and(|until| now >= until) {
@@ -2848,6 +2906,7 @@ fn serve(
             .filter_map(|c| c.frames.as_ref().and_then(|f| f.wake_at()))
             .chain(crate::wl_frame::typing::wake_at())
             .chain(crate::wl_frame::smart_paste::wake_at())
+            .chain(crate::wl_frame::screenshot::wake_at())
             .chain(crate::wl_frame::private_clipboard::wake_at())
             .min();
         for until in [paused, wake].into_iter().flatten() {
@@ -2981,6 +3040,11 @@ fn serve(
         }
         crate::wl_frame::typing::tick(Instant::now());
         crate::wl_frame::smart_paste::tick(Instant::now());
+        for conn in &conns {
+            if let Some(frames) = &conn.frames {
+                crate::wl_frame::screenshot::tick(frames, Instant::now());
+            }
+        }
         if let Some((ticket, revision)) = crate::wl_frame::smart_paste::request() {
             if let Some(c) = &channel {
                 let mut message = vec![SMART_PASTE];
@@ -5303,9 +5367,9 @@ mod tests {
                 (buffer[0].args[2] as i32, buffer[0].args[3] as i32),
                 (crate::wl_title::device(width, 180), 30)
             );
-            // The row of buttons at 1.5: 72 × 20 logical, 108 × 30 pixels.
+            // Six buttons at 1.5: 144 × 20 logical, 216 × 30 pixels.
             assert!(
-                buffers.iter().any(|m| m.args[2..4] == [108, 30]),
+                buffers.iter().any(|m| m.args[2..4] == [216, 30]),
                 "{buffers:#?}"
             );
             let order: Vec<(String, u32, u32)> = got
@@ -5797,8 +5861,8 @@ mod tests {
         let on_title: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == title).collect();
         assert_eq!(on_title.len(), 2, "{subs:?}");
         let (buttons_sub, buttons) = (on_title[1].args[0], on_title[1].args[1]);
-        // Five of 24: menu, network, maximize, fullscreen, close.
-        assert_eq!(placed(&got, buttons_sub), Some(vec![300 - 120, 0]));
+        // Eight cells: menu, network, maximize, fullscreen, three captures, close.
+        assert_eq!(placed(&got, buttons_sub), Some(vec![300 - 192, 0]));
 
         request(&mut client, 6, 0, &10u32.to_ne_bytes());
         let pointer = log_until(&log, |m| m.iface == "wl_seat" && m.opcode == 0)
@@ -6018,7 +6082,7 @@ mod tests {
                 .iter()
                 .find(|m| m.iface == "wl_subsurface" && m.opcode == 1 && m.object == buttons_sub)
                 .map(|m| signed(&m.args));
-            assert_eq!(placed, Some(vec![300 - 72, 0]), "{got:#?}");
+            assert_eq!(placed, Some(vec![300 - 144, 0]), "{got:#?}");
             let view = find(&got, "wp_viewporter", 1)
                 .into_iter()
                 .find(|m| m.args[1] == buttons)
@@ -6028,7 +6092,7 @@ mod tests {
                 .iter()
                 .find(|m| m.iface == "wp_viewport" && m.opcode == 2 && m.object == view)
                 .map(|m| signed(&m.args));
-            assert_eq!(size, Some(vec![72, 20]));
+            assert_eq!(size, Some(vec![144, 20]));
             // The image attached to the row, as the offset of its buffer in
             // the pool: at rest first.
             let image = |got: &[Msg]| -> i32 {
@@ -6042,11 +6106,11 @@ mod tests {
                     .iter()
                     .find(|m| m.iface == "wl_shm_pool" && m.opcode == 0 && m.args[0] == attached)
                     .unwrap();
-                assert_eq!(made.args[2..4], [72, 20], "the row at scale 1");
+                assert_eq!(made.args[2..4], [144, 20], "the row at scale 1");
                 made.args[1] as i32
             };
             let rest = image(&got);
-            let bytes = 72 * 20 * 4;
+            let bytes = 144 * 20 * 4;
             // Every change shows at once: the strip desynchronized for it.
             let next = |log: &mpsc::Receiver<Msg>| {
                 let got = log_until(log, |m| {
@@ -6057,7 +6121,7 @@ mod tests {
 
             // Over close: the default cursor, close lit; down, pressed; up,
             // the program is told to close — and close is lit again.
-            send(&mut compositor, &[enter(40, buttons, 60, 10)]);
+            send(&mut compositor, &[enter(40, buttons, 132, 10)]);
             let got = log_until(&log, |m| m.iface == "wp_cursor_shape_device_v1");
             assert_eq!(got.last().unwrap().args, [40, 1], "the default cursor");
             assert!(
@@ -6065,11 +6129,11 @@ mod tests {
                     .any(|m| m.iface == "wp_cursor_shape_manager_v1" && m.args[1] == pointer),
                 "{got:#?}"
             );
-            assert_eq!(next(&log), 3, "close under the pointer");
+            assert_eq!(next(&log), 6, "close under the pointer");
             send(&mut compositor, &[button(41, true)]);
-            assert_eq!(next(&log), 6, "close pressed");
+            assert_eq!(next(&log), 12, "close pressed");
             send(&mut compositor, &[button(42, false)]);
-            assert_eq!(next(&log), 3, "close let go");
+            assert_eq!(next(&log), 6, "close let go");
             events_until(&mut client, |o, op, _| o == 9 && op == 1);
 
             // Over the menu: lit; clicked, its dropdown (step 3c) — and its
@@ -6087,7 +6151,7 @@ mod tests {
             send(&mut compositor, &[motion(10, 10)]);
             assert_eq!(next(&log), 1, "the menu under the pointer");
             send(&mut compositor, &[button(43, true), button(44, false)]);
-            assert_eq!((next(&log), next(&log)), (4, 1), "pressed, let go");
+            assert_eq!((next(&log), next(&log)), (7, 1), "pressed, let go");
             let got = log_until(&log, |m| m.iface == "xdg_surface" && m.opcode == 2);
             let popup = got
                 .iter()
@@ -6111,7 +6175,7 @@ mod tests {
             send(&mut compositor, &[motion(30, 10)]);
             assert_eq!(next(&log), 2, "the network under the pointer");
             send(&mut compositor, &[button(45, true), button(46, false)]);
-            assert_eq!((next(&log), next(&log)), (5, 2));
+            assert_eq!((next(&log), next(&log)), (8, 2));
             assert_eq!(asked(), NETWORK);
             // Down on the menu, up on close: neither acts, and close under
             // the pointer is not pressed. The next ask is the network's.
@@ -6120,7 +6184,7 @@ mod tests {
                 &[
                     motion(10, 10),
                     button(47, true),
-                    motion(60, 10),
+                    motion(132, 10),
                     button(48, false),
                     motion(30, 10),
                     button(49, true),
@@ -6128,7 +6192,7 @@ mod tests {
                 ],
             );
             let seen: Vec<i32> = (0..6).map(|_| next(&log)).collect();
-            assert_eq!(seen, [1, 4, 3, 2, 5, 2]);
+            assert_eq!(seen, [1, 7, 6, 2, 8, 2]);
             assert_eq!(asked(), NETWORK);
             // Off the row: nothing lit.
             send(&mut compositor, &[leave(51, buttons)]);
@@ -6188,8 +6252,9 @@ mod tests {
     #[test]
     fn the_asks_have_bytes_of_their_own() {
         // Distinct from every other byte of the channel, either way.
-        let others = [READY, CONNECT, UPSTREAM, UPSTREAM_BARE, REFUSED];
-        for ask in [Ask::Menu, Ask::Network, Ask::Restart, Ask::Clip] {
+        let others = [READY, CONNECT, UPSTREAM, UPSTREAM_BARE, REFUSED, SMART_PASTE, SMART_RESULT, TYPE_CONTROL];
+        for ask in [Ask::Menu, Ask::Network, Ask::Restart, Ask::Clip,
+            Ask::ScreenshotWindow, Ask::ScreenshotArea, Ask::ScreenshotHover] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");
             assert_eq!(ask_of(byte), Some(ask));
@@ -6296,6 +6361,13 @@ mod tests {
         );
         let clip = argv(None, Ask::Clip);
         assert_eq!(clip[clip.len() - 3..], ["clip-window", "--pid", "4242"]);
+        for (ask, mode) in [(Ask::ScreenshotWindow, "window"), (Ask::ScreenshotArea, "area"), (Ask::ScreenshotHover, "hover")] {
+            let shot = argv(None, ask);
+            assert_eq!(shot[shot.len() - 3..], ["window-screenshot", "4242", mode]);
+            assert!(shot.iter().any(|a| a == "--wait"));
+            assert!(shot.iter().any(|a| a == "--unit=cellward-screenshot-4242"));
+            assert!(!shot.iter().any(|a| a == "--property=KillMode=process"));
+        }
         let network = argv(None, Ask::Network);
         assert!(!network.iter().any(|a| a.contains("WAYLAND_DISPLAY")));
         assert_eq!(network.last().map(String::as_str), Some("--network"));
@@ -6813,7 +6885,7 @@ mod tests {
                     20 - crate::wl_frame::HOVER_EDGE
                 )
             );
-            assert!((72 + 16 + 20..300).contains(&tag_w), "{tag_w}");
+            assert!((144 + 16 + 20..300).contains(&tag_w), "{tag_w}");
             // The tag's image, and its buttons on it.
             let on_row: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == row).collect();
             assert_eq!(on_row.len(), 2, "the tag and its buttons: {subs:?}");
@@ -6823,7 +6895,7 @@ mod tests {
             assert_eq!(image[1..], [tag_w as u32, 20, 4 * tag_w as u32, 0]);
             let buttons_sub = on_row[1].args[0];
             let at = placed(&got, buttons_sub).expect("the buttons not placed");
-            assert_eq!(at[0] + 72 + crate::wl_title::TAG_ROUND, tag_w);
+            assert_eq!(at[0] + 144 + crate::wl_title::TAG_ROUND, tag_w);
         } else {
             // Without a font there is no tag to draw: the row of the colour,
             // taking the pointer.

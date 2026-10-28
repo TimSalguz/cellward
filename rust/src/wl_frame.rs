@@ -221,6 +221,7 @@ use wl_proxy::protocols::wp_primary_selection_unstable_v1::zwp_primary_selection
 use wl_proxy::protocols::wayland::wl_keyboard::{
     WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState, WlKeyboardKeymapFormat,
 };
+pub(crate) mod screenshot;
 pub(crate) mod smart_paste;
 pub(crate) mod typing;
 use wl_proxy::protocols::wayland::wl_output::{WlOutput, WlOutputTransform};
@@ -851,6 +852,7 @@ fn surface_size(s: &Committed) -> Option<(i32, i32)> {
 /// The frame of one connection: what the proxy bound for it upstream, and
 /// what it draws with. Every handler below holds it.
 pub(crate) struct Frames {
+    display: Weak<wl_proxy::protocols::wayland::wl_display::WlDisplay>,
     /// The border's width: the launch's, changed on the fly
     /// ([`Frames::set_width`]).
     width: Cell<i32>,
@@ -927,6 +929,9 @@ pub(crate) enum Ask {
     /// The clipboard history's window for this launch (`clip-window`): a
     /// row of the ≡'s dropdown.
     Clip,
+    ScreenshotWindow,
+    ScreenshotArea,
+    ScreenshotHover,
 }
 
 /// Asks the proxy's loop has not sent yet. A few at most: a click is one,
@@ -1074,6 +1079,7 @@ impl Frames {
         questions: Rc<Questions>,
     ) -> Rc<Self> {
         let frames = Rc::new(Self {
+            display: Rc::downgrade(client.display()),
             width: Cell::new(border.width),
             full: Cell::new(border.fullscreen),
             double_click: Cell::new(border.double_click),
@@ -3290,6 +3296,9 @@ impl Window {
             Button::Network => f.asks.push(Ask::Network),
             Button::Fullscreen => self.toggle_fullscreen(),
             Button::InWindow => self.toggle_in_window(f),
+            Button::ScreenshotWindow => f.asks.push(Ask::ScreenshotWindow),
+            Button::ScreenshotArea => f.asks.push(Ask::ScreenshotArea),
+            Button::ScreenshotHover => screenshot::arm(self.root.clone()),
         }
     }
 
@@ -4650,6 +4659,14 @@ impl WlKeyboardHandler for Keyboard {
             if !pressed {
                 self.prompt_keys.swap_remove(at);
             }
+            return;
+        }
+        if pressed
+            && key == 1
+            && self.typing.borrow().on
+            && screenshot::cancel(&self.typing.borrow().surface)
+        {
+            self.prompt_keys.push(key);
             return;
         }
         // Use compositor focus, never the application's always-focused state.
@@ -6337,6 +6354,13 @@ impl WlPointerHandler for Pointer {
         button: u32,
         state: WlPointerButtonState,
     ) {
+        if screenshot::click(
+            &self.typing.borrow().surface,
+            button,
+            state == WlPointerButtonState::PRESSED,
+        ) {
+            return;
+        }
         // A compositor should dismiss a grabbed popup itself. If it sends
         // the outside click to a frame/program surface instead, close the
         // menu and swallow BOTH halves: never activate the app underneath.

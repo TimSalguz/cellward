@@ -50,6 +50,7 @@ mod login;
 mod metro;
 mod panel;
 mod pattern;
+mod screenshot;
 mod syscolors;
 mod thumb;
 #[path = "../../shared/type_input.rs"]
@@ -2001,6 +2002,12 @@ fn main() -> iced::Result {
     if args.first().map(String::as_str) == Some("clip") {
         return clip::run(&args[1..]).map_err(|e| {
             eprintln!("vpn-zone-window clip: {e}");
+            std::process::exit(EXIT_NOT_SHOWN)
+        });
+    }
+    if args.first().map(String::as_str) == Some("screenshot") {
+        return screenshot::run(args.get(1).map(String::as_str) == Some("--whole")).map_err(|e| {
+            eprintln!("vpn-zone-window screenshot: {e}");
             std::process::exit(EXIT_NOT_SHOWN)
         });
     }

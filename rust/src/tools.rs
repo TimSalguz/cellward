@@ -107,6 +107,8 @@ pub struct Tools {
     pub secret_tool: PathBuf,
     /// `nft`: the counters of a container's rules, read (`crate::scheme`).
     pub nft: PathBuf,
+    /// Optional for old manifests: private screenshot capture, never PATH lookup.
+    pub grim: Option<PathBuf>,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
@@ -230,6 +232,7 @@ impl Tools {
             busctl: take("busctl")?,
             secret_tool: take("secret-tool")?,
             nft: take("nft")?,
+            grim: entries.get("grim").map(PathBuf::from),
         })
     }
 

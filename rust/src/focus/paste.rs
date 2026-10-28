@@ -10,13 +10,13 @@ fn label(key: Key) -> &'static str {
 }
 
 #[derive(Clone, Copy)]
-struct Target {
-    compositor: Compositor,
-    id: i64,
-    pid: i32,
+pub(super) struct Target {
+    pub(super) compositor: Compositor,
+    pub(super) id: i64,
+    pub(super) pid: i32,
 }
 
-fn sway_focused(value: &Value) -> Option<&Value> {
+pub(super) fn sway_focused(value: &Value) -> Option<&Value> {
     if value.get("focused").and_then(Value::as_bool) == Some(true)
         && value.get("pid").and_then(Value::as_i64).is_some()
     {
@@ -30,7 +30,7 @@ fn sway_focused(value: &Value) -> Option<&Value> {
 }
 
 impl Target {
-    fn focused(pid: i32) -> Option<Self> {
+    pub(super) fn focused(pid: i32) -> Option<Self> {
         let compositor = compositor()?;
         let value = match compositor {
             Compositor::Niri => run_json("niri", &["msg", "--json", "focused-window"]).ok()?,
@@ -49,7 +49,7 @@ impl Target {
             pid,
         })
     }
-    fn restore(self) -> bool {
+    pub(super) fn restore(self) -> bool {
         // Verify the original id still belongs to the same supervisor. Never
         // fall back to its newest window or to another application.
         let (program, args) = match self.compositor {

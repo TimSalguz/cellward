@@ -78,6 +78,14 @@ pub enum Key {
     PasteSecretConfirm,
     PasteUnavailable,
     PasteTransferred,
+    ScreenshotSelect,
+    ScreenshotCopy,
+    ScreenshotFrozen,
+    ScreenshotFailed,
+    ScreenshotCopied,
+    ScreenshotWindow,
+    ScreenshotArea,
+    ScreenshotHover,
 }
 
 /// English is the source text; the Russian arm is the complete translation
@@ -86,6 +94,22 @@ pub enum Key {
 pub fn text(language: Language, key: Key) -> &'static str {
     use Key::*;
     match (language, key) {
+        (Language::English, ScreenshotSelect) => "Drag to select a region · Enter copies · Esc cancels",
+        (Language::Russian, ScreenshotSelect) => "Выделите область · Enter копирует · Esc отменяет",
+        (Language::English, ScreenshotCopy) => "Copy region  Enter",
+        (Language::Russian, ScreenshotCopy) => "Скопировать область  Enter",
+        (Language::English, ScreenshotFrozen) => "Screenshot · frozen frame",
+        (Language::Russian, ScreenshotFrozen) => "Скриншот · зафиксированный кадр",
+        (Language::English, ScreenshotFailed) => "Screenshot unavailable. The clipboard was not changed.",
+        (Language::Russian, ScreenshotFailed) => "Скриншот недоступен. Буфер не изменён.",
+        (Language::English, ScreenshotCopied) => "Screenshot copied to container",
+        (Language::Russian, ScreenshotCopied) => "Скриншот скопирован в контейнер",
+        (Language::English, ScreenshotWindow) => "Capture window",
+        (Language::Russian, ScreenshotWindow) => "Скриншот окна",
+        (Language::English, ScreenshotArea) => "Capture region",
+        (Language::Russian, ScreenshotArea) => "Скриншот области",
+        (Language::English, ScreenshotHover) => "Hover, click to freeze, then select region",
+        (Language::Russian, ScreenshotHover) => "Наведение, клик фиксирует кадр, затем выделение области",
         (Language::English, PastePreview) => "Clipboard transfer",
         (Language::Russian, PastePreview) => "Перенос из буфера обмена",
         (Language::English, PasteConfirm) => "Transfer and paste  Enter",
@@ -235,6 +259,14 @@ mod tests {
             PasteSecretConfirm,
             PasteUnavailable,
             PasteTransferred,
+            ScreenshotSelect,
+            ScreenshotCopy,
+            ScreenshotFrozen,
+            ScreenshotFailed,
+            ScreenshotCopied,
+            ScreenshotWindow,
+            ScreenshotArea,
+            ScreenshotHover,
         ] {
             assert!(!text(Language::English, key).is_empty());
             assert!(!text(Language::Russian, key).is_empty());
