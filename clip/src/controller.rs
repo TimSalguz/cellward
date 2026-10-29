@@ -25,6 +25,17 @@ struct Scope {
     revisions: [u64; 2],
     watchers: Vec<(RawFd, OwnedFd)>,
 }
+
+/// The built-in real home has a holder per network, but one clipboard identity.
+/// Scope ids arrive only on the authenticated host controller, never from an
+/// application's scoped data socket. History labels are not identities.
+fn same_clipboard_container(source: &str, target: &str) -> bool {
+    source == target
+        || [source, target].iter().all(|id| {
+            id.strip_prefix("main:")
+                .is_some_and(|network| !network.is_empty())
+        })
+}
 struct Pending {
     stream: UnixStream,
     header: [u8; 4],
@@ -378,6 +389,25 @@ impl Pending {
                             .ok_or_else(endpoint::invalid)?;
                         if !endpoint::alive(from.owner.as_fd()) {
                             return Err(endpoint::invalid());
+                        }
+                        if same_clipboard_container(source, target) {
+                            // This is a paste within the real home, not a
+                            // cross-container grant. Preserve the independent
+                            // holder lifetimes and the broker's epoch checks.
+                            let revision = controller
+                                .transport
+                                .commit_paste(
+                                    to.instance,
+                                    candidate.epoch,
+                                    candidate.revision,
+                                    candidate.target_revision,
+                                    true,
+                                    Instant::now(),
+                                )
+                                .map_err(|_| endpoint::invalid())?;
+                            answer.push(0);
+                            answer.extend_from_slice(&revision.wire().to_le_bytes());
+                            return Ok(answer);
                         }
                         answer.push(2);
                         for n in [
@@ -856,6 +886,69 @@ mod tests {
         };
         drop(source);
         assert!(endpoint::commit_paste(&h.runtime, "target", &preview, false).is_err());
+    }
+
+    #[test]
+    fn real_home_pastes_across_networks_without_a_transfer_prompt() {
+        let h = Harness::new();
+        let source = Lease::new();
+        let target = Lease::new();
+        let other = Lease::new();
+        let mut client = Client::new(
+            endpoint::bind_capture(&h.runtime, "main:vpn", "main", source.fd.as_fd())
+                .unwrap()
+                .data,
+        )
+        .unwrap();
+        let _target = endpoint::bind(&h.runtime, "main:host", "main", target.fd.as_fd()).unwrap();
+        // Equal history labels must not grant a separate container access.
+        let _other = endpoint::bind(&h.runtime, "separate", "main", other.fd.as_fd()).unwrap();
+        let Reply::Begun(epoch) =
+            exchange(&mut client, Request::BeginCapture { user_copy: true }).unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(
+            endpoint::prepare_paste(&h.runtime, "main:host", 0).unwrap(),
+            endpoint::PastePlan::Pending(_)
+        ));
+        exchange(
+            &mut client,
+            Request::FinishCapture {
+                epoch,
+                parts: &[("text/plain", b"same real home")],
+            },
+        )
+        .unwrap();
+        let endpoint::PastePlan::Current(revision) =
+            endpoint::prepare_paste(&h.runtime, "main:host", 0).unwrap()
+        else {
+            panic!("a network change within the real home asked for confirmation")
+        };
+        assert!(revision > 0);
+        assert!(matches!(
+            endpoint::prepare_paste(&h.runtime, "separate", 0).unwrap(),
+            endpoint::PastePlan::Transfer(_)
+        ));
+        drop(source);
+        assert!(matches!(
+            endpoint::prepare_paste(&h.runtime, "main:host", revision).unwrap(),
+            endpoint::PastePlan::Current(r) if r == revision
+        ));
+    }
+
+    #[test]
+    fn clipboard_identity_never_uses_similar_container_names() {
+        assert!(same_clipboard_container("work", "work"));
+        assert!(same_clipboard_container("main:vpn", "main:host"));
+        for (source, target) in [
+            ("main:", "main:host"),
+            ("main", "main:host"),
+            ("main-work", "main:host"),
+            ("work:vpn", "work:host"),
+        ] {
+            assert!(!same_clipboard_container(source, target));
+        }
     }
 
     #[test]

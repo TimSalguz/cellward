@@ -9,6 +9,14 @@ its selections; stopping its holder clears both.
 
 ## Paste between private containers
 
+Pasting within one container does not ask for confirmation. The built-in real
+home also counts as one container across its different network zones. A paste
+there automatically imports the latest real-home copy into the destination
+holder and replays the shortcut, without a preview or an extra secret prompt.
+Holder lifetimes remain separate; stopping one does not erase a snapshot already
+pasted into another. This equivalence uses authenticated real-home scope ids,
+never equal history labels. Separate containers still require the preview below.
+
 Copy normally in the source, focus the destination and press Ctrl+V (or
 Ctrl+Shift+V / Shift+Insert). If the latest private copy belongs to another
 instance, a trusted host window shows the source, destination and a bounded

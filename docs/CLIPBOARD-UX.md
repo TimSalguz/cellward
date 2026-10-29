@@ -14,6 +14,8 @@ destination, preview, Enter. Confirmation completes insertion into the original
 target window. History tabs, Copy to and a second Copy action are unnecessary
 for this path. Repeated pastes of that clip within the destination are direct.
 Escape cancels the transfer.
+The real home across all network zones also counts as one container: pastes
+between its network holders require neither a preview nor Enter.
 
 Further interface work, not implemented yet:
 
