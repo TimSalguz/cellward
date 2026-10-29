@@ -7,7 +7,40 @@ launch warning fix. Installing the branch and checking the user's actual
 Firefox/Ayugram sessions remain separate steps; isolated tests do not establish
 that the installed desktop is fixed.
 
-## Recommended order
+## Primary workflow: paste into the application
+
+The agreed cross-container path is ordinary Ctrl+C in the source, Ctrl+V in the
+destination, preview, Enter. Confirmation completes insertion into the original
+target window. History tabs, Copy to and a second Copy action are unnecessary
+for this path. Repeated pastes of that clip within the destination are direct.
+Escape cancels the transfer.
+
+Further interface work, not implemented yet:
+
+- Show an explicit source → destination and text or a large image. For older
+  clips, open history directly from this window with the destination already
+  selected; highlighting a row does not transfer data, Enter confirms it.
+- Show a short waiting state while the latest copy is being read. Explain
+  failures by phase: capture, transfer or focus restoration. Never silently
+  replace a failed new copy with an older successful one.
+- History is an additional path for older clips, not a required intermediary.
+  An open history updates automatically, preserving search and selected row.
+- Offer explicit confirmed export for unconfined desktop applications. An
+  ordinary in-container Ctrl+V must not publish private content to the host.
+
+Do not blame CopyQ/Noctalia without evidence. In the new private path, container
+copies are not published to the desktop selection, so a host manager is not a
+transfer intermediary. That does not establish the behaviour of older proxies,
+already-running applications or the X11 path. Compare those paths with and
+without a manager in a separately agreed session.
+
+Short diagnostic messages in the branch distinguish preparation failure,
+capture wait timeout, rejected commit, lost target, changed selection and loss
+of the metadata channel. Messages occur on failed attempt completion or channel
+disconnection, not every poll. No text, URLs, container labels or pixels are
+logged.
+
+## Work queue
 
 | Priority | Work | Acceptance |
 | --- | --- | --- |

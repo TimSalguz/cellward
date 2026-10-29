@@ -123,18 +123,20 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
         return 2;
     };
     let held = crate::sys::pidfd_open(pid);
-    let attempt = (|| -> Result<Option<u64>, ()> {
+    // Static reason codes only: never include clipboard data or peer labels.
+    let attempt = (|| -> Result<Option<u64>, &'static str> {
         use std::os::fd::AsFd;
-        let owner = held.as_ref().ok_or(())?;
-        let scope = private_clipboard_scope(tools, pid).ok_or(())?;
-        let target = Target::focused(pid).ok_or(())?;
+        let owner = held.as_ref().ok_or("owner-unavailable")?;
+        let scope = private_clipboard_scope(tools, pid).ok_or("scope-unavailable")?;
+        let target = Target::focused(pid).ok_or("target-not-focused")?;
         let runtime = crate::broker::runtime_dir();
         let until = Instant::now() + Duration::from_secs(10);
         let plan = loop {
-            let plan = endpoint::prepare_paste(&runtime, &scope, expected).map_err(|_| ())?;
+            let plan = endpoint::prepare_paste(&runtime, &scope, expected)
+                .map_err(|_| "prepare-failed")?;
             if matches!(plan, PastePlan::Pending(_)) {
                 if Instant::now() >= until {
-                    return Err(());
+                    return Err("capture-wait-timeout");
                 }
                 std::thread::sleep(Duration::from_millis(25));
             } else {
@@ -143,7 +145,7 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
         };
         match plan {
             PastePlan::Current(revision) => Ok(Some(revision)),
-            PastePlan::Pending(_) => Err(()),
+            PastePlan::Pending(_) => Err("capture-pending"),
             PastePlan::Transfer(preview) => {
                 let direction = format!("{} → {}", preview.source_history, preview.target_history);
                 let body = format!(
@@ -180,12 +182,12 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
                     }
                 }
                 if !endpoint::alive(owner.as_fd()) {
-                    return Err(());
+                    return Err("owner-ended");
                 }
                 let revision = endpoint::commit_paste(&runtime, &scope, &preview, preview.secret)
-                    .map_err(|_| ())?;
+                    .map_err(|_| "commit-rejected")?;
                 if !target.restore() {
-                    return Err(());
+                    return Err("target-restore-failed");
                 }
                 crate::dialog::notify(
                     &tools.notify_send,
@@ -200,8 +202,8 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
     })();
     let revision = match attempt {
         Ok(revision) => revision,
-        Err(()) => {
-            eprintln!("smart-paste: clipboard transfer or original target is unavailable");
+        Err(reason) => {
+            eprintln!("smart-paste: unavailable ({reason})");
             crate::dialog::notify(
                 &tools.notify_send,
                 None,

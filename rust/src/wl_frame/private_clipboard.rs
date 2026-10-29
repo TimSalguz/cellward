@@ -430,6 +430,7 @@ impl State {
                 }
                 Ok(None) => {}
                 Err(()) => {
+                    eprintln!("wl-sandbox: private clipboard metadata unavailable");
                     self.metadata = None;
                     self.epochs = [None; 2];
                 }

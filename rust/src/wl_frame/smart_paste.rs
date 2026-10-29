@@ -82,6 +82,7 @@ pub(crate) fn tick(now: Instant) {
                 .upgrade()
                 .is_none_or(|surface| surface.state().is_destroyed())
         {
+            eprintln!("smart-paste: cancelled (expired-or-target-ended)");
             s.pending = None;
             return;
         }
@@ -96,6 +97,7 @@ pub(crate) fn tick(now: Instant) {
         if current != revision {
             // A new copy after confirmation must never be substituted.
             if current > revision {
+                eprintln!("smart-paste: cancelled (selection-changed)");
                 drop(state);
                 s.pending = None;
             }
