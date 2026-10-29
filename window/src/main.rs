@@ -45,6 +45,7 @@ mod clip_type;
 mod clipd;
 mod days;
 #[path = "../../shared/i18n.rs"]
+#[allow(dead_code)] // The shared catalogue also contains core-only labels.
 mod i18n;
 mod login;
 mod metro;

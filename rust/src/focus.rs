@@ -1864,9 +1864,11 @@ fn switch_network(tools: &Tools, label: &str, launch: Option<&Launch>) -> Option
             ));
             Some(1)
         } else {
-            let detail = (!said.is_empty())
-                .then(|| format!(" {said}"))
-                .unwrap_or_default();
+            let detail = if !said.is_empty() {
+                format!(" {said}")
+            } else {
+                Default::default()
+            };
             let state = if restart {
                 format!("Смена сети контейнера «{container}» на «{to}» и перезапуск запрошены.")
             } else {

@@ -143,7 +143,7 @@ impl Route {
         let parts: Vec<&str> = line.split_whitespace().collect();
         let borrowed = parts.len() == 3 && parts[1] == "=>";
         if parts.is_empty()
-            || parts.len() % 2 == 0
+            || parts.len().is_multiple_of(2)
             || (!borrowed
                 && parts
                     .iter()

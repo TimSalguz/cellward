@@ -1779,7 +1779,7 @@ fn launch_files(tools: &Tools, key: &str, tag: &str) -> window::FileAccess {
         }
         Err(why) => paths.push(("Политика папок не прочитана".into(), why)),
     }
-    let persistent = tag == ""
+    let persistent = tag.is_empty()
         || tag == "__ownsb__"
         || tag == "__new__"
         || tag == "__newsb__"
@@ -1801,7 +1801,7 @@ fn launch_files(tools: &Tools, key: &str, tag: &str) -> window::FileAccess {
                 })
         },
         editable: persistent
-            && tag != ""
+            && !tag.is_empty()
             && !legacy.home
             && loaded
                 .as_ref()
@@ -2778,6 +2778,7 @@ const FROM_ZONE_GUARD: std::time::Duration = crate::dialog::TOO_FAST;
 /// answer it. A locked zone is offered only itself. What the window shows is
 /// [`zone_request`]; what it may answer is a container that exists, with no
 /// pin.
+#[allow(clippy::too_many_arguments)]
 fn pick_for_zone(
     tools: &Tools,
     key: &str,

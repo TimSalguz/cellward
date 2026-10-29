@@ -193,6 +193,7 @@ pub(crate) fn select(seq: u64, token: u64, white: OwnedFd, frames: &[Rc<Frames>]
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn choose(
     window: &Rc<RefCell<Window>>,
     f: &Rc<Frames>,

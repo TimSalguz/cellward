@@ -226,13 +226,15 @@ pub fn plan(previous: Option<GuestPlan>, v6: bool) -> io::Result<GuestPlan> {
     let (four, six) = random.split_at(TRIES * 2);
     let a4 = pick_a4(
         previous.map(|p| p.a4),
-        four.chunks_exact(2)
+        four.as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_be_bytes([c[0], c[1]])),
     );
     let a6 = v6.then(|| {
         pick_a6(
             previous.and_then(|p| p.a6),
-            six.chunks_exact(8).map(|c| {
+            six.as_chunks::<8>().0.iter().map(|c| {
                 let mut b = [0u8; 8];
                 b.copy_from_slice(c);
                 u64::from_be_bytes(b)
@@ -1383,7 +1385,7 @@ pub fn owner_socket(
     }
     let mut byte = [0];
     match crate::sys::recv_into_with_fds(mine.as_raw_fd(), &mut byte, 1) {
-        Ok((1, mut fds, false)) if byte == [b'q'] && fds.len() == 1 => {
+        Ok((1, mut fds, false)) if byte == *b"q" && fds.len() == 1 => {
             crate::netqueue::socket::Socket::from_owned(fds.pop().unwrap())
                 .map_err(|e| e.to_string())
         }

@@ -1468,6 +1468,7 @@ fn host_command(cmd: &[OsString]) -> Result<Vec<OsString>, String> {
 /// The launch window for a zone's `cmd` ([`host_command`]'s), and its answer
 /// checked: the arguments of `run`, and whether the offered rule was
 /// ticked. The caller holds [`ASKING`] and has begun asking.
+#[allow(clippy::too_many_arguments)]
 fn ask_window(
     zone: &str,
     locked: bool,

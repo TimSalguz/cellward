@@ -976,7 +976,7 @@ pub fn fd_array(msg: &[u8], h: &Header, max: usize) -> Result<Vec<u32>> {
         little: h.little,
     };
     let bytes = r.u32()? as usize;
-    if bytes % 4 != 0 || bytes / 4 > max || r.pos.checked_add(bytes) != Some(msg.len()) {
+    if !bytes.is_multiple_of(4) || bytes / 4 > max || r.pos.checked_add(bytes) != Some(msg.len()) {
         return Err(WireError("invalid or excessive FD array"));
     }
     (0..bytes / 4).map(|_| r.u32()).collect()

@@ -853,6 +853,7 @@ let
     "defaults.permissions.nixDaemon"
     "defaults.permissions.hostFilesWritable"
     "defaults.permissions.network"
+    "defaults.permissions.strictNetwork"
     "launcher.mode"
     "interception.userEntries"
     "autostart.unassigned"

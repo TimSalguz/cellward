@@ -134,6 +134,7 @@ impl Client {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn call(
         &mut self,
         destination: &str,

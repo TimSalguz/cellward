@@ -3607,7 +3607,7 @@ mod tests {
         create(&tools, "work", Home::Private).unwrap();
         let path = policy_dir(&tools, "work").join("perms");
         fs::write(&path, "x11\ndownloads\n").unwrap();
-        assert_eq!(load(&tools, "work").unwrap().x11.unwrap().value, true);
+        assert!(load(&tools, "work").unwrap().x11.unwrap().value);
         set_x11(&tools, "work", Some(false)).unwrap();
         assert!(!load(&tools, "work").unwrap().x11.unwrap().value);
         let old = crate::fs_sandbox::Perms::parse(&fs::read_to_string(path).unwrap());

@@ -57,8 +57,8 @@ pub(super) fn cancel(surface: &Weak<WlSurface>) -> bool {
         if !same {
             return false;
         }
-        let was = s.active.take().is_some() | s.requested.take().is_some();
-        was
+
+        s.active.take().is_some() | s.requested.take().is_some()
     })
 }
 pub(crate) fn wake_at() -> Option<Instant> {

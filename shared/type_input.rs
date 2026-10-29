@@ -233,10 +233,9 @@ fn us_key(c: char) -> Option<Stroke> {
             ];
             if let Some(i) = plain.chars().position(|s| s == c) {
                 (codes[i], false)
-            } else if let Some(i) = upper.chars().position(|s| s == c) {
-                (codes[i], true)
             } else {
-                return None;
+                let i = upper.chars().position(|s| s == c)?;
+                (codes[i], true)
             }
         }
     };

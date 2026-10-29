@@ -801,7 +801,7 @@ mod tests {
         asker.tx.send((0, question_a, Answer::Now)).unwrap();
         assert_eq!(asker.answered(), [(first.ticket, Verdict::Allow)]);
         assert!(asker.waiting.contains_key(&question_b));
-        assert!(asker.session.get(&question_b).is_none());
+        assert!(!asker.session.contains_key(&question_b));
         session.decide(first.ticket, true).unwrap();
         assert!(session.decide(second.ticket, false).is_ok());
     }

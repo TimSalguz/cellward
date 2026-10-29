@@ -1177,6 +1177,7 @@ fn ns_id(fd: &OwnedFd) -> Option<(u64, u64)> {
 /// `CAP_SYS_PTRACE` may not —, checks that the paths lead to the very same
 /// namespaces before pasta starts. And pasta, running as the user, could
 /// enter nothing but the user's own namespaces in any case.
+#[allow(clippy::too_many_arguments)]
 fn spawn_uplink_pasta(
     sysnet: &File,
     userns: &OwnedFd,
@@ -2985,8 +2986,8 @@ mod tests {
             decode_user_uplink(user.strip_prefix(USER_UPLINK_MAGIC).unwrap()),
             Ok((123, 456, crate::zone::PASTA_IFACE.to_owned()))
         );
-        assert!(decode_user_uplink(b"123\0456\0eth0\0").is_err());
-        assert!(decode_user_uplink(b"123\0123\0hostif\0").is_err());
+        assert!(decode_user_uplink(b"123\x00456\0eth0\0").is_err());
+        assert!(decode_user_uplink(b"123\x00123\0hostif\0").is_err());
     }
 
     #[test]

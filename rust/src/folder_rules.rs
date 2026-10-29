@@ -378,7 +378,13 @@ mod tests {
             path: alias.clone(),
             mode: Mode::ReadOnly,
         };
-        assert!(prepare(&home, &t.0.join("data"), &[rule.clone()], &[state.clone()]).is_ok());
+        assert!(prepare(
+            &home,
+            &t.0.join("data"),
+            std::slice::from_ref(&rule),
+            std::slice::from_ref(&state)
+        )
+        .is_ok());
         fs::remove_file(&alias).unwrap();
         symlink(&state, &alias).unwrap();
         assert!(prepare(&home, &t.0.join("data"), &[rule], &[state]).is_err());
@@ -532,15 +538,11 @@ pub fn home_layer_mounted(home: &Path, data: &Path) -> bool {
     let Ok(info) = fs::read_to_string("/proc/self/mountinfo") else {
         return false;
     };
-    let Some(active) = info
-        .lines()
-        .filter(|l| {
-            l.split_whitespace()
-                .nth(4)
-                .is_some_and(|p| homes.iter().any(|h| p == h))
-        })
-        .last()
-    else {
+    let Some(active) = info.lines().rfind(|l| {
+        l.split_whitespace()
+            .nth(4)
+            .is_some_and(|p| homes.iter().any(|h| p == h))
+    }) else {
         return false;
     };
     active.split_once(" - ").is_some_and(|(_, tail)| {

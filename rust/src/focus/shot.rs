@@ -64,7 +64,7 @@ fn image_command(
             .take((LIMIT + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| ())
-            .and_then(|_| {
+            .and({
                 if bytes.len() <= LIMIT {
                     Ok(bytes)
                 } else {

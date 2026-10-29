@@ -422,7 +422,9 @@ impl Filter {
             )));
         }
         Ok(bpf
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|insn| libc::sock_filter {
                 code: u16::from_ne_bytes([insn[0], insn[1]]),
                 jt: insn[2],

@@ -3445,7 +3445,8 @@ impl Transport {
     /// registration reply, so blocking here would deadlock the barrier.
     fn with_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
         let fd = self.lock.as_ref().map(AsRawFd::as_raw_fd);
-        if let Some(fd) = fd {
+        {
+            let fd = fd?;
             // SAFETY: flock(2) on a descriptor we hold.
             loop {
                 if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -3455,8 +3456,6 @@ impl Transport {
                     return None;
                 }
             }
-        } else {
-            return None;
         }
         let out = f(self);
         if let Some(fd) = fd {

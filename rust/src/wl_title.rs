@@ -2611,8 +2611,8 @@ mod tests {
                 255,
                 "hover fills the curved end, not a shortened rectangle"
             );
-            for pixel in pixels.chunks_exact(4) {
-                let p = u32::from_ne_bytes(pixel.try_into().unwrap());
+            for pixel in pixels.as_chunks::<4>().0 {
+                let p = u32::from_ne_bytes(*pixel);
                 let a = p >> 24;
                 assert!((p & 255) <= a && ((p >> 8) & 255) <= a && ((p >> 16) & 255) <= a);
             }

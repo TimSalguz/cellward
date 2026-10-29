@@ -69,8 +69,8 @@ impl Archive {
             let rows = (count - at).min(128) as usize;
             self.file
                 .read_exact_at(&mut buffer[..rows * ROW], u64::from(at) * ROW as u64)?;
-            for (i, row) in buffer[..rows * ROW].chunks_exact(ROW).enumerate() {
-                let mapping = decode(row.try_into().unwrap(), self.session, at + i as u32 + 1)?;
+            for (i, row) in buffer[..rows * ROW].as_chunks::<ROW>().0.iter().enumerate() {
+                let mapping = decode(row, self.session, at + i as u32 + 1)?;
                 if mapping.cgroup == id {
                     return Ok(true);
                 }

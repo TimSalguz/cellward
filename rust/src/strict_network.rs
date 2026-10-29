@@ -60,6 +60,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         core: &Path,
         nft: &Path,
@@ -126,6 +127,7 @@ impl Runtime {
     /// Does not acquire the instance LOCK: enter holds it shared while
     /// waiting for this exact registration. The kernel peer, not the request,
     /// supplies the waiter identity; only its waiting fork can be registered.
+    #[allow(clippy::too_many_arguments)]
     pub fn register(
         &mut self,
         conn: &UnixStream,

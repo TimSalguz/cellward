@@ -6252,9 +6252,25 @@ mod tests {
     #[test]
     fn the_asks_have_bytes_of_their_own() {
         // Distinct from every other byte of the channel, either way.
-        let others = [READY, CONNECT, UPSTREAM, UPSTREAM_BARE, REFUSED, SMART_PASTE, SMART_RESULT, TYPE_CONTROL];
-        for ask in [Ask::Menu, Ask::Network, Ask::Restart, Ask::Clip,
-            Ask::ScreenshotWindow, Ask::ScreenshotArea, Ask::ScreenshotHover] {
+        let others = [
+            READY,
+            CONNECT,
+            UPSTREAM,
+            UPSTREAM_BARE,
+            REFUSED,
+            SMART_PASTE,
+            SMART_RESULT,
+            TYPE_CONTROL,
+        ];
+        for ask in [
+            Ask::Menu,
+            Ask::Network,
+            Ask::Restart,
+            Ask::Clip,
+            Ask::ScreenshotWindow,
+            Ask::ScreenshotArea,
+            Ask::ScreenshotHover,
+        ] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");
             assert_eq!(ask_of(byte), Some(ask));
@@ -6361,7 +6377,11 @@ mod tests {
         );
         let clip = argv(None, Ask::Clip);
         assert_eq!(clip[clip.len() - 3..], ["clip-window", "--pid", "4242"]);
-        for (ask, mode) in [(Ask::ScreenshotWindow, "window"), (Ask::ScreenshotArea, "area"), (Ask::ScreenshotHover, "hover")] {
+        for (ask, mode) in [
+            (Ask::ScreenshotWindow, "window"),
+            (Ask::ScreenshotArea, "area"),
+            (Ask::ScreenshotHover, "hover"),
+        ] {
             let shot = argv(None, ask);
             assert_eq!(shot[shot.len() - 3..], ["window-screenshot", "4242", mode]);
             assert!(shot.iter().any(|a| a == "--wait"));

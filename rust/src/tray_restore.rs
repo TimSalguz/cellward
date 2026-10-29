@@ -165,7 +165,7 @@ fn owner(bus: &mut client::Client, service: &str) -> Option<String> {
 fn item(value: &str, freedesktop: bool) -> Option<Item> {
     let (service, suffix) = value
         .split_once('/')
-        .map_or((value, "StatusNotifierItem"), |v| v);
+        .unwrap_or((value, "StatusNotifierItem"));
     if service.is_empty() || service.len() > 255 || service.contains(['\0', ' ', '\t', '\n']) {
         return None;
     }
