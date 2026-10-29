@@ -38,6 +38,7 @@ impl Language {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
+    ClipboardManager,
     Launch,
     Network,
     Container,
@@ -95,6 +96,8 @@ pub enum Key {
 pub fn text(language: Language, key: Key) -> &'static str {
     use Key::*;
     match (language, key) {
+        (Language::English, ClipboardManager) => "Open Cellward clipboards",
+        (Language::Russian, ClipboardManager) => "Открыть буферы Cellward",
         (Language::English, ScreenshotSelect) => "Drag to select a region · Enter copies · Esc cancels",
         (Language::Russian, ScreenshotSelect) => "Выделите область · Enter копирует · Esc отменяет",
         (Language::English, ScreenshotInspect) => "Wheel: zoom · Middle drag: pan · 0: fit · Selection keeps original pixels",
@@ -222,6 +225,7 @@ mod tests {
     fn both_catalogues_have_every_key() {
         use Key::*;
         for key in [
+            ClipboardManager,
             Launch,
             Network,
             Container,

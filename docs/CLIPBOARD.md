@@ -68,6 +68,11 @@ through the updated launcher to get private active selections. History paste
 refuses an unverified isolated target rather than exporting to the host.
 Unconfined programs continue to use the desktop clipboard.
 
+The history tray icon exposes a standard D-Bus menu on right click with an
+Open Cellward clipboards action. Panels such as Noctalia can add their own
+Pin/Unpin controls to that menu. Pinning is stored by the panel; Cellward does
+not edit panel settings. Left click continues to open the manager.
+
 ## Partial or stalled copies
 
 CLIPBOARD and PRIMARY are captured independently with a shared 64 MiB memory
