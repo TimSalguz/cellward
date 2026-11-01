@@ -29,6 +29,7 @@ rustPlatform.buildRustPackage {
 
   # The tray test starts a private dbus-daemon.
   nativeCheckInputs = [ dbus ];
+  env.CELLWARD_TEST_DBUS_CONFIG = "${dbus}/share/dbus-1/session.conf";
 
   # Тест на десять миллионов записей помечен #[ignore]; остальные — быстрые.
   meta = {

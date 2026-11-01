@@ -262,8 +262,12 @@ mod tests {
 
     #[test]
     fn panel_can_read_a_nonempty_menu_over_a_private_bus() {
+        // Sandboxed builds have no /etc/dbus-1; they point at a packaged config.
+        let config = std::env::var("CELLWARD_TEST_DBUS_CONFIG")
+            .map(|path| format!("--config-file={path}"))
+            .unwrap_or_else(|_| "--session".to_owned());
         let mut bus = Bus(Command::new("dbus-daemon")
-            .args(["--session", "--nofork", "--print-address=1"])
+            .args([config.as_str(), "--nofork", "--print-address=1"])
             .stdout(Stdio::piped())
             .spawn()
             .unwrap());
