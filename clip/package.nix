@@ -5,6 +5,7 @@
 {
   lib,
   rustPlatform,
+  dbus,
 }:
 
 rustPlatform.buildRustPackage {
@@ -25,6 +26,9 @@ rustPlatform.buildRustPackage {
   sourceRoot = "source/clip";
 
   cargoLock.lockFile = ./Cargo.lock;
+
+  # The tray test starts a private dbus-daemon.
+  nativeCheckInputs = [ dbus ];
 
   # Тест на десять миллионов записей помечен #[ignore]; остальные — быстрые.
   meta = {
