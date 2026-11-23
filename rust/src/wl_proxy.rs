@@ -7280,30 +7280,35 @@ mod tests {
         let rig = Rig::with_drawing("top-release", Some(drawing));
         let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
         a_window(&mut client);
-        let (got, xdg, root) = first_commit(&log);
+        let (got, _, root) = first_commit(&log);
         let subs = all(&got, "wl_subcompositor", 1);
         let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
         let (top_sub, top) = (on_root[8].args[0], on_root[8].args[1]);
         let first = attached(&got, top).expect("the first unified top");
         assert_eq!(made(&got, first)[1..], [308, 24, 308 * 4, 0]);
 
-        request(&mut client, xdg, 3, &words(&[10, 20, 320, 200]));
-        request(&mut client, root, 6, &[]);
+        request(&mut client, 8, 3, &words(&[10, 20, 320, 200]));
+        request(&mut client, 7, 6, &[]);
         let got = log_until(&log, |m| {
             m.iface == "wl_surface" && m.opcode == 6 && m.object == root
         });
-        let second = attached(&got, top).expect("the second unified top");
+        let second = attached(&got, top)
+            .unwrap_or_else(|| panic!("the second unified top is missing: {got:#?}"));
         assert_ne!(second, first);
         assert_eq!(made(&got, second)[1..], [328, 24, 328 * 4, 0]);
 
         // Both bounded slots are leased now. The newest spec is retained,
         // but no buffer can be attached until the compositor releases one.
-        request(&mut client, xdg, 3, &words(&[10, 20, 340, 200]));
-        request(&mut client, root, 6, &[]);
+        request(&mut client, 8, 3, &words(&[10, 20, 340, 200]));
+        request(&mut client, 7, 6, &[]);
         let got = log_until(&log, |m| {
             m.iface == "wl_surface" && m.opcode == 6 && m.object == root
         });
-        assert_eq!(attached(&got, top), Some(second));
+        assert_eq!(
+            attached(&got, top),
+            None,
+            "a busy top must leave its current buffer untouched"
+        );
         assert!(all(&got, "wl_shm_pool", 0).is_empty(), "{got:#?}");
 
         let mut out = Vec::new();
@@ -7360,7 +7365,7 @@ mod tests {
         let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
         let top = on_root[8].args[1];
         let first = attached(&got, top).expect("the rounded unified top");
-        let dimensions = made(&got, first);
+        let dimensions = made(&got, first)[1..].to_vec();
         let toplevel = all(&got, "xdg_surface", 1)[0].args[0];
 
         let mut out = Vec::new();
@@ -7373,14 +7378,14 @@ mod tests {
         compositor.write_all(&out).unwrap();
         events_until(&mut client, |o, op, _| o == 8 && op == 0);
         request(&mut client, 8, 4, &5u32.to_ne_bytes());
-        request(&mut client, root, 6, &[]);
+        request(&mut client, 7, 6, &[]);
         let got = log_until(&log, |m| {
             m.iface == "wl_surface" && m.opcode == 6 && m.object == root
         });
         let square = attached(&got, top).expect("fullscreen kept a stale rounded top");
         assert_ne!(square, first);
         assert_eq!(
-            made(&got, square),
+            made(&got, square)[1..],
             dimensions,
             "the geometry stayed the same"
         );
