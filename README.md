@@ -461,10 +461,11 @@ The Cellward window's Connections and chains tab can build these routes:
 enable the strict route list, add VPN configs to the closed node pool, then
 create routes from the outer hop inward. Select an already published user VPN
 route or a system VPN from the list for each inner hop. The builder previews
-the packet path; creating a route does not connect it. Publish the outer
-routes first, then the inner ones. A published route offers an “Add the next
-hop” action with its outer hop preselected. A pooled node is never a selectable
-network on its own. Chains may have multiple user VPN hops. An inner VPN server must
+the packet path; its confirmation creates and starts the route, publishing it
+first when the strict route list is enabled, and stopping at the first refusal.
+Legacy mode does not enable strict publication implicitly. Build the outer routes first, then
+the inner ones. A published route offers an “Add the next hop” action with its
+outer hop preselected. A pooled node is never a selectable network on its own. Chains may have multiple user VPN hops. An inner VPN server must
 have a literal IPv4/IPv6 address: host DNS before the chain exists would leak
 around the outer hop. SOCKS/HTTP hops still need the planned proxy-zone backend.
 The outer system zone must itself be a VPN. A plain zone would expose the

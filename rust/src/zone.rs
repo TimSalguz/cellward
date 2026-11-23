@@ -3235,7 +3235,7 @@ pub(crate) fn record_of(id: &str) -> Option<String> {
 
 /// How a live switch ended ([`Transport::switch`]).
 enum Switched {
-    /// Not made; nothing touched.
+    /// Not made; the running instance was not cut or moved.
     Refused(crate::switch::Refusal),
     /// Made: its epoch, and what its break did.
     Done {
@@ -3248,6 +3248,57 @@ enum Switched {
         phase: crate::switch::Phase,
         why: String,
     },
+}
+
+/// Persist a switch before its cut. A later failure rolls back earlier writes
+/// to `from` in reverse order, best effort, and never cuts the instance. A
+/// failed registry retarget is rolled back too: it may have moved only some of
+/// its files. Rollback failures are explicit in the returned refusal text.
+fn persist_switch(
+    container: Option<&str>,
+    from: &str,
+    to: &str,
+    mut write_network: impl FnMut(&str, &str) -> Result<(), String>,
+    mut retarget: impl FnMut(&str, &str, &str) -> Result<(), String>,
+    mut next_launch: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let rollback =
+        |name: &str,
+         write_network: &mut dyn FnMut(&str, &str) -> Result<(), String>,
+         retarget: &mut dyn FnMut(&str, &str, &str) -> Result<(), String>| {
+            let mut failed = Vec::new();
+            if let Err(e) = retarget(name, to, from) {
+                failed.push(format!("cannot restore launch registry to {from}: {e}"));
+            }
+            if let Err(e) = write_network(name, from) {
+                failed.push(format!("cannot restore container network to {from}: {e}"));
+            }
+            failed
+        };
+    let failure = |why: String, rollback: Vec<String>| {
+        if rollback.is_empty() {
+            why
+        } else {
+            format!("{why}; rollback failed: {}", rollback.join("; "))
+        }
+    };
+    if let Some(name) = container {
+        write_network(name, to).map_err(|e| format!("cannot persist container network: {e}"))?;
+        if let Err(e) = retarget(name, from, to) {
+            let why = format!("cannot retarget launch registry: {e}");
+            let rollback = rollback(name, &mut write_network, &mut retarget);
+            return Err(failure(why, rollback));
+        }
+    }
+    if let Err(e) = next_launch(to) {
+        let why = format!("cannot persist next-launch network: {e}");
+        if let Some(name) = container {
+            let rollback = rollback(name, &mut write_network, &mut retarget);
+            return Err(failure(why, rollback));
+        }
+        return Err(why);
+    }
+    Ok(())
 }
 
 impl Transport {
@@ -4055,9 +4106,11 @@ impl Transport {
     }
 
     /// The switch, its preconditions met and the lock held (§5.3 of the
-    /// design). Bound to `to` first, whatever becomes of it (G7): its
-    /// container's setting, the ask of its next start, its programs' records,
-    /// the instance's note. Then the cut (G1: the old relay killed and
+    /// design). Its container's setting, the ask of its next start and its
+    /// programs' records are persisted first: a write failure restores earlier
+    /// writes to `from`, best effort, and refuses before the cut. Once cut, the
+    /// instance stays bound to `to` whatever becomes of
+    /// the switch (G7). The cut itself (G1: the old relay killed and
     /// reaped, its tap gone with it — before anything of the new), a new
     /// epoch with its break ([`Transport::renew`]: G3, G4; G2 — nothing but
     /// loopback and the unreachable defaults meanwhile), and the new way out
@@ -4070,26 +4123,35 @@ impl Transport {
         wake: RawFd,
     ) -> Switched {
         use crate::switch::Phase;
-        if let Some(name) = container {
-            if let Err(e) = crate::container::write_network_in(&self.config, name, to) {
-                eprintln!(
-                    "instance {}: cannot bind the container to {to} ({e})",
-                    self.id
-                );
-            }
-            let records = self.state.join(".running").join(name);
-            if let Err(e) = crate::registry::retarget(&records, from, to) {
-                eprintln!(
-                    "instance {}: its launches' records stay in {from} ({e})",
-                    self.id
-                );
-            }
-        }
-        if let Err(e) = crate::instance::ask_network(&self.state, &self.id, to) {
-            eprintln!(
-                "instance {}: cannot note its next start's network ({e})",
-                self.id
+        let persisted = persist_switch(
+            container,
+            from,
+            to,
+            |name, network| crate::container::write_network_in(&self.config, name, network),
+            |name, from, to| {
+                crate::registry::retarget(&self.state.join(".running").join(name), from, to)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            },
+            |network| {
+                crate::instance::ask_network(&self.state, &self.id, network)
+                    .map_err(|e| e.to_string())
+            },
+        );
+        if let Err(why) = persisted {
+            let refusal = crate::switch::Refusal {
+                code: "commit",
+                text: format!("{why}; the running instance was not cut and remains in {from}"),
+            };
+            println!(
+                "instance {}: no switch from {from} to {to} (commit): {}",
+                self.id, refusal.text
             );
+            self.journal(
+                "switch-refused",
+                &[("from", from), ("to", to), ("why", refusal.code)],
+            );
+            return Switched::Refused(refusal);
         }
         self.note_switch(Some(("cutting", from, to)));
         if let Some(link) = self.link.take() {
@@ -5213,11 +5275,22 @@ fn supervise(zone: &Zone) -> Result<u8, String> {
 /// minute and a half inside a namespace that has none, and then failing anyway.
 fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfig>), String> {
     let raw = crate::chain::read_zone_config_dir(&zone.dir)?;
-    // The config as this run reads it, for the zone's fingerprint
-    // (`bridge::fingerprint`): the very bytes it comes up with.
-    let seed = crate::bridge::config_seed(&raw);
     let ini = WgConfig::parse(&raw).map_err(|e| format!("{CONFIG}: {e}"))?;
     let chain = crate::chain::ChainConfig::from_ini(&ini).map_err(|e| format!("{CONFIG}: {e}"))?;
+    // The config bytes this run came up with, including every resolved user
+    // prefix. Otherwise an outer route could return as another chain and its
+    // containers would be reattached without the person's word.
+    let prefixes = if chain.as_ref().is_some_and(|chain| chain.user) {
+        let state = zone.dir.parent().ok_or("zone has no state directory")?;
+        let name = zone.name();
+        crate::chain::user_upstreams(state, &name, &ini)?
+            .into_iter()
+            .map(|prefix| crate::chain::read_zone_config(state, &prefix))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    let seed = crate::bridge::chain_config_seed(&raw, &prefixes);
     if chain.is_some() {
         crate::chain::ChainConfig::validate_transport(&ini)
             .map_err(|e| format!("{CONFIG}: {e}"))?;
@@ -10860,6 +10933,108 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
     use super::*;
+
+    #[test]
+    fn switch_persistence_failures_roll_back_in_reverse_order() {
+        for (failed, error, calls) in [
+            (0, "container network", vec!["write:de"]),
+            (
+                1,
+                "launch registry",
+                vec!["write:de", "retarget:nl:de", "retarget:de:nl", "write:nl"],
+            ),
+            (
+                2,
+                "next-launch network",
+                vec![
+                    "write:de",
+                    "retarget:nl:de",
+                    "next:de",
+                    "retarget:de:nl",
+                    "write:nl",
+                ],
+            ),
+        ] {
+            let called = std::cell::RefCell::new(Vec::new());
+            let result = persist_switch(
+                Some("work"),
+                "nl",
+                "de",
+                |_, network| {
+                    called.borrow_mut().push(format!("write:{network}"));
+                    (failed != 0 || network != "de")
+                        .then_some(())
+                        .ok_or("write failed".to_owned())
+                },
+                |_, from, to| {
+                    called.borrow_mut().push(format!("retarget:{from}:{to}"));
+                    (failed != 1 || from != "nl")
+                        .then_some(())
+                        .ok_or("retarget failed".to_owned())
+                },
+                |network| {
+                    called.borrow_mut().push(format!("next:{network}"));
+                    (failed != 2).then_some(()).ok_or("next failed".to_owned())
+                },
+            );
+            assert!(result.unwrap_err().contains(error));
+            assert_eq!(called.into_inner(), calls);
+        }
+        assert!(persist_switch(
+            None,
+            "nl",
+            "de",
+            |_, _| unreachable!(),
+            |_, _, _| unreachable!(),
+            |_| Ok(()),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn switch_persistence_reports_every_rollback_failure() {
+        let called = std::cell::RefCell::new(Vec::new());
+        let result = persist_switch(
+            Some("work"),
+            "nl",
+            "de",
+            |_, network| {
+                called.borrow_mut().push(format!("write:{network}"));
+                if network == "nl" {
+                    Err("network restore failed".to_owned())
+                } else {
+                    Ok(())
+                }
+            },
+            |_, from, to| {
+                called.borrow_mut().push(format!("retarget:{from}:{to}"));
+                if from == "de" {
+                    Err("registry restore failed".to_owned())
+                } else {
+                    Ok(())
+                }
+            },
+            |network| {
+                called.borrow_mut().push(format!("next:{network}"));
+                Err("next failed".to_owned())
+            },
+        )
+        .unwrap_err();
+        assert!(result.contains("next-launch network"));
+        assert!(result.contains("rollback failed"));
+        assert!(result.contains("registry restore failed"));
+        assert!(result.contains("network restore failed"));
+        assert_eq!(
+            called.into_inner(),
+            [
+                "write:de",
+                "retarget:nl:de",
+                "next:de",
+                "retarget:de:nl",
+                "write:nl",
+            ]
+        );
+    }
 
     #[test]
     fn reaping_a_keeper_child_leaves_the_questions_answer_to_its_owner() {
