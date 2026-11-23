@@ -15,6 +15,8 @@
     `services.vpn-zones`, до переименования в cellward) называют все опции
     новых и дают тот же дом и ту же систему, с предупреждением
     (`nix-instantiate --eval --strict … -A oldNames`, ответ `true`);
+  - `hostDispatcher` — opt-in ярлык `cellward open` и ассоциации только выбранных
+    схем хоста; при пустом списке ни того ни другого нет;
   - `singleEntry` — единый вход `programs.cellward.enable` на вычисленной
     машине NixOS: модули ядра, политика PipeWire при WirePlumber, модуль
     home-manager каждому пользователю home-manager, `direct0` для демона Nix

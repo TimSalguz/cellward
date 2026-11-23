@@ -93,8 +93,8 @@ pub struct Tools {
     /// `certutil` from NSS: installs a container's certificates into its NSS
     /// databases. The CLI passes it on to `profile-run`.
     pub certutil: PathBuf,
-    /// `xdg-open`: what a sandbox's bus filter opens a program's link with, in
-    /// the zone rather than through the host's portal (`crate::bus_filter`).
+    /// `cellward open`: what a sandbox's bus filter opens a program's link with
+    /// when no broker answers, never through the host's portal (`crate::bus_filter`).
     pub opener: PathBuf,
     /// `vpn-zone-window`: the launch window, the network and the container in
     /// one (`crate::window`). Where it is missing the picker asks with kdialog.

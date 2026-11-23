@@ -186,21 +186,12 @@ let
     patches = (old.patches or [ ]) ++ [ ./patches/xwayland-satellite-local-clipboard.patch ];
   });
 
-  # Чем открываются ссылки программ зоны и песочницы (LEAK-MODEL §2): xdg-open,
-  # но без запасного браузера. Для схемы без обработчика xdg-open берёт
-  # $BROWSER, а без него — первый нашедшийся из своего списка (firefox,
-  # chromium, …) и запускает его САМ: мимо пикера, с основным профилем, в сети
-  # той зоны, откуда пришла ссылка. `false` в BROWSER — отказ вместо этого;
-  # ссылку со схемой, у которой есть обработчик (наш перехваченный ярлык),
-  # это не трогает.
-  #
-  # И без портала: с NIXOS_XDG_OPEN_USE_PORTAL (xdg.portal.xdgOpenUsePortal)
-  # xdg-open отдаёт ссылку OpenURI по сессионной шине — у обычной зоны это шина
-  # хоста, и ссылка открывалась бы на хосте, мимо зоны (review 2026-09-25).
+  # Запасной opener фильтра шины песочницы — та же оркестрация, что у ярлыка
+  # диспетчера хоста: MIME-записи → выбор программы Cellward → пикер. Никакого
+  # xdg-open и запасного $BROWSER: иначе отмена выбора могла бы запустить
+  # программу мимо выбранного окружения.
   vpn-zone-opener = pkgs.writeShellScript "vpn-zone-opener" ''
-    export BROWSER=false
-    unset NIXOS_XDG_OPEN_USE_PORTAL
-    exec ${pkgs.xdg-utils}/bin/xdg-open "$@"
+    exec ${config.home.profileDirectory}/bin/cellward open "$@"
   '';
 
   # --- ЧАСТЬ 0б: ПЕСОЧНИЦА ФАЙЛОВОЙ СИСТЕМЫ — В RUST ---
@@ -310,16 +301,16 @@ let
       # базы NSS контейнера из `profile-run`.
       openssl = "${pkgs.openssl}/bin/openssl";
       certutil = "${pkgs.nss.tools}/bin/certutil";
-      # Ссылки программ из песочницы на хосте, когда брокера нет (LEAK-MODEL §2):
-      # портал им отвечает фильтр шины песочницы, открывает xdg-open. Из зоны
+      # Ссылки программ из песочницы, когда брокера нет (LEAK-MODEL §2): портал
+      # им отвечает фильтр шины песочницы, открывает cellward open. Из зоны
       # ссылки идут брокеру (PERMISSIONS §11.13).
       opener = "${vpn-zone-opener}";
       # Окно запуска: пикер спрашивает им вместо двух меню kdialog.
       window = "${vpn-zone-window}/bin/vpn-zone-window";
       # Host-side capture only. No desktop clipboard writes or sandbox grants.
       grim = "${pkgs.grim}/bin/grim";
-      # Выбор программы для ссылки из зоны: окно бэкенда портала
-      # (AppChooser), зовёт брокер (rust/src/links.rs).
+      # Прежний путь к бэкендам AppChooser остаётся для совместимости;
+      # брокер и cellward open используют собственное окно (rust/src/links.rs).
       busctl = "${pkgs.systemd}/bin/busctl";
       # Запомненный пароль сети — в связке ключей сеанса (Secret Service),
       # docs/PERMISSIONS.md §11.16: пароль ему — на stdin.
@@ -502,6 +493,10 @@ let
   # CLI/GUI то, что задано здесь, — вместо того чтобы молча не сработать.
   # Машиночитаемый ответ, откуда какое значение, — `cellward status --json`.
   cfg = config.programs.cellward;
+  hostLinkTypes = map (scheme: "x-scheme-handler/${scheme}") cfg.hostLinks.schemes;
+  hostLinkDefaults = lib.listToAttrs (
+    map (type: lib.nameValuePair type "vpn-zone-open.desktop") hostLinkTypes
+  );
   # A term as `cellward ask-again` takes it (`30s`, `3m`, `1h`, `1d`) in
   # seconds; bounds as in rust/src/grants.rs (ASK_AGAIN_MIN, ASK_AGAIN_MAX).
   termSeconds =
@@ -874,6 +869,7 @@ let
     "hermetic.default"
     "hermetic.exceptions"
     "pathShims.enable"
+    "hostLinks.schemes"
     "tunnelWatch.enable"
     "waylandProxy.enable"
     "waylandProxy.exceptions"
@@ -1298,6 +1294,16 @@ in
       type = lib.types.bool;
       default = false;
       description = "PATH-шимы: программа, назначенная контейнеру, набранная в терминале, идёт через пикер, как щелчок по ярлыку. Каталог ~/.local/share/vpn-zones/bin добавляется в PATH сессии. Удобство, а не граница: процесс хоста всегда может запустить store-путь напрямую.";
+    };
+
+    hostLinks.schemes = lib.mkOption {
+      type = lib.types.listOf (lib.types.strMatching "[a-z][a-z0-9+.-]*");
+      default = [ ];
+      example = [
+        "http"
+        "https"
+      ];
+      description = "Схемы ссылок программ хоста, которые открываются через cellward open до GNOME AppChooser: для каждой создаётся скрытая запись vpn-zone-open.desktop (Exec=cellward open %u) и явная ассоциация по умолчанию в xdg.mimeApps. Список пуст по умолчанию: ассоциации хоста не меняются. Сам cellward open никогда не переписывает mimeapps.list; выбор программы, сети и контейнера — Cellward, без отката к порталу после отмены.";
     };
 
     clipboard.history = lib.mkOption {
@@ -1771,6 +1777,17 @@ in
   xdg.dataFile = lib.mkIf cfg.pipewirePolicy {
     "wireplumber/scripts/vpn-zones/policy.lua".source = ./wireplumber/policy.lua;
   };
+
+  xdg.desktopEntries."vpn-zone-open" = lib.mkIf (hostLinkTypes != [ ]) {
+    name = "Cellward — открыть ссылку";
+    comment = "Выбрать программу, контейнер и сеть для ссылки";
+    exec = "${cellward}/bin/cellward open %u";
+    icon = "network-vpn";
+    terminal = false;
+    noDisplay = true;
+    mimeType = hostLinkTypes;
+  };
+  xdg.mimeApps.defaultApplications = lib.mkIf (hostLinkTypes != [ ]) hostLinkDefaults;
 
   # Объявленное — в ~/.config/vpn-zones/declared, а не в xdg.configHome: CLI,
   # держатель и генератор ярлыков читают именно этот путь, и при своём

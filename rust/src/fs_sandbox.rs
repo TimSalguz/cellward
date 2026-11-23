@@ -214,7 +214,7 @@ pub struct Tools {
     pub kdialog: PathBuf,
     pub xwayland: PathBuf,
     /// What opens a link the program hands the portal (`crate::bus_filter`):
-    /// `xdg-open`, run in the zone, outside the sandbox.
+    /// `cellward open`, run outside the sandbox when no broker answers.
     pub opener: PathBuf,
 }
 
