@@ -49,6 +49,7 @@ def main():
     daemon.settimeout(.2)
     requests = []
     epoch = [False]
+    lists_epoch = [False]
 
     def chunk(name, data):
         return struct.pack('>I', len(data)) + name + data + struct.pack('>I', zlib.crc32(name + data))
@@ -76,8 +77,10 @@ def main():
                 requests.append(request)
                 if request == 'histories':
                     answer = b'host\n'
+                    if lists_epoch[0]:
+                        answer += b'app-one\n'
                 elif request == 'instances':
-                    answer = b''
+                    answer = b'app-one\trunning\n' if lists_epoch[0] else b''
                 elif request.startswith('search\thost\t'):
                     answer = b'1\t1700000000000\t1700000000000\t1\t0\t0\ttext/plain:12\tInitial clip\n'
                     if epoch[0]:
@@ -105,7 +108,7 @@ def main():
         width, height = map(int, size.split())
         assert len(body) == width * height * 3
         positions = [i // 3 for i in range(0, len(body), 3) if body[i:i + 3] == color]
-        return width, positions
+        return width, height, positions
 
     try:
         config = root / 'sway.conf'
@@ -114,33 +117,43 @@ def main():
         env['WAYLAND_DISPLAY'] = wire.wait_for(lambda: next((p.name for p in runtime.glob('wayland-*') if not p.name.endswith('.lock')), None))
         env['SWAYSOCK'] = str(wire.wait_for(lambda: next(runtime.glob('sway-ipc*.sock'), None)))
         vk = wire.keyboard(env, args.xkbcommon)
+        output_width, output_height, _ = pixels()
         fifo = root / 'pointer.fifo'
-        start([sys.executable, str(Path(__file__).with_name('vm-pointer.py')), str(fifo), '800', '900'], 'pointer')
+        start([sys.executable, str(Path(__file__).with_name('vm-pointer.py')), str(fifo), str(output_width), str(output_height)], 'pointer')
         wire.wait_for(fifo.exists)
-        window = start([args.window, 'clip', '--manager'], 'window')
+        window = start([args.window, 'clip', '--manager', '--clipboard-instance', 'app-one'], 'window')
         wire.wait_for(lambda: any(r.startswith('search\thost\t') for r in requests))
         time.sleep(.3)
         before = len(requests)
         epoch[0] = True
-        # No key or pointer input: the new row must be fetched automatically.
+        lists_epoch[0] = True
+        # No key or pointer input: the new row and both lists must be fetched automatically.
         wire.wait_for(lambda: 'get\thost\t2\timage/png' in requests[before:], timeout=6)
-        width, small = wire.wait_for(lambda: (p if (p := pixels())[1] else None))
+        wire.wait_for(lambda: 'histories' in requests[before:] and 'instances' in requests[before:], timeout=6)
+        time.sleep(.3)
+        subprocess.run([args.grim, str(root / 'live-manager.png')], env=env, check=True)
+        width, _, small = wire.wait_for(lambda: (p if (p := pixels())[2] else None))
         subprocess.run([args.grim, str(root / 'live-image.png')], env=env, check=True)
         middle = small[len(small) // 2]
         with open(fifo, 'w') as pointer:
             pointer.write(f'move {middle % width} {middle // width}\npress\nrelease\n')
         wire.wait_for(lambda: requests.count('get\thost\t2\timage/png') >= 2)
-        _, large = wire.wait_for(lambda: (p if len((p := pixels())[1]) > len(small) * 4 else None))
+        _, _, large = wire.wait_for(lambda: (p if len((p := pixels())[2]) > len(small) * 4 else None))
         subprocess.run([args.grim, str(root / 'original-image-preview.png')], env=env, check=True)
         assert len(large) > len(small) * 4, 'preview enlarged only the list thumbnail'
         subprocess.run([args.wtype, '-k', 'Escape'], env=env, check=True, timeout=5)
         time.sleep(.2)
         assert window.poll() is None, 'Escape closed the manager instead of the preview'
+        before_targets = len(requests)
+        lists_epoch[0] = False
+        wire.wait_for(lambda: 'instances' in requests[before_targets:], timeout=4)
+        time.sleep(.3)
+        subprocess.run([args.grim, str(root / 'unavailable-target.png')], env=env, check=True)
         search_count = sum(r.startswith('search\t') for r in requests)
         wire.wait_for(lambda: sum(r.startswith('search\t') for r in requests) > search_count, timeout=4)
         assert not any(r.startswith(('copy\t', 'copy-to\t', 'select\t')) for r in requests)
         vk.close()
-        print('PASS: open manager updates without input; original PNG opens large; Escape returns; polling resumes; no clipboard mutation', flush=True)
+        print('PASS: entries, tabs and targets update without input; selected target survives then becomes unavailable; original PNG, Escape and polling recovery work; no clipboard mutation', flush=True)
     finally:
         stop.set()
         worker.join(timeout=3)

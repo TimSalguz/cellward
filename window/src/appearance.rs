@@ -184,6 +184,57 @@ fn color(c: crate::syscolors::Rgb) -> iced::Color {
     iced::Color::from_rgb8(c.0, c.1, c.2)
 }
 
+fn readable_text(background: iced::Color, preferred: iced::Color) -> iced::Color {
+    if preferred.relative_contrast(background) >= 4.5 {
+        return preferred;
+    }
+    if iced::Color::WHITE.relative_contrast(background)
+        > iced::Color::BLACK.relative_contrast(background)
+    {
+        iced::Color::WHITE
+    } else {
+        iced::Color::BLACK
+    }
+}
+
+pub fn primary_button(
+    theme: &Theme,
+    status: iced::widget::button::Status,
+) -> iced::widget::button::Style {
+    let style = iced::widget::button::primary(theme, status);
+    let palette = theme.extended_palette();
+    let background = if status == iced::widget::button::Status::Disabled {
+        palette.background.strong.color
+    } else {
+        match style.background {
+            Some(iced::Background::Color(color)) => color,
+            _ => palette.primary.base.color,
+        }
+    };
+    iced::widget::button::Style {
+        background: Some(background.into()),
+        text_color: readable_text(background, style.text_color),
+        ..style
+    }
+}
+
+pub fn error_text(theme: &Theme) -> iced::Color {
+    let palette = theme.extended_palette();
+    let background = palette.background.base.color;
+    [
+        palette.danger.base.color,
+        palette.danger.strong.color,
+        palette.danger.weak.color,
+    ]
+    .into_iter()
+    .max_by(|a, b| {
+        a.relative_contrast(background)
+            .total_cmp(&b.relative_contrast(background))
+    })
+    .map(|color| readable_text(background, color))
+    .unwrap_or(palette.background.base.text)
+}
+
 fn palette_theme(s: crate::syscolors::SystemColors) -> Theme {
     use iced::theme::Palette;
     let base = if s.background.is_dark() {
@@ -215,6 +266,10 @@ fn theme_cache() -> &'static std::sync::Mutex<Option<(std::time::Instant, Option
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+fn system_palette(home: &std::path::Path, desktop: &str) -> Option<Theme> {
+    crate::syscolors::read(home, desktop, None).map(palette_theme)
+}
+
 fn system_theme() -> Option<Theme> {
     use std::time::{Duration, Instant};
     let mut cache = theme_cache().lock().ok()?;
@@ -225,7 +280,7 @@ fn system_theme() -> Option<Theme> {
     }
     let theme = crate::syscolors::config_home().and_then(|home| {
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        crate::syscolors::read(&home, &desktop, None).map(palette_theme)
+        system_palette(&home, &desktop)
     });
     *cache = Some((Instant::now(), theme.clone()));
     theme
@@ -281,6 +336,55 @@ mod tests {
         }
         assert_eq!(ThemeChoice::from_key("unknown"), ThemeChoice::System);
         assert_eq!(ThemeChoice::System.key(), "system");
+    }
+
+    #[test]
+    fn system_without_a_palette_leaves_light_dark_detection_to_the_toolkit() {
+        let empty =
+            std::env::temp_dir().join(format!("cellward-empty-appearance-{}", std::process::id()));
+        assert!(!empty.exists());
+        assert!(system_palette(&empty, "niri").is_none());
+    }
+
+    #[test]
+    fn primary_button_text_stays_readable_when_enabled_or_disabled() {
+        for choice in ThemeChoice::ALL
+            .into_iter()
+            .filter(|choice| *choice != ThemeChoice::System)
+        {
+            let theme = choice.theme().unwrap();
+            for status in [
+                iced::widget::button::Status::Active,
+                iced::widget::button::Status::Disabled,
+            ] {
+                let style = primary_button(&theme, status);
+                let Some(iced::Background::Color(background)) = style.background else {
+                    panic!("primary button has no background")
+                };
+                let contrast = style.text_color.relative_contrast(background);
+                assert!(
+                    contrast >= 4.5,
+                    "{} {status:?}: contrast {contrast:.2}",
+                    choice.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn error_text_is_readable_on_each_builtin_background() {
+        for choice in ThemeChoice::ALL
+            .into_iter()
+            .filter(|choice| *choice != ThemeChoice::System)
+        {
+            let theme = choice.theme().unwrap();
+            let contrast = error_text(&theme).relative_contrast(theme.palette().background);
+            assert!(
+                contrast >= 4.5,
+                "{}: error contrast {contrast:.2}",
+                choice.label()
+            );
+        }
     }
 
     #[test]

@@ -419,7 +419,7 @@ impl Window {
             .unwrap_or(0);
         let container = req.containers.iter().position(|i| i.selected).unwrap_or(0);
         let unconfined = req.nets.get(net).is_some_and(|n| n.tag == "unconfined");
-        Self {
+        let mut window = Self {
             pin_net: req.pin_net && !unconfined,
             pin_container: req.pin_container && !unconfined,
             rule: false,
@@ -450,7 +450,9 @@ impl Window {
             focused: false,
             measuring: false,
             req,
-        }
+        };
+        window.match_container_to_network();
+        window
     }
 
     /// A list in a place of its own that scrolls when it is longer — or,
@@ -513,6 +515,15 @@ impl Window {
             .is_some_and(|c| blocked(c, self.net_tag(), self.req.language).is_none())
     }
 
+    fn match_container_to_network(&mut self) {
+        if self.net_tag() == "unconfined" || self.container_ok(self.container) {
+            return;
+        }
+        if let Some(i) = (0..self.req.containers.len()).find(|i| self.container_ok(*i)) {
+            self.container = i;
+        }
+    }
+
     /// Everything needed to start: a container that goes with the network, a
     /// name for a new one, and the guard's time over.
     fn ready(&self) -> bool {
@@ -540,6 +551,7 @@ impl Window {
                 let n = self.req.nets.len() as isize;
                 if n > 0 {
                     self.net = (self.net as isize + step).rem_euclid(n) as usize;
+                    self.match_container_to_network();
                 }
             }
             Pane::Container => {
@@ -563,6 +575,8 @@ impl Window {
                 if self.net_tag() == "unconfined" {
                     self.pin_net = false;
                     self.pin_container = false;
+                } else {
+                    self.match_container_to_network();
                 }
             }
             Pane::Container if self.container_ok(index) => self.container = index,
@@ -740,6 +754,8 @@ impl Window {
                 if self.net_tag() == "unconfined" {
                     self.pin_net = false;
                     self.pin_container = false;
+                } else {
+                    self.match_container_to_network();
                 }
                 if changed && self.guarded() {
                     return self.hold();
@@ -1075,7 +1091,7 @@ impl Window {
                 label.push_str(&format!(" — {why}"));
             }
             let style = if i == chosen && focused {
-                button::primary
+                appearance::primary_button
             } else if i == chosen {
                 button::secondary
             } else {
@@ -1133,7 +1149,7 @@ impl Window {
             number += 1;
             let style = match (i == self.entry, *danger) {
                 (true, true) => button::danger,
-                (true, false) => button::primary,
+                (true, false) => appearance::primary_button,
                 _ => button::text,
             };
             let mark = if *danger { "⚠ " } else { "" };
@@ -1211,7 +1227,7 @@ impl Window {
                     .style(if unconfined {
                         button::secondary
                     } else {
-                        button::primary
+                        appearance::primary_button
                     })
                     .on_press(Msg::Net(if unconfined {
                         isolated
@@ -1250,7 +1266,7 @@ impl Window {
             tabs = tabs.push(
                 button(text(label).size(14))
                     .style(if self.launch_tab == tab {
-                        button::primary
+                        appearance::primary_button
                     } else {
                         button::secondary
                     })
@@ -1314,7 +1330,7 @@ impl Window {
         };
         let launch = button(text(label).size(14))
             .padding([6, 14])
-            .style(button::primary)
+            .style(appearance::primary_button)
             .on_press_maybe(self.ready().then_some(Msg::Launch));
         let cancel = button(text(tr(self.req.language, UiKey::Cancel)).size(14))
             .padding([6, 14])
@@ -1428,7 +1444,7 @@ impl Window {
             choices = choices.push(
                 button(text(label).size(12))
                     .style(if own == Some(mode) {
-                        button::primary
+                        appearance::primary_button
                     } else {
                         button::secondary
                     })
@@ -1519,7 +1535,7 @@ impl Window {
                 button(text(format!("{} {label}", if home == kind { "●" } else { "○" })).size(14))
                     .width(Length::Fill)
                     .style(if home == kind {
-                        button::primary
+                        appearance::primary_button
                     } else {
                         button::secondary
                     })
@@ -1676,7 +1692,7 @@ impl Window {
                 container(text(wait).size(13)).width(Length::Fill),
                 button(text(tr(self.req.language, UiKey::Save)).size(14))
                     .padding([6, 14])
-                    .style(button::primary)
+                    .style(appearance::primary_button)
                     .on_press_maybe(self.armed.then_some(Msg::Launch)),
                 button(text(tr(self.req.language, UiKey::Cancel)).size(14))
                     .padding([6, 14])
@@ -1747,12 +1763,12 @@ impl Window {
                         .style(if self.frame_fullscreen_tab {
                             button::secondary
                         } else {
-                            button::primary
+                            appearance::primary_button
                         })
                         .on_press(Msg::FrameTab(false)),
                     button("Полноэкранный режим")
                         .style(if self.frame_fullscreen_tab {
-                            button::primary
+                            appearance::primary_button
                         } else {
                             button::secondary
                         })
@@ -1777,7 +1793,7 @@ impl Window {
                     if fixed {
                         button::secondary
                     } else {
-                        button::primary
+                        appearance::primary_button
                     }
                 } else {
                     button::text
@@ -2187,6 +2203,34 @@ mod tests {
             w.answer(),
             "net\tde\ncontainer\twork\npin-net\t1\npin-container\t1\n"
         );
+    }
+
+    #[test]
+    fn network_changes_never_leave_an_incompatible_container_selected() {
+        let request = "net\toffline\tOffline\tselected\nnet\tnl\tVPN nl\t\n\
+                       container\tbound\tBound to nl\tbound=nl,selected\n\
+                       container\tfree\tFree\t\n";
+        let mut w = Window::new(parse_request(request));
+        assert_eq!(w.container, 1);
+        assert!(w.ready());
+        let _ = w.update(Msg::Net(1));
+        assert_eq!(w.container, 1, "a valid choice is preserved");
+        assert!(w.ready());
+        let _ = w.update(Msg::Container(0));
+        let _ = w.update(Msg::Net(0));
+        assert_eq!(w.container, 1);
+        w.pane = Pane::Net;
+        w.step(1);
+        assert_eq!(w.net, 1);
+        assert_eq!(w.container, 1);
+        w.pane = Pane::Container;
+        let _ = w.update(Msg::Container(0));
+        w.pane = Pane::Net;
+        w.step(-1);
+        assert_eq!(w.container, 1);
+        w.pane = Pane::Container;
+        let _ = w.update(Msg::Container(0));
+        assert_eq!(w.container, 1, "a blocked row cannot be clicked");
     }
 
     #[test]

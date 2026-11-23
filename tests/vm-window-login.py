@@ -47,8 +47,7 @@ def listed(app_id):
 
 def the_form(name):
     """The login form up (the window with `login`), shown."""
-    machine.wait_until_succeeds("pgrep -f '[v]pn-zone-window login'", timeout=60)
-    machine.sleep(2)
+    machine.wait_until_succeeds(listed("vpn-zone-window"), timeout=60)
     print(f"VPN login focus before input: {window_focus()}")
     alice(f"WAYLAND_DISPLAY={display} grim /tmp/{name}.png")
     machine.copy_from_vm(f"/tmp/{name}.png", "")
