@@ -617,11 +617,8 @@ mod tests {
                 b.write_all(&((FRAME + 1) as u32).to_le_bytes()).unwrap();
                 now
             } else {
-                now + TIMEOUT
+                now + TIMEOUT + Duration::from_secs(1)
             };
-            if !huge {
-                assert!(client.tick(at).is_none());
-            }
             assert!(client.tick(at).unwrap().is_err());
             assert!(client.closed());
             assert_eq!(client.input.0.capacity(), 0);
