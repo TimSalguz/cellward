@@ -17,7 +17,7 @@
 //! node⇥<name> (pooled VPN config; never its secret)
 //! system-vpn⇥<name> (a configured system WireGuard zone, for route builder)
 //! user-vpn⇥<name> (a published user route with its own VPN tunnel)
-//! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>
+//! instance⇥<id>⇥<container|->⇥<network>⇥<out bytes>⇥<in bytes>⇥<since>⇥<live-switch: 0|1>
 //! flow⇥<instance id>⇥<proto>⇥<remote>⇥<remote port>⇥<name>⇥<who>⇥<out>⇥<in>⇥<last>
 //! today⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
 //! month⇥<container>⇥<network>⇥<out bytes>⇥<in bytes>
@@ -286,6 +286,8 @@ pub fn data(tools: &Tools) -> String {
             .unwrap_or("-")
             .to_owned();
         if let Some(c) = crate::traffic::read(&i.dir) {
+            let live_switch =
+                crate::epoch::read_live(&i.dir).is_some_and(|live| live.reason().is_none());
             line(&[
                 "instance",
                 &i.id,
@@ -294,6 +296,7 @@ pub fn data(tools: &Tools) -> String {
                 &c.out_bytes.to_string(),
                 &c.in_bytes.to_string(),
                 &c.since.to_string(),
+                if live_switch { "1" } else { "0" },
             ]);
         }
         for fields in crate::flows::panel_lines(tools, i, &procs, FLOWS_SHOWN) {

@@ -189,6 +189,19 @@ fn name_of(path: &Path) -> String {
         .into_owned()
 }
 
+/// Networks a container or the default may be moved to. Zone management still
+/// lists unpublished routes so they can be published or removed.
+fn network_zones(state: &Path) -> Vec<PathBuf> {
+    zones(state)
+        .into_iter()
+        .filter(|dir| {
+            dir.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| crate::chain::published_zone(state, name).unwrap_or(false))
+        })
+        .collect()
+}
+
 /// Is this zone up? The same test `vpn-zone list` makes: a `ready` file and a
 /// holder that is still alive.
 fn zone_is_up(dir: &Path) -> bool {
@@ -730,7 +743,7 @@ fn containers(tools: &Tools) -> u8 {
                 row("offline", "Без сети"),
                 row(crate::picker::HOST_ROW.0, crate::picker::HOST_ROW.1),
             ];
-            for zone in zones(&tools.state) {
+            for zone in network_zones(&tools.state) {
                 let name = name_of(&zone);
                 nets.push(row(&name, format!("VPN: {name}")));
             }
@@ -972,7 +985,7 @@ fn settings(tools: &Tools) -> u8 {
                     crate::picker::UNCONFINED_ROW.1,
                 ),
             ];
-            for dir in zones(&tools.state) {
+            for dir in network_zones(&tools.state) {
                 let name = name_of(&dir);
                 rows.push(row(&name, format!("VPN: {name}")));
             }
@@ -1256,6 +1269,28 @@ mod tests {
             "conf-conf"
         );
         assert_eq!(suggested_zone_name(Path::new("/tmp/plain")), "plain");
+    }
+
+    #[test]
+    fn unpublished_routes_are_not_fallback_network_choices() {
+        let state = std::env::temp_dir().join(format!("cw-gui-routes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        for name in ["published", "unpublished"] {
+            fs::create_dir_all(state.join(name)).unwrap();
+            fs::write(state.join(name).join("config.conf"), "").unwrap();
+        }
+        assert_eq!(network_zones(&state).len(), 2);
+        fs::write(state.join(crate::chain::ROUTES), "published\n").unwrap();
+        assert_eq!(
+            network_zones(&state)
+                .iter()
+                .map(|dir| name_of(dir))
+                .collect::<Vec<_>>(),
+            ["published"]
+        );
+        fs::write(state.join(crate::chain::ROUTES), "not a valid route\n").unwrap();
+        assert!(network_zones(&state).is_empty());
+        let _ = fs::remove_dir_all(&state);
     }
 
     #[test]

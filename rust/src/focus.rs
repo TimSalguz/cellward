@@ -1637,10 +1637,10 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
 }
 
 /// Where a container's network may be switched live to from `current`
-/// (the frame's ⇄, [`switch_network`]): `offline` and every zone there is
-/// (a directory with its config), never `unconfined` — the host's network
-/// is no instance's way out, only a restart takes a container there — nor
-/// the network it is in.
+/// (the frame's ⇄, [`switch_network`]): `offline` and every published zone,
+/// never `unconfined` — the host's network is no instance's way out, only a
+/// restart takes a container there — nor the network it is in. An unreadable
+/// or invalid route policy offers no zone rather than falling back to all.
 pub fn switch_targets(state: &Path, current: &str) -> Vec<String> {
     let mut out = vec![crate::launch::OFFLINE.to_owned()];
     for dir in crate::cli::visible_entries(state) {
@@ -1650,7 +1650,10 @@ pub fn switch_targets(state: &Path, current: &str) -> Vec<String> {
         let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if name == crate::launch::OFFLINE || crate::launch::is_unconfined_name(name) {
+        if name == crate::launch::OFFLINE
+            || crate::launch::is_unconfined_name(name)
+            || !crate::chain::published_zone(state, name).unwrap_or(false)
+        {
             continue;
         }
         out.push(name.to_owned());
@@ -1678,10 +1681,10 @@ pub fn others_in(state: &Path, container: &str, program: Option<&str>) -> Vec<St
 }
 
 /// The container whose network the frame's ⇄ can switch live for this
-/// launch: a named container's own, whose instance runs now — its id is
-/// the container's name. `None` for the main home's, a throwaway's, an
-/// instance of one network (`<c>:<net>`, which never switches) and
-/// anything not in an instance.
+/// launch: a named container's own, whose instance runs now and whose keeper
+/// permits a live switch — its id is the container's name. `None` for the main
+/// home's, a throwaway's, an instance of one network (`<c>:<net>`, which never
+/// switches), anything not in an instance, and an instance that must restart.
 pub fn switchable(
     launch: Option<&Launch>,
     running: &[crate::instance::Running],
@@ -1692,7 +1695,10 @@ pub fn switchable(
         .filter(|s| crate::container::valid_name(s))?;
     running
         .iter()
-        .find(|i| i.id == name)
+        .find(|i| {
+            i.id == name
+                && crate::epoch::read_live(&i.dir).is_some_and(|live| live.reason().is_none())
+        })
         .map(|i| (name.to_owned(), i.network.clone()))
 }
 
@@ -2447,9 +2453,13 @@ mod tests {
     /// network it is in.
     #[test]
     fn the_network_button_switches_a_named_containers_instance() {
+        let live_dir = std::env::temp_dir().join(format!("vz-switchable-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&live_dir);
+        fs::create_dir_all(&live_dir).unwrap();
+        crate::epoch::write_live(&live_dir, &crate::epoch::LiveSwitch::Yes).unwrap();
         let running = |id: &str, network: &str| crate::instance::Running {
             id: id.to_owned(),
-            dir: std::path::PathBuf::new(),
+            dir: live_dir.clone(),
             pid: 1,
             network: network.to_owned(),
         };
@@ -2463,8 +2473,14 @@ mod tests {
             switchable(Some(&launch(Some("work"))), &up),
             Some(("work".to_owned(), "nl".to_owned()))
         );
-        // Its instance not running: nothing to switch.
+        // Its instance not running, or its keeper refusing live switching:
+        // nothing to switch live.
         assert_eq!(switchable(Some(&launch(Some("work"))), &[]), None);
+        let previous = [crate::instance::Running {
+            dir: std::path::PathBuf::new(),
+            ..running("work", "nl")
+        }];
+        assert_eq!(switchable(Some(&launch(Some("work"))), &previous), None);
         // The main home, a throwaway, an instance of one network, a launch
         // not known: the restart, as before.
         for selector in [Some(""), Some("__fs__"), Some("chat"), None] {
@@ -2491,7 +2507,17 @@ mod tests {
         let mut from_offline = switch_targets(&state, "offline");
         from_offline.sort();
         assert_eq!(from_offline, ["de", "nl"]);
+
+        fs::create_dir_all(state.join("unpublished")).unwrap();
+        fs::write(state.join("unpublished/config.conf"), "").unwrap();
+        fs::write(state.join(crate::chain::ROUTES), "de\nnl\n").unwrap();
+        let mut strict = switch_targets(&state, "offline");
+        strict.sort();
+        assert_eq!(strict, ["de", "nl"]);
+        fs::write(state.join(crate::chain::ROUTES), "not a valid route\n").unwrap();
+        assert_eq!(switch_targets(&state, "offline"), ["offline"]);
         let _ = fs::remove_dir_all(&state);
+        let _ = fs::remove_dir_all(&live_dir);
     }
 
     /// Whose connections a switch breaks too: the container's other live

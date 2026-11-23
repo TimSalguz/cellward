@@ -220,6 +220,8 @@ struct Inst {
     out: u64,
     inb: u64,
     since: u64,
+    /// The instance's keeper permits a live switch. Absent in old output: no.
+    live_switch: bool,
 }
 
 /// A connection of a running instance.
@@ -434,6 +436,15 @@ fn parse(text: &str) -> Data {
                 rss_kib: num(rss),
                 ticks: num(ticks),
             }),
+            ["instance", id, of, network, out, inb, since, live_switch] => d.instances.push(Inst {
+                id: (*id).to_owned(),
+                container: (*of).to_owned(),
+                network: (*network).to_owned(),
+                out: num(out),
+                inb: num(inb),
+                since: num(since),
+                live_switch: *live_switch == "1",
+            }),
             ["instance", id, of, network, out, inb, since] => d.instances.push(Inst {
                 id: (*id).to_owned(),
                 container: (*of).to_owned(),
@@ -441,6 +452,7 @@ fn parse(text: &str) -> Data {
                 out: num(out),
                 inb: num(inb),
                 since: num(since),
+                live_switch: false,
             }),
             ["flow", id, proto, remote, port, name, who, out, inb, last] => d.flows.push(Conn {
                 instance: (*id).to_owned(),
@@ -774,6 +786,27 @@ fn network_text(network: &str) -> String {
     }
 }
 
+/// Networks offered as container targets. Unpublished routes remain visible on
+/// the Connections tab, but are not choices that would be refused on use.
+fn container_network_choices(data: &Data) -> Vec<(String, String)> {
+    let mut choices = vec![("ask".into(), "Спрашивать".into())];
+    for n in data
+        .networks
+        .iter()
+        .filter(|n| n.kind != "zone" || n.published)
+    {
+        let label = match n.kind.as_str() {
+            "offline" => "Без сети".to_owned(),
+            "unconfined" => "Без изоляции и без VPN".to_owned(),
+            "host" => "Сеть хоста (без VPN)".to_owned(),
+            _ if n.up => n.name.clone(),
+            _ => format!("{} (опущена)", n.name),
+        };
+        choices.push((n.name.clone(), label));
+    }
+    choices
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Network,
@@ -882,6 +915,23 @@ fn route_args(data: &Data, name: &str, node: &str, kind: &str, via: &str) -> Opt
         _ => return None,
     }
     Some(args)
+}
+
+fn route_commands(
+    data: &Data,
+    name: &str,
+    node: &str,
+    kind: &str,
+    via: &str,
+) -> Option<Vec<Vec<String>>> {
+    let add = route_args(data, name, node, kind, via)?;
+    let mut commands = vec![add];
+    if data.route_policy == "strict" {
+        commands.push(vec!["routes".into(), "allow".into(), name.into()]);
+    }
+    commands.push(vec!["up".into(), name.into()]);
+    commands.push(vec!["sync".into()]);
+    Some(commands)
 }
 
 fn route_preview(data: &Data, name: &str, node: &str, kind: &str, via: &str) -> String {
@@ -1615,6 +1665,12 @@ impl Panel {
                 let Some(c) = self.chosen().cloned() else {
                     return Task::none();
                 };
+                if !container_network_choices(&self.data)
+                    .iter()
+                    .any(|(name, _)| name == &to)
+                {
+                    return Task::none();
+                }
                 let elsewhere = self
                     .running(&c.name)
                     .is_some_and(|i| i.network != to && to != "ask");
@@ -1637,6 +1693,16 @@ impl Panel {
                 else {
                     return Task::none();
                 };
+                if !container_network_choices(&self.data)
+                    .iter()
+                    .any(|(name, _)| name == &to)
+                    || (!restart
+                        && !self
+                            .running(&c.name)
+                            .is_some_and(|instance| instance.live_switch))
+                {
+                    return Task::none();
+                }
                 let mut args = vec![
                     "container".into(),
                     "set".into(),
@@ -2152,8 +2218,15 @@ impl Panel {
                     node,
                     via,
                     kind,
-                }) => route_args(&self.data, name.trim(), &node, kind, &via)
-                    .map_or_else(Task::none, |args| self.act(args)),
+                }) => route_commands(&self.data, name.trim(), &node, kind, &via).map_or_else(
+                    Task::none,
+                    |all| {
+                        self.busy = true;
+                        self.said = None;
+                        self.pending = None;
+                        Task::perform(cellward_all(self.cellward.clone(), all), Msg::Done)
+                    },
+                ),
                 _ => Task::none(),
             },
             Msg::RouteAllow(name) => self.act(vec!["routes".into(), "allow".into(), name]),
@@ -2949,18 +3022,7 @@ impl Panel {
         let idle = !self.busy;
         // Its network.
         let mut nets = column![].spacing(4);
-        let mut choices: Vec<(String, String)> = vec![("ask".into(), "Спрашивать".into())];
-        for n in &self.data.networks {
-            let label = match n.kind.as_str() {
-                "offline" => "Без сети".to_owned(),
-                "unconfined" => "Без изоляции и без VPN".to_owned(),
-                "host" => "Сеть хоста (без VPN)".to_owned(),
-                _ if n.up => n.name.clone(),
-                _ => format!("{} (опущена)", n.name),
-            };
-            choices.push((n.name.clone(), label));
-        }
-        for (name, label) in choices {
+        for (name, label) in container_network_choices(&self.data) {
             let current = c.network == name;
             nets = nets.push(
                 button(text(label).size(13))
@@ -3103,26 +3165,42 @@ impl Panel {
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         };
         let block: Element<'a, Msg> = match pending {
-            Pending::Switch(to) => column![
-                question(format!(
-                    "Программы «{}» работают в другой сети. Сменить её на «{to}» на ходу? \
-                     Программы останутся, их соединения оборвутся, и ничего из прежней сети \
-                     в новой не заговорит. Или закрыть их и открыть уже в новой.",
-                    c.name
-                )),
-                row![
-                    go("Сменить сейчас".into(), Msg::Switch(false), false),
-                    go(
+            Pending::Switch(to) => {
+                let live = self
+                    .running(&c.name)
+                    .is_some_and(|instance| instance.live_switch);
+                let mut actions = row![].spacing(6);
+                if live {
+                    actions = actions.push(go("Сменить сейчас".into(), Msg::Switch(false), false));
+                }
+                actions = actions
+                    .push(go(
                         "Сменить и перезапустить программы".into(),
                         Msg::Switch(true),
-                        false
-                    ),
-                    cancel
+                        false,
+                    ))
+                    .push(cancel);
+                column![
+                    question(if live {
+                        format!(
+                            "Программы «{}» работают в другой сети. Сменить её на «{to}» на ходу? \
+                             Программы останутся, их соединения оборвутся, и ничего из прежней сети \
+                             в новой не заговорит. Или закрыть их и открыть уже в новой.",
+                            c.name
+                        )
+                    } else {
+                        format!(
+                            "Программы «{}» работают в другой сети. Этот экземпляр не может \
+                             сменить её на «{to}» на ходу. Закрыть программы и открыть их уже \
+                             в новой сети?",
+                            c.name
+                        )
+                    }),
+                    actions
                 ]
-                .spacing(6)
-            ]
-            .spacing(8)
-            .into(),
+                .spacing(8)
+                .into()
+            }
             Pending::Grant(target, dir) => column![
                 question(format!(
                     "Надолго ли выдать «{dir}» контейнеру «{}»? По истечении срока каталог \
@@ -3322,7 +3400,7 @@ impl Panel {
                 };
                 let sources = route_sources(&self.data, kind);
                 let mut form = column![
-                    question("Собери путь снаружи внутрь. Конфиг узла хранится один раз; этот маршрут лишь выбирает, через какое звено подключаться. Создание ничего не подключает.".into()),
+                    question("Собери путь снаружи внутрь. Конфиг узла хранится один раз; этот маршрут лишь выбирает, через какое звено подключаться. После проверки маршрут будет поднят, а при строгом списке — сначала разрешён.".into()),
                     text("1 · Как будет называться сеть в выборе программ?").size(13),
                     text_input("имя маршрута (для выбора программой)", name)
                         .on_input(Msg::RouteName)
@@ -3363,11 +3441,11 @@ impl Panel {
                 } else if self.data.networks.iter().any(|n| n.name == name.trim()) {
                     form = form.push(text("Маршрут с таким именем уже существует.").size(12));
                 }
-                form = form.push(text("После создания нажми «Разрешить маршрут» у новой зоны. Внешние звенья разрешай первыми; без разрешения запуск закрыт.").size(12));
+                form = form.push(text("Внешние звенья создавай первыми. Если разрешение или подъём отклонены, следующие шаги не выполняются; причина будет показана.").size(12));
                 form.push(
                     row![
                         go(
-                            "Создать маршрут (не подключать)",
+                            "Создать и поднять",
                             route_args(&self.data, name.trim(), node, kind, via).map(|_| Msg::AddRouteGo),
                             false
                         ),
@@ -3818,7 +3896,7 @@ impl Panel {
                     .spacing(6),
                 );
                 page = page.push(text(format!(
-                    "Узлы в пуле: {}. После создания разреши маршрут ниже: сначала внешнее звено, затем внутренние по порядку. Только разрешённый маршрут появится в окне запуска.",
+                    "Узлы в пуле: {}. Создавай маршруты сначала для внешнего звена, затем для внутренних по порядку. Каждый будет поднят после проверок; при строгом списке он сначала разрешается и лишь затем появится в окне запуска.",
                     if self.data.nodes.is_empty() { "пока нет".into() } else { self.data.nodes.join(", ") }
                 )).size(12));
             }
@@ -4289,7 +4367,12 @@ impl Panel {
             ),
             ("unconfined".to_owned(), "Без изоляции и без VPN".to_owned()),
         ];
-        for n in self.data.networks.iter().filter(|n| n.kind == "zone") {
+        for n in self
+            .data
+            .networks
+            .iter()
+            .filter(|n| n.kind == "zone" && n.published)
+        {
             nets.push((n.name.clone(), format!("VPN: {}", n.name)));
         }
         page = page.push(self.setting_row(
@@ -4732,6 +4815,82 @@ mod tests {
             panel.pending,
             Some(Pending::AddRoute { ref via, kind: "user", .. }) if via == "nl"
         ));
+    }
+
+    #[test]
+    fn route_creation_publishes_and_starts_only_after_each_step_succeeds() {
+        let d = parse(
+            "route-policy\tstrict\nnode\tinner\nuser-vpn\touter\n\
+                       network\touter\tzone\t1\t#112233\t0\talive\t\t\t1\n",
+        );
+        assert_eq!(
+            route_commands(&d, "inner-via-outer", "inner", "user", "outer"),
+            Some(vec![
+                vec![
+                    "route",
+                    "add",
+                    "inner-via-outer",
+                    "inner",
+                    "--via-user",
+                    "outer"
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+                vec!["routes", "allow", "inner-via-outer"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                vec!["up", "inner-via-outer"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+                vec!["sync".to_owned()],
+            ])
+        );
+    }
+
+    #[test]
+    fn legacy_route_creation_does_not_enable_strict_publication() {
+        let d = parse(
+            "route-policy\tlegacy\nnode\tinner\nuser-vpn\touter\n\
+                       network\touter\tzone\t1\t#112233\t0\talive\t\t\t1\n",
+        );
+        let commands = route_commands(&d, "inner-via-outer", "inner", "user", "outer").unwrap();
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[1], ["up", "inner-via-outer"]);
+        assert_eq!(commands[2], ["sync"]);
+    }
+
+    #[test]
+    fn unpublished_networks_are_not_container_or_live_switch_targets() {
+        let d = parse(
+            "container\twork\tprivate\tnl\t#3366ff\n\
+             network\tnl\tzone\t1\t#112233\t0\talive\t\t\t1\n\
+             network\tsecret\tzone\t0\t#112233\t0\t-\t\t\t0\n\
+             network\toffline\toffline\t1\t#808080\t0\t-\t\t\t1\n\
+             instance\twork\twork\tnl\t0\t0\t1\t0\n",
+        );
+        assert_eq!(
+            container_network_choices(&d)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["ask", "nl", "offline"]
+        );
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Containers);
+        panel.data = d;
+        panel.selected = Some("work".into());
+        let _ = panel.update(Msg::SetNetwork("secret".into()));
+        assert!(panel.pending.is_none());
+        assert!(!panel.busy);
+        let _ = panel.update(Msg::SetNetwork("offline".into()));
+        assert_eq!(panel.pending, Some(Pending::Switch("offline".into())));
+        let _ = panel.update(Msg::Switch(false));
+        assert!(!panel.busy, "an unavailable live switch was not started");
+        assert!(!panel.data.instances[0].live_switch);
+        assert!(!parse("instance\told\told\tnl\t0\t0\t1\n").instances[0].live_switch);
+        assert!(parse("instance\tnew\tnew\tnl\t0\t0\t1\t1\n").instances[0].live_switch);
     }
 
     /// Two programs of a container, one of another, one of none found, one
