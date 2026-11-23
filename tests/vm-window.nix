@@ -152,6 +152,14 @@ let
       display = machine.succeed(
           "ls /run/user/1000 | grep -E '^wayland-[0-9]+$' | head -1"
       ).strip()
+
+      def mapped(app_id, timeout=30):
+          command = (
+              "export XDG_RUNTIME_DIR=/run/user/1000; "
+              "SWAYSOCK=$(ls /run/user/1000/sway-ipc.*.sock | head -1) "
+              f"swaymsg -t get_tree | grep -q '\"app_id\": *\"{app_id}\"'"
+          )
+          machine.wait_until_succeeds("su -l alice -c " + shlex.quote(command), timeout=timeout)
     '' + pkgs.lib.optionalString loginOnly ''
       json = __import__("json")
       swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock | head -1").strip()
@@ -178,8 +186,7 @@ let
               f"systemd-run --user --unit=vmpick --setenv=WAYLAND_DISPLAY={display} "
               "vpn-zone-pick --label 'Огненный лис' --id firefox -- touch /tmp/started"
           )
-          machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
-          machine.sleep(3)
+          mapped("vpn-zone-window")
           machine.succeed("pgrep -x vpn-zone-window")
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/launch-window.png")
           machine.copy_from_vm("/tmp/launch-window.png", "")
@@ -203,7 +210,6 @@ let
           machine.copy_from_vm("/tmp/launch-window-name.png", "")
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
           machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=15)
-          machine.sleep(1)
           machine.fail("test -e /tmp/started")
 
       # A launch through the picker that does not start (2026-09-28): the
@@ -293,8 +299,7 @@ let
               f"systemd-run --user --unit=vmchecklist --setenv=WAYLAND_DISPLAY={display} "
               f"-p StandardInput=file:/tmp/checklist.req {win} checklist"
           )
-          machine.wait_until_succeeds("pgrep -f '[v]pn-zone-window checklist'", timeout=30)
-          machine.sleep(3)
+          mapped("vpn-zone-window")
           alice(f"WAYLAND_DISPLAY={display} grim /tmp/checklist.png")
           machine.copy_from_vm("/tmp/checklist.png", "")
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
