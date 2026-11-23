@@ -73,6 +73,7 @@ pub enum Key {
     PreviewUnsupported,
     PreviewTooLarge,
     HistoryUnavailable,
+    TargetUnavailable,
     PastePreview,
     PasteConfirm,
     PasteSecret,
@@ -206,6 +207,12 @@ pub fn text(language: Language, key: Key) -> &'static str {
         (Language::Russian, PreviewTooLarge) => "Картинка слишком большая для предпросмотра",
         (Language::English, HistoryUnavailable) => "No response from clipboard history service",
         (Language::Russian, HistoryUnavailable) => "Нет ответа от службы истории",
+        (Language::English, TargetUnavailable) => {
+            "The selected destination is no longer running. Choose another destination before copying."
+        }
+        (Language::Russian, TargetUnavailable) => {
+            "Выбранное назначение уже остановлено. Перед копированием выберите другое."
+        }
     }
 }
 

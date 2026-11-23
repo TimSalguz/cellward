@@ -200,7 +200,7 @@ impl List {
                 container(text(wait).size(13)).width(Length::Fill),
                 button(text("Разрешить отмеченное  Enter").size(14))
                     .padding([6, 14])
-                    .style(button::primary)
+                    .style(crate::appearance::primary_button)
                     .on_press_maybe(self.armed.then_some(Msg::Allow)),
                 button(text("Ничего  Esc").size(14))
                     .padding([6, 14])

@@ -94,12 +94,16 @@ compositor. Capture unit tests also cover size limits, deadlines and binary data
 
 ## Live history and image inspection
 
-An open history window checks for new entries once a second, off the UI thread,
-with at most one refresh in flight. At the newest row it follows a bounded newest
-page. While reading older rows it preserves the selected entry, expanded text,
-search, filters and copy destination; large arrivals are paged without gaps.
+An open history window checks for new entries, history tabs and copy destinations
+once a second, off the UI thread, with at most one refresh of each in flight. At
+the newest row it follows a bounded newest page. While reading older rows it
+preserves the selected entry, expanded text, search, filters and copy destination;
+large arrivals are paged without gaps. A destination that stops stays selected but
+unavailable until another destination is explicitly chosen; copying never falls
+back silently to the host. The unavailable action remains visible with readable
+disabled colors.
 Background replies from an old search or history are ignored. Confirmation,
-password editing and image inspection pause refresh until they are closed.
+password editing and image inspection pause entry refresh until they are closed.
 
 Click a PNG thumbnail to inspect the original pixels across the window. The
 viewer supports zoom with the wheel, drag to pan, fit/actual size and maximizing
@@ -107,8 +111,9 @@ the resizable window. Escape returns to the same history instead of closing it.
 Only the explicitly opened image is decoded at full resolution, off-thread and
 under the existing PNG size/allocation limits. Other image types remain copyable
 but currently have no large preview. Secret shelves never reveal image contents.
-`tests/clipboard-window-live-smoke.py` verifies automatic arrival and the large
-preview in the actual GUI on a private compositor, without clipboard mutation.
+`tests/clipboard-window-live-smoke.py` verifies automatic entry, tab and target
+arrival, destination loss and the large preview in the actual GUI on a private
+compositor, without clipboard mutation.
 
 ## Legacy proxies (programs started before this update)
 

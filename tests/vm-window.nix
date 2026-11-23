@@ -240,7 +240,8 @@ let
       # kdialog menus. Screenshots of both tabs, a container chosen by key.
       if ${if screenshotsOnly then "True" else "False"}:
           # The preview also checks that a persisted non-system palette is
-          # applied to a newly opened panel. The launch shot above is System.
+          # applied to a newly opened panel. The launch shot above is System;
+          # without a desktop palette or portal it exercises the light fallback.
           alice("mkdir -p ~/.config/cellward && printf 'theme=nord\\n' > ~/.config/cellward/appearance.conf")
       with subtest("the cellward window: the network monitor and the containers"):
           alice(
