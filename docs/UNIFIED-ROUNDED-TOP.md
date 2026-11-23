@@ -45,7 +45,12 @@ the proxy's event-loop timer; it does not permanently pin the panel.
 
 Buffers are cached by complete geometry, visibility, button state and scale,
 with leases preventing writes over buffers still held by the compositor.
-Busy buffers cause a timed retry, never reuse/stretch of another geometry.
+A buffer release immediately redraws the latest requested spec, with a timed
+retry as a fallback; a busy buffer is never reused or stretched for another
+geometry. Fullscreen is part of layout invalidation even when the logical
+size is unchanged. Side strips extend one logical pixel underneath the top,
+so independent device-pixel rounding cannot open an internal seam; the top
+occludes that overlap and the outer contour is unchanged.
 The sparse memfd reserves bounded space for two images, not every button
 variant at full-window width. Actual pixels are rendered only on demand.
 The composite path supports up to 8192 logical pixels of width; larger windows
@@ -54,8 +59,11 @@ limit rebuilds the surface topology. The plain square-frame and tag paths
 are unchanged.
 
 Verification covers premultiplied alpha at fractional scales, narrow widths,
-busy-cache behaviour, absence of overlapping top surfaces on the wire, and a
-double-click after synthetic pointer-leave. The nested-niri smoke checks
+busy-cache behaviour with delayed release, same-size fullscreen invalidation,
+internal seams at 100/125/150/175%, absence of overlapping top surfaces on
+the wire, and a double-click after synthetic pointer-leave. The niri VM also
+checks rounded resize/fullscreen transitions and saves screenshots. The
+nested-niri smoke checks
 1/4 px frames, always/hover modes, menu dismissal without click-through,
 the first hover title click, and close-button hit testing at its fixed anchor.
 It also captures opacity-0.65 screenshots for visual inspection.

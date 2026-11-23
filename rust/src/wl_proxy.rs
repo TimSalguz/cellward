@@ -7119,7 +7119,7 @@ mod tests {
         let strips: Vec<[i32; 4]> = on_root[1..4].iter().map(|&p| laid(p)).collect();
         assert_eq!(
             strips,
-            [[18, 220, 284, 4], [6, 40, 4, 172], [310, 40, 4, 172]]
+            [[18, 220, 284, 4], [6, 39, 4, 173], [310, 39, 4, 173]]
         );
         assert_eq!(attached(&got, on_root[4].1), Some(0));
         assert_eq!(attached(&got, on_root[5].1), Some(0));
@@ -7153,6 +7153,119 @@ mod tests {
         for pair in offsets.windows(2) {
             assert_eq!(pair[1].0, pair[0].0 + 12 * pair[0].1 * 4, "{offsets:?}");
         }
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    #[test]
+    fn a_released_top_buffer_immediately_converges_to_the_latest_resize() {
+        let Some(font) = test_font() else { return };
+        let mut drawing = looked(
+            TitleMode::Off,
+            Some(font),
+            ButtonStyle::Cellward,
+            Style::Full,
+            0,
+        );
+        drawing.frame.outer = Radius::Px(12);
+        let rig = Rig::with_drawing("top-release", Some(drawing));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let (got, xdg, root) = first_commit(&log);
+        let subs = all(&got, "wl_subcompositor", 1);
+        let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
+        let (top_sub, top) = (on_root[8].args[0], on_root[8].args[1]);
+        let first = attached(&got, top).expect("the first unified top");
+        assert_eq!(made(&got, first)[1..], [308, 24, 308 * 4, 0]);
+
+        request(&mut client, xdg, 3, &words(&[10, 20, 320, 200]));
+        request(&mut client, root, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        let second = attached(&got, top).expect("the second unified top");
+        assert_ne!(second, first);
+        assert_eq!(made(&got, second)[1..], [328, 24, 328 * 4, 0]);
+
+        // Both bounded slots are leased now. The newest spec is retained,
+        // but no buffer can be attached until the compositor releases one.
+        request(&mut client, xdg, 3, &words(&[10, 20, 340, 200]));
+        request(&mut client, root, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        assert_eq!(attached(&got, top), Some(second));
+        assert!(all(&got, "wl_shm_pool", 0).is_empty(), "{got:#?}");
+
+        let mut out = Vec::new();
+        event(&mut out, first, 0, |_| {});
+        compositor.write_all(&out).unwrap();
+        let got = log_until(&log, |m| {
+            m.iface == "wl_subsurface" && m.opcode == 4 && m.object == top_sub
+        });
+        let latest = attached(&got, top).expect("the released slot was not redrawn");
+        assert_ne!(latest, second);
+        assert_eq!(made(&got, latest)[1..], [348, 24, 348 * 4, 0]);
+        let order: Vec<(String, u32)> = got
+            .iter()
+            .filter(|m| m.object == top || m.object == top_sub)
+            .map(|m| (m.iface.clone(), m.opcode))
+            .collect();
+        let commit = order.iter().rposition(|m| *m == ("wl_surface".into(), 6));
+        let sync = order
+            .iter()
+            .rposition(|m| *m == ("wl_subsurface".into(), 4));
+        assert!(
+            commit.is_some() && commit < sync,
+            "not shown at once: {order:?}"
+        );
+        drop(client);
+        assert_eq!(rig.finish(), 0);
+    }
+
+    #[test]
+    fn fullscreen_redraws_the_unified_top_at_the_same_size() {
+        let Some(font) = test_font() else { return };
+        let mut drawing = looked(
+            TitleMode::Off,
+            Some(font),
+            ButtonStyle::Cellward,
+            Style::Full,
+            0,
+        );
+        drawing.frame.outer = Radius::Px(12);
+        let rig = Rig::with_drawing("top-fullscreen", Some(drawing));
+        let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
+        a_window(&mut client);
+        let (got, xdg, root) = first_commit(&log);
+        let subs = all(&got, "wl_subcompositor", 1);
+        let on_root: Vec<&Msg> = subs.iter().filter(|m| m.args[2] == root).collect();
+        let top = on_root[8].args[1];
+        let first = attached(&got, top).expect("the rounded unified top");
+        let dimensions = made(&got, first);
+        let toplevel = all(&got, "xdg_surface", 1)[0].args[0];
+
+        let mut out = Vec::new();
+        event(&mut out, toplevel, 0, |a| {
+            a.extend_from_slice(&words(&[0, 0, 4, 2]))
+        });
+        event(&mut out, xdg, 0, |a| {
+            a.extend_from_slice(&5u32.to_ne_bytes())
+        });
+        compositor.write_all(&out).unwrap();
+        events_until(&mut client, |o, op, _| o == 8 && op == 0);
+        request(&mut client, 8, 4, &5u32.to_ne_bytes());
+        request(&mut client, root, 6, &[]);
+        let got = log_until(&log, |m| {
+            m.iface == "wl_surface" && m.opcode == 6 && m.object == root
+        });
+        let square = attached(&got, top).expect("fullscreen kept a stale rounded top");
+        assert_ne!(square, first);
+        assert_eq!(
+            made(&got, square),
+            dimensions,
+            "the geometry stayed the same"
+        );
         drop(client);
         assert_eq!(rig.finish(), 0);
     }

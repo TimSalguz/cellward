@@ -617,6 +617,21 @@ pub(crate) fn trim(r: Rect, pieces: &[Rect]) -> Rect {
     }
 }
 
+/// A side strip meets the unified top one logical pixel early. The top is
+/// stacked above it, so independently rounded device edges cannot open a
+/// seam and the overlap cannot change the outer contour or the bottom edge.
+fn under_unified_top(r: Rect, side: Side) -> Rect {
+    if matches!(side, Side::Left | Side::Right) {
+        Rect {
+            y: r.y.saturating_sub(1),
+            h: r.h.saturating_add(1),
+            ..r
+        }
+    } else {
+        r
+    }
+}
+
 /// The title's opaque rectangle may overlap a corner piece as far as the
 /// arc at its top permits. Reserving the entire radius shifts its buttons
 /// unnecessarily inward. Keep the whole rectangle inside the circle,
@@ -1547,6 +1562,7 @@ impl Frames {
                     text,
                     pool,
                     compositor: compositor.clone(),
+                    window: me.clone(),
                     scale: self.scale.get(),
                     spec: crate::wl_title::top::TopSpec {
                         width: 1,
@@ -1826,6 +1842,7 @@ struct TextBuffer {
     lease: Option<Lease>,
     retired: bool,
     destroyed: bool,
+    window: Option<Weak<RefCell<Window>>>,
 }
 
 impl TextBuffer {
@@ -1842,6 +1859,11 @@ impl WlBufferHandler for TextBuffer {
         self.lease = None;
         if self.retired {
             self.destroy(slf);
+        }
+        if let Some(window) = self.window.as_ref().and_then(Weak::upgrade) {
+            if let Ok(mut window) = window.try_borrow_mut() {
+                window.top_buffer_released();
+            }
         }
     }
 }
@@ -1919,6 +1941,7 @@ struct TopParts {
     text: Rc<Text>,
     pool: Rc<WlShmPool>,
     compositor: Rc<WlCompositor>,
+    window: Weak<RefCell<Window>>,
     scale: u32,
     spec: crate::wl_title::top::TopSpec,
     current: Option<Rc<WlBuffer>>,
@@ -1940,6 +1963,7 @@ impl TopParts {
             drawn.offset,
             drawn.lease,
             Pixels::Alpha,
+            Some(self.window.clone()),
         );
         attach_whole(surface, &buffer, drawn.width, drawn.height);
         let zero = Fixed::from_i32_saturating(0);
@@ -1996,6 +2020,7 @@ fn memfd_buffer(
     offset: i32,
     lease: Lease,
     pixels: Pixels,
+    window: Option<Weak<RefCell<Window>>>,
 ) -> Rc<WlBuffer> {
     let buffer = pool.new_send_create_buffer(offset, width, height, width * 4, shm_format(pixels));
     quiet(&*buffer);
@@ -2003,6 +2028,7 @@ fn memfd_buffer(
         lease: Some(lease),
         retired: false,
         destroyed: false,
+        window,
     });
     buffer
 }
@@ -2073,7 +2099,14 @@ impl TextParts {
         };
         let (width, height, offset) = (drawn.width, drawn.height, drawn.offset);
         let pixels = self.text.pixels();
-        let buffer = memfd_buffer(&self.pool, (width, height), offset, drawn.lease, pixels);
+        let buffer = memfd_buffer(
+            &self.pool,
+            (width, height),
+            offset,
+            drawn.lease,
+            pixels,
+            None,
+        );
         attach_whole(&self.surface, &buffer, width, height);
         retire(&mut self.current, &mut self.retired);
         self.current = Some(buffer);
@@ -2184,6 +2217,7 @@ impl ButtonParts {
             offset,
             drawn.lease,
             Pixels::Opaque,
+            None,
         );
         attach_whole(&self.surface, &buffer, width, height);
         retire(&mut self.current, &mut self.retired);
@@ -2313,6 +2347,7 @@ impl CornerParts {
                     offset,
                     drawn.lease.another(),
                     Pixels::Alpha,
+                    None,
                 );
                 attach_whole(&piece.surface, &buffer, w, h);
                 piece.surface.send_commit();
@@ -2463,8 +2498,9 @@ struct Window {
     /// first press of a double click, maybe.
     title_pressed: Option<u32>,
     hover_keep_until: Option<Instant>,
-    /// What the frame is laid around now: the area, the insets, the strip.
-    laid: Option<(Rect, Insets, Option<Rect>)>,
+    /// What the frame is laid around now: the area, the insets, the strip,
+    /// and whether the acknowledged state is fullscreen (square corners).
+    laid: Option<(Rect, Insets, Option<Rect>, bool)>,
     /// The button the left pointer button went down on, until it comes up:
     /// a button acts when both happen on it.
     pressed: Option<Button>,
@@ -2635,7 +2671,7 @@ impl Window {
 
     /// The area the frame is laid around now, if it is.
     fn area(&self) -> Option<Rect> {
-        self.laid.map(|(area, _, _)| area)
+        self.laid.map(|(area, _, _, _)| area)
     }
 
     /// Just before the program's commit of its root surface: the geometry and
@@ -2757,7 +2793,7 @@ impl Window {
                 }
             })
         };
-        if self.laid == Some((area, i, strip)) {
+        if self.laid == Some((area, i, strip, self.fullscreen)) {
             // Nothing moves; whether the strip shows may still change (the
             // program acked fullscreen, or its end).
             self.show_title(false);
@@ -2782,11 +2818,16 @@ impl Window {
                 continue;
             }
             let r = trim(r, pieces);
+            let r = if self.unified_top {
+                under_unified_top(r, Side::ALL[index % 4])
+            } else {
+                r
+            };
             s.sub.send_set_position(r.x, r.y);
             s.viewport.send_set_destination(r.w, r.h);
             s.surface.send_commit();
         }
-        self.laid = Some((area, i, strip));
+        self.laid = Some((area, i, strip, self.fullscreen));
         self.outer_laid = outer;
         self.lay_title(f, root, top, strip);
         self.lay_corners(f, root, top, area);
@@ -2880,7 +2921,7 @@ impl Window {
     /// its own mode says (`crate::frame::Fullscreen`), and the label on the
     /// way in brings it out whatever that is ([`Self::notice`]).
     fn title_wanted(&self) -> bool {
-        let placed = self.laid.is_some_and(|(_, _, strip)| strip.is_some());
+        let placed = self.laid.is_some_and(|(_, _, strip, _)| strip.is_some());
         let mode = if self.fullscreen_now() {
             if self.notice_until.is_some() {
                 return placed && !self.notice_due;
@@ -2895,6 +2936,20 @@ impl Window {
                 TitleMode::Hover => self.hover || self.hover_keep_until.is_some(),
                 TitleMode::Off => false,
             }
+    }
+
+    /// A unified top buffer's region is free again: draw the latest spec
+    /// now, without waiting for the retry timer or another program commit.
+    fn top_buffer_released(&mut self) {
+        let Some(t) = &mut self.title else {
+            return;
+        };
+        let Some(top) = &mut t.composite else {
+            return;
+        };
+        if top.retry_at.is_some() && top.draw(&t.surface, &t.view) {
+            t.apply_now();
+        }
     }
 
     /// Show or hide the title strip as [`Self::title_wanted`] says: `now`
@@ -2936,7 +2991,7 @@ impl Window {
             return;
         };
         if let Some(top) = &mut t.composite {
-            let Some((area, i, _)) = self.laid else {
+            let Some((area, i, _, _)) = self.laid else {
                 return;
             };
             let whole = geometry_up(area, i);
@@ -3077,7 +3132,7 @@ impl Window {
     /// revealed title still accepts a drag or double click; only the resize
     /// edges cease to apply. Nothing acts before the frame is laid out.
     fn hit(&self, part: Part, x: f64, y: f64) -> Hit {
-        let Some((area, i, _)) = self.laid else {
+        let Some((area, i, _, _)) = self.laid else {
             return Hit::Nothing;
         };
         let pieces: &[Rect] = self.outer_laid.as_ref().map_or(&[], |p| &p[..]);
@@ -3135,9 +3190,15 @@ impl Window {
                     return Hit::Nothing;
                 };
                 let outer = strips(area, i)[side.index()];
+                let strip = trim(strip, pieces);
+                let strip = if self.unified_top {
+                    under_unified_top(strip, side)
+                } else {
+                    strip
+                };
                 Hit::Edge(ring_edges_with_corner(
                     side,
-                    trim(strip, pieces),
+                    strip,
                     outer,
                     i.border,
                     x,
@@ -3561,6 +3622,7 @@ impl Dropdown {
             offset,
             drawn.lease,
             Pixels::Opaque,
+            None,
         );
         attach_whole(&self.surface, &buffer, width, height);
         self.view.send_set_destination(self.size.0, self.size.1);
@@ -3659,7 +3721,7 @@ impl Window {
         let (Some(seat), Some(text), Some(parent)) = (seat, f.text(), self.xdg.upgrade()) else {
             return false;
         };
-        let (Some((_, _, Some(strip))), Some(geometry)) = (self.laid, self.sent_geometry) else {
+        let (Some((_, _, Some(strip), _)), Some(geometry)) = (self.laid, self.sent_geometry) else {
             return false;
         };
         let Some((at, scale)) = self.title.as_ref().and_then(|t| {
@@ -4162,6 +4224,7 @@ impl Panel {
             offset,
             self.drawn.lease.another(),
             Pixels::Opaque,
+            None,
         );
         attach_whole(&self.surface, &buffer, width, height);
         self.view
@@ -4206,7 +4269,7 @@ impl Window {
         if self.toplevel.as_ref().and_then(Weak::upgrade).is_none() {
             return false;
         }
-        let (Some((_, _, strip)), Some(geometry)) = (self.laid, self.sent_geometry) else {
+        let (Some((_, _, strip, _)), Some(geometry)) = (self.laid, self.sent_geometry) else {
             return false;
         };
         let (compositor, viewporter, wm_base, pool) = {
@@ -7958,6 +8021,36 @@ mod tests {
             let inner_top = parts[4];
             assert_eq!(inner_top.x, up.x + widths[0]);
             assert_eq!(inner_top.y, up.y + widths[0]);
+        }
+    }
+
+    #[test]
+    fn unified_side_strips_cover_the_top_seam_without_moving_outer_edges() {
+        for scale in [100, 125, 150, 175] {
+            for seam in 1..80 {
+                let top_end = seam * scale / 100;
+                let side_start = ((seam - 1) * scale + 99) / 100;
+                assert!(
+                    side_start <= top_end,
+                    "gap at scale {scale}%, logical seam {seam}"
+                );
+            }
+        }
+        for side in Side::ALL {
+            let original = Rect {
+                x: 10,
+                y: 40,
+                w: 4,
+                h: 172,
+            };
+            let got = under_unified_top(original, side);
+            assert_eq!((got.x, got.w), (original.x, original.w));
+            assert_eq!(got.y + got.h, original.y + original.h);
+            if matches!(side, Side::Left | Side::Right) {
+                assert_eq!((got.y, got.h), (39, 173));
+            } else {
+                assert_eq!(got, original);
+            }
         }
     }
 

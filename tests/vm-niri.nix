@@ -138,12 +138,12 @@ let
           "ls /run/user/1000 | grep -E '^wayland-[0-9]+$' | head -1"
       ).strip()
 
-      def niri_config(radius, clip):
+      def niri_config(radius, clip, scale=1.0):
           """niri's config with one rule for every window: `radius`, clipped
           or not. A new file moved over the old one, as home-manager
           replaces a link: niri reloads it, cellward's supervisor sees it."""
           text = (
-              'output "winit" {\n    scale 1.0\n}\n'
+              f'output "winit" {{\n    scale {scale}\n}}\n'
               "layout {\n    gaps 16\n    focus-ring {\n        off\n    }\n"
               "    border {\n        off\n    }\n"
               "    default-column-width { fixed 640; }\n}\n"
@@ -305,6 +305,31 @@ let
 
           settled("niri-outer", round_outside)
 
+      with subtest("rounded resizes meet the side strips at integer and fractional scales"):
+          sock = machine.succeed("ls /run/user/1000/niri.*.sock | head -1").strip()
+          for scale in (1.0, 1.25, 1.5, 1.75):
+              for width in (600, 632, 608):
+                  niri_config(20, False, scale)
+                  alice(f"NIRI_SOCKET={sock} niri msg action set-column-width {width}")
+
+                  def resized(at):
+                      x0, y0, x1, y1 = frame_box(at)
+                      assert abs((x1 - x0 + 1) - width * scale) <= 2, (scale, width, (x0, y0, x1, y1))
+                      for c in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+                          assert at(*c) != MAGENTA, ("the outer contour changed", scale, c)
+                      seam = y0 + round(24 * scale)
+                      for x in (x0 + 1, x1 - 1):
+                          for y in range(seam - 2, seam + 3):
+                              assert at(x, y) == MAGENTA, ("a top/side seam", scale, width, x, y, at(x, y))
+                      return (x0, y0, x1, y1)
+
+                  label = str(scale).replace(".", "-")
+                  settled(f"niri-resize-{label}-{width}", resized)
+
+          niri_config(20, False)
+          alice(f"NIRI_SOCKET={sock} niri msg action set-column-width 640")
+          settled("niri-resize-back", round_outside)
+
       with subtest("fullscreen on niri: the border kept, the zone's name over the top"):
           alice("cellward frame fullscreen notice 30")
           machine.sleep(2)
@@ -313,8 +338,10 @@ let
 
           def labelled(at):
               w, h = at.size
-              # The border at the screen's edges.
+              # The border at the screen's edges, with square top corners:
+              # no stale rounded image from the windowed state.
               assert at(1, h // 2) == MAGENTA and at(w - 2, h // 2) == MAGENTA, (at(1, h // 2), at(w - 2, h // 2))
+              assert at(1, 1) == MAGENTA and at(w - 2, 1) == MAGENTA, "stale rounded top"
               # The label under the top border: magenta past its text...
               assert at(w * 3 // 4, 4 + 10) == MAGENTA, at(w * 3 // 4, 4 + 10)
               # ... and the zone's name on it: not magenta.
@@ -323,6 +350,7 @@ let
 
           settled("niri-fullscreen-label", labelled)
           alice(f"NIRI_SOCKET={sock} niri msg action fullscreen-window")
+          settled("niri-fullscreen-back", round_outside)
           alice("cellward frame fullscreen notice default")
           machine.sleep(2)
 
