@@ -4452,6 +4452,19 @@ mod tests {
         (out.status.success() && text.contains("1 passed"), text)
     }
 
+    fn wire_alone(test: &str, tag: &str) {
+        if test_font().is_none() {
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("vz-wl-proxy-{tag}-alone-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (passed, text) = run_alone(test, &dir);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(passed, "{text}");
+    }
+
     /// `start` forks, and a fork of the multi-threaded test harness is no
     /// place to confine a process in: the test runs itself again, alone. A
     /// client from outside the launch is started beside it — a sibling of the
@@ -7249,6 +7262,12 @@ mod tests {
 
     #[test]
     fn a_released_top_buffer_immediately_converges_to_the_latest_resize() {
+        wire_alone("wl_proxy::tests::released_top_buffer_wire", "top-release");
+    }
+
+    #[test]
+    #[ignore = "run by a_released_top_buffer_immediately_converges_to_the_latest_resize"]
+    fn released_top_buffer_wire() {
         let Some(font) = test_font() else { return };
         let mut drawing = looked(
             TitleMode::Off,
@@ -7315,6 +7334,15 @@ mod tests {
 
     #[test]
     fn fullscreen_redraws_the_unified_top_at_the_same_size() {
+        wire_alone(
+            "wl_proxy::tests::fullscreen_unified_top_wire",
+            "top-fullscreen",
+        );
+    }
+
+    #[test]
+    #[ignore = "run by fullscreen_redraws_the_unified_top_at_the_same_size"]
+    fn fullscreen_unified_top_wire() {
         let Some(font) = test_font() else { return };
         let mut drawing = looked(
             TitleMode::Off,
