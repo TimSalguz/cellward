@@ -199,6 +199,21 @@ exit "$code""#,
         );
     }
 
+    fn focus_window(&self, pid: i32) {
+        let marker = self.path("focused");
+        self.script(
+            "swaymsg",
+            &format!(
+                r#"case "$*" in
+  '-t get_tree -r') printf '%s\n' '{{"pid":{pid},"id":1}}' ;;
+  '[con_id=1] focus') : > '{}' ;;
+  *) exit 1 ;;
+esac"#,
+                marker.display()
+            ),
+        );
+    }
+
     /// The answers the dialogs will be given, in order.
     fn answers(&self, answers: &[&str]) {
         let mut text = String::new();
@@ -245,7 +260,9 @@ exit "$code""#,
             .env_remove("VPN_ZONE_ASK")
             .env_remove("VPN_ZONE_PROFILE")
             .env_remove("VPN_ZONE_CURRENT")
-            .env_remove("VPN_ZONE_APPID");
+            .env_remove("VPN_ZONE_APPID")
+            .env_remove("NIRI_SOCKET")
+            .env_remove("SWAYSOCK");
         // A graphical session for most cases: they are about what the dialog
         // does with an answer. Without one the picker takes a different branch
         // on purpose, and the developer's shell has the variable set.
@@ -630,25 +647,99 @@ fn a_bound_default_container_does_not_answer_for_an_unpinned_program() {
 
 #[test]
 fn a_running_program_that_hands_over_is_started_where_it_already_runs_without_a_word() {
-    // A click on a running program that hands a launch over to the copy that
-    // is up means "raise the window". The selector is read back too: without
-    // it the program came back "bare", with its network remembered and its
-    // sandbox lost.
+    // A click hands the original command to the copy that is up, then raises
+    // its window. The selector is read back too: without it the program came
+    // back "bare", with its network remembered and its sandbox lost.
     let home = Home::new("running");
     home.zone("nl");
     let me = std::process::id() as i32;
     home.write(
         "state/.running/__main__/firefox",
-        &format!("{me} nl sb:work\n"),
+        &format!("{me} nl work\n"),
     );
     vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
     home.write("state/.handover/firefox", "");
-    let out = home.run(&pick("firefox"), &[]);
+    home.focus_window(me);
+    let bin = home.path("bin");
+    let out = home.run(
+        &pick("firefox"),
+        &[("SWAYSOCK", "focus-test"), ("PATH", bin.to_str().unwrap())],
+    );
     assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.path("focused").is_file(), "window was not raised");
     assert!(home.asked().is_empty(), "{:?}", home.asked());
     assert_eq!(
         home.launched()[0],
         ["run", "nl", "--sandbox", "work", "--", "firefox", "%u"]
+    );
+}
+
+#[test]
+fn switching_to_a_running_program_delivers_the_url_before_raising_it() {
+    let home = Home::new("running-there-url");
+    home.zone("nl");
+    let me = std::process::id() as i32;
+    home.write(
+        "state/.running/__main__/firefox",
+        &format!("{me} nl work\n"),
+    );
+    vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
+    home.window("action\tthere\n", 0);
+    home.focus_window(me);
+    let url = "https://example.org/open?next=https%3A%2F%2Fother.example%2Fa&x=1";
+
+    let bin = home.path("bin");
+    let out = home.run(
+        &["--id", "firefox", "--", "firefox", url],
+        &[("SWAYSOCK", "focus-test"), ("PATH", bin.to_str().unwrap())],
+    );
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(home.path("focused").is_file(), "window was not raised");
+    assert_eq!(
+        home.launched(),
+        vec![vec![
+            "run".to_owned(),
+            "nl".to_owned(),
+            "--sandbox".to_owned(),
+            "work".to_owned(),
+            "--".to_owned(),
+            "firefox".to_owned(),
+            url.to_owned(),
+        ]]
+    );
+}
+
+#[test]
+fn the_throwaway_no_window_fallback_delivers_the_url() {
+    let home = Home::new("running-throwaway-url");
+    home.zone("nl");
+    let me = std::process::id() as i32;
+    home.write(
+        "state/.running/__main__/firefox",
+        &format!("{me} nl __fs__:shared\n"),
+    );
+    vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
+    let url = "https://example.org/throwaway?q=hello%20world&x=1";
+
+    let out = home.run(&["--id", "firefox", "--", "firefox", url], &[]);
+
+    // Delivery has already happened when the absent compositor makes focus
+    // fail; one must not be mistaken for the other.
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("не показано"), "{}", stderr(&out));
+    assert_eq!(
+        home.launched(),
+        vec![vec![
+            "run".to_owned(),
+            "nl".to_owned(),
+            "--fs-sandbox".to_owned(),
+            "--join".to_owned(),
+            "shared".to_owned(),
+            "--".to_owned(),
+            "firefox".to_owned(),
+            url.to_owned(),
+        ]]
     );
 }
 
@@ -665,13 +756,18 @@ fn a_running_program_is_asked_until_it_is_seen_handing_over() {
     home.write("state/.running/__main__/firefox", &format!("{me} nl\n"));
     vpn_zone::registry::note_start(&home.path("state/.running"), me, false).unwrap();
     home.write("state/.last/firefox", "de\n");
-    home.answers(&["nl"]);
-    let out = home.run(&pick("firefox"), &[]);
+    home.window("action\tsame\n", 0);
+    home.focus_window(me);
+    let bin = home.path("bin");
+    let out = home.run(
+        &pick("firefox"),
+        &[("SWAYSOCK", "focus-test"), ("PATH", bin.to_str().unwrap())],
+    );
     assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(home.asked().len(), 1);
-    let asked = &home.asked()[0];
-    let default = asked.iter().position(|a| a == "--default").unwrap();
-    assert_eq!(asked[default + 1], "nl", "{asked:?}");
+    assert!(home.path("focused").is_file(), "window was not raised");
+    assert!(home.asked().is_empty(), "{:?}", home.asked());
+    let told = home.read("window.in").unwrap();
+    assert!(told.contains("title\tПрограмма уже открыта\n"), "{told}");
     assert_eq!(home.launched()[0], ["run", "nl", "--", "firefox", "%u"]);
     assert!(home.path("state/.handover/firefox").is_file());
 
@@ -682,8 +778,8 @@ fn a_running_program_is_asked_until_it_is_seen_handing_over() {
     other.zone("de");
     other.write("state/.running/__main__/alacritty", &format!("{me} nl\n"));
     vpn_zone::registry::note_start(&other.path("state/.running"), me, false).unwrap();
-    other.answers(&["de"]);
-    let out = other.run(&pick("alacritty"), &[]);
+    other.window("net\tde\ncontainer\t\n", 0);
+    let out = other.run(&pick("alacritty"), &[("VPN_ZONE_ASK", "1")]);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(other.launched()[0], ["run", "de", "--", "firefox", "%u"]);
     assert!(!other.path("state/.handover/alacritty").exists());

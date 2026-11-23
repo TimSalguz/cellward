@@ -359,7 +359,7 @@ pub struct Memory {
     pub running: Option<Running>,
     /// `.handover/<key>`: the program was seen handing a launch over to the
     /// copy already running ([`HANDOVER`]) — a click on it while it runs
-    /// raises that copy's window, with no question.
+    /// hands the original command to that copy and raises its window, with no question.
     pub hands_over: bool,
     /// `.pinnedprofile/<key>`, empty when the container is not pinned.
     pub pinned_profile: String,
@@ -2324,11 +2324,9 @@ pub fn main() -> ExitCode {
             };
             match choice {
                 Again::There => {
-                    if let Err(why) = raise_running(&tools, &key, &zone, &selector) {
-                        tell_not_raised(&tools, &label, &why);
-                        return ExitCode::from(1);
-                    }
-                    return ExitCode::SUCCESS;
+                    return launch_asked(
+                        &tools, &key, &label, &zone, &container, &args.cmd, &memory,
+                    );
                 }
                 Again::Same => {}
                 Again::New if !container.join.is_empty() => container.join.clear(),
@@ -3552,8 +3550,9 @@ fn launch(
 /// success without ever opening a window (the Wayland proxy's word,
 /// [`opened_or_ended`]) — however long that took: it handed the launch to
 /// the copy that runs, and [`HANDOVER`] remembers that — the next click on
-/// it while it runs raises that copy with no question, as every click on a
-/// running program did before. Not started ([`EXIT_NOT_STARTED`], or the
+/// it while it runs hands the command to that copy and raises it with no
+/// question, as every click on a running program did before. Not started
+/// ([`EXIT_NOT_STARTED`], or the
 /// launch's word of it with why), or gone with a failure before any window:
 /// the person is told. A window of its own:
 /// the picker leaves, and the program goes on without it. No proxy on the
