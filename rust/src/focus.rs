@@ -2515,7 +2515,7 @@ mod tests {
         strict.sort();
         assert_eq!(strict, ["de", "nl"]);
         fs::write(state.join(crate::chain::ROUTES), "not a valid route\n").unwrap();
-        assert_eq!(switch_targets(&state, "offline"), ["offline"]);
+        assert!(switch_targets(&state, "offline").is_empty());
         let _ = fs::remove_dir_all(&state);
         let _ = fs::remove_dir_all(&live_dir);
     }

@@ -11014,7 +11014,10 @@ mod tests {
                     Ok(())
                 }
             },
-            |_| Err("next failed".to_owned()),
+            |network| {
+                called.borrow_mut().push(format!("next:{network}"));
+                Err("next failed".to_owned())
+            },
         )
         .unwrap_err();
         assert!(result.contains("next-launch network"));
