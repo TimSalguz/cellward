@@ -520,7 +520,19 @@ pub fn config_seed(config: &[u8]) -> u64 {
     fnv(0xcbf2_9ce4_8422_2325, config)
 }
 
-/// A zone's fingerprint: its config ([`config_seed`]), the resolvers its
+/// A chained zone's config seed: its own resolved config and every resolved
+/// user-VPN prefix, outermost first. A changed outer route is another exit,
+/// even when the inner zone's own bytes are unchanged.
+pub fn chain_config_seed(config: &[u8], prefixes: &[Vec<u8>]) -> u64 {
+    let mut seed = config_seed(config);
+    for prefix in prefixes {
+        seed = fnv(fnv(seed, b"\0via-user-prefix\0"), prefix);
+    }
+    seed
+}
+
+/// A zone's fingerprint: its config and user-VPN prefixes ([`config_seed`],
+/// [`chain_config_seed`]), the resolvers its
 /// passts forward DNS to and its search domains. What an instance takes a
 /// zone that came back by (O3 of the design): the same, and it is the exit
 /// the instance was carried by — re-attached by itself; another (the config
@@ -1773,6 +1785,40 @@ mod tests {
         ] {
             assert!(Answer::decode(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_chain_seed_includes_every_resolved_user_prefix_in_order() {
+        let inner = b"[Interface]\nPrivateKey = inner\n";
+        let outer = b"[Interface]\nPrivateKey = outer\n".to_vec();
+        let middle = b"[Interface]\nPrivateKey = middle\n[Chain]\nViaUser = outer\n".to_vec();
+        let direct = chain_config_seed(inner, &[]);
+        assert_eq!(direct, config_seed(inner));
+        let chain = chain_config_seed(inner, &[outer.clone(), middle.clone()]);
+        assert_eq!(
+            chain,
+            chain_config_seed(inner, &[outer.clone(), middle.clone()])
+        );
+        assert_ne!(chain, direct);
+        assert_ne!(
+            chain,
+            chain_config_seed(
+                inner,
+                &[
+                    b"[Interface]\nPrivateKey = changed\n".to_vec(),
+                    middle.clone()
+                ]
+            )
+        );
+        assert_ne!(
+            chain,
+            chain_config_seed(inner, &[outer.clone(), b"changed middle\n".to_vec()])
+        );
+        assert_ne!(chain, chain_config_seed(inner, &[middle, outer]));
+        assert_ne!(
+            chain_config_seed(b"ab", &[b"c".to_vec()]),
+            chain_config_seed(b"a", &[b"bc".to_vec()])
+        );
     }
 
     /// The fingerprint tells a zone's config, resolvers and search domains
