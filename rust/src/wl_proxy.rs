@@ -344,9 +344,9 @@ const MAX_ERROR_TEXT: usize = 1024;
 // --- THE CHANNEL -------------------------------------------------------------
 // One byte per message on a stream socketpair; the upstream descriptor rides
 // on its byte. The supervisor closing its end is "the program has exited".
-// The supervisor answers each CONNECT, in order; MENU, NETWORK and ATTENTION
-// it does not answer, so they never come between a CONNECT and its answer's
-// place.
+// The supervisor answers each CONNECT, in order. Clipboard replacement has
+// distinct answer bytes and does not consume the waiting Wayland connection.
+// MENU, NETWORK and ATTENTION have no answer.
 
 /// Proxy → supervisor: hardened, filter loaded, serving.
 const READY: u8 = b'r';
@@ -401,6 +401,12 @@ const TYPE_CONTROL: u8 = b'G';
 const CLIP: u8 = b'h';
 const SMART_PASTE: u8 = b'B';
 const SMART_RESULT: u8 = b'D';
+/// Proxy → supervisor: replace both disconnected same-scope broker sockets.
+const CLIPBOARD_RECONNECT: u8 = b'C';
+/// Supervisor → proxy: data, change and metadata descriptors for that scope.
+const CLIPBOARD_REBOUND: u8 = b'E';
+/// Supervisor → proxy: the scope is temporarily or permanently unavailable.
+const CLIPBOARD_REFUSED: u8 = b'N';
 const SCREENSHOT_WINDOW: u8 = b'I';
 const SCREENSHOT_AREA: u8 = b'J';
 const SCREENSHOT_HOVER: u8 = b'K';
@@ -472,6 +478,7 @@ pub struct Proxy {
     pidfd: Option<OwnedFd>,
     channel: Option<UnixStream>,
     upstream: PathBuf,
+    clipboard: Option<(PathBuf, String)>,
     adopting: bool,
     /// The signals taken over in [`Proxy::take_over`].
     signals: Option<Signals>,
@@ -1019,8 +1026,11 @@ pub(crate) fn start_private(
     opened: Option<OwnedFd>,
     focus: FocusPolicy,
     clip: Option<String>,
-    private: Option<crate::clipboard_endpoint::Bound>,
+    private: Option<(crate::clipboard_endpoint::Bound, PathBuf, String)>,
 ) -> Result<Proxy, String> {
+    let clipboard = private
+        .as_ref()
+        .map(|(_, runtime, id)| (runtime.clone(), id.clone()));
     // A live switch may have completed after launch built the command line
     // but before this supervisor drew its first frame. Start from the
     // instance's current network, not a label that was already stale.
@@ -1063,7 +1073,7 @@ pub(crate) fn start_private(
             } else {
                 clip.as_deref()
             });
-            if let Some(bound) = private {
+            if let Some((bound, _, _)) = private {
                 if let Err(e) = crate::wl_frame::private_clipboard::initialize(bound) {
                     eprintln!("wl-sandbox: private clipboard: {e}");
                     return 1;
@@ -1089,6 +1099,7 @@ pub(crate) fn start_private(
         pidfd: sys::pidfd_open(pid),
         channel: Some(ours),
         upstream: upstream.to_path_buf(),
+        clipboard,
         adopting: false,
         signals: None,
         live: frame.as_ref().and_then(Live::watch),
@@ -1411,6 +1422,29 @@ impl Proxy {
         }
     }
 
+    fn reconnect_clipboard(&self) -> bool {
+        let Some(channel) = &self.channel else {
+            return false;
+        };
+        let bound = self.clipboard.as_ref().and_then(|(runtime, id)| {
+            let mut bound = crate::clipboard_endpoint::lookup(runtime, id).ok()?;
+            let metadata = crate::clipboard_endpoint::lookup(runtime, id).ok()?;
+            bound.captures = Some(metadata.data);
+            Some(bound)
+        });
+        let sent = if let Some(bound) = bound {
+            let descriptors = [
+                bound.data.as_raw_fd(),
+                bound.changed.as_raw_fd(),
+                bound.captures.as_ref().unwrap().as_raw_fd(),
+            ];
+            sys::send_with_fds(channel.as_raw_fd(), &[CLIPBOARD_REBOUND], &descriptors)
+        } else {
+            sys::send_with_fds(channel.as_raw_fd(), &[CLIPBOARD_REFUSED], &[])
+        };
+        sent.is_ok()
+    }
+
     /// One request of the proxy. False when the channel is gone.
     fn answer(&mut self) -> bool {
         if let Some(fd) = self.channel.as_ref().map(AsRawFd::as_raw_fd) {
@@ -1459,6 +1493,9 @@ impl Proxy {
         // supervisor only asks the kernel who connected, it never reads.
         let client = match sys::recv_into_with_fds(channel.as_raw_fd(), &mut byte, 1) {
             Ok((1, mut fds, _)) if byte[0] == CONNECT => fds.pop(),
+            Ok((1, _, _)) if byte[0] == CLIPBOARD_RECONNECT => {
+                return self.reconnect_clipboard();
+            }
             // A click on the frame's ≡ or ⇄, a request for the focus held
             // back: answered with nothing on the channel (whatever
             // descriptor came with it is closed here).
@@ -2677,7 +2714,8 @@ fn limit(resource: libc::__rlimit_resource_t, max: libc::rlim_t) -> Result<(), S
 /// have to grow it, which its seal refuses), of a file the owner sent
 /// stdout or stderr to. Not there: open*, socket, connect, bind, exec*,
 /// clone/fork, ptrace, kill, prctl, setrlimit, mount, memfd_create,
-/// ftruncate, lseek, anything with a path.
+/// ftruncate, lseek, anything with a path. `dup2` may replace only the fixed
+/// clipboard socket slots.
 pub fn filter(
     default: ScmpAction,
     title: Option<RawFd>,
@@ -2761,6 +2799,15 @@ fn filter_sockets(
                 )?;
             }
         }
+        ctx.add_rule_conditional(
+            ScmpAction::Allow,
+            ScmpSyscall::from_name("dup2")?,
+            &[ScmpArgCompare::new(
+                1,
+                ScmpCompareOp::MaskedEqual(0xffff_ffff),
+                fd as u64,
+            )],
+        )?;
     }
     if !clipboard.is_empty() {
         for cmd in [libc::F_GETFL, libc::F_DUPFD_CLOEXEC] {
@@ -2878,6 +2925,14 @@ fn serve(
             return 0;
         }
         crate::wl_frame::private_clipboard::tick(Instant::now());
+        if crate::wl_frame::private_clipboard::reconnect_requested(Instant::now()) {
+            let sent = channel.as_ref().is_some_and(|c| {
+                sys::send_with_fds(c.as_raw_fd(), &[CLIPBOARD_RECONNECT], &[]).is_ok()
+            });
+            if !sent {
+                crate::wl_frame::private_clipboard::reconnect_failed(Instant::now());
+            }
+        }
         crate::wl_frame::screenshot::expire(Instant::now());
         conns.retain_mut(Conn::flush);
         let now = Instant::now();
@@ -2975,6 +3030,12 @@ fn serve(
                     Answer::Paste => crate::wl_frame::paste_now(),
                     Answer::SmartResult(ticket, revision) => {
                         crate::wl_frame::smart_paste::finish(ticket, revision)
+                    }
+                    Answer::Clipboard(bound) => {
+                        crate::wl_frame::private_clipboard::reconnect(bound, Instant::now())
+                    }
+                    Answer::ClipboardFailed => {
+                        crate::wl_frame::private_clipboard::reconnect_failed(Instant::now())
                     }
                     Answer::TypeControl(seq, request, fd) => match request {
                         crate::type_input::Request::Cancel { token } => {
@@ -3127,6 +3188,8 @@ enum Answer {
     Retract(u64),
     Paste,
     SmartResult(u64, Option<u64>),
+    Clipboard(crate::clipboard_endpoint::Bound),
+    ClipboardFailed,
     TypeControl(u64, crate::type_input::Request, Option<OwnedFd>),
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
@@ -3154,6 +3217,20 @@ fn answer(channel: &UnixStream) -> Answer {
             let ticket = u64::from_le_bytes(body[1..9].try_into().unwrap());
             let revision = u64::from_le_bytes(body[9..17].try_into().unwrap());
             Answer::SmartResult(ticket, (body[0] == 1).then_some(revision))
+        }
+        Ok((1, mut fds, false)) if byte[0] == CLIPBOARD_REBOUND && fds.len() == 3 => {
+            let captures = UnixStream::from(fds.pop().unwrap());
+            let changed = fds.pop().unwrap();
+            let data = UnixStream::from(fds.pop().unwrap());
+            Answer::Clipboard(crate::clipboard_endpoint::Bound {
+                data,
+                changed,
+                captures: Some(captures),
+            })
+        }
+        Ok((1, _, true)) if byte[0] == CLIPBOARD_REBOUND => Answer::Closed,
+        Ok((1, _, false)) if byte[0] == CLIPBOARD_REBOUND || byte[0] == CLIPBOARD_REFUSED => {
+            Answer::ClipboardFailed
         }
         Ok((1, mut fds, _)) if byte[0] == TYPE_CONTROL => {
             let mut head = [0u8; 10];
@@ -3748,6 +3825,19 @@ mod tests {
         assert_eq!(asking.next_sequence(), None);
         assert_eq!(asking.next_sequence(), None);
         assert_eq!(asking.seq, u64::MAX);
+    }
+
+    #[test]
+    fn clipboard_refusal_is_not_an_upstream_answer() {
+        use std::os::fd::AsRawFd;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        crate::sys::send_with_fds(ours.as_raw_fd(), &[super::CLIPBOARD_REFUSED], &[]).unwrap();
+        assert!(matches!(
+            super::answer(&theirs),
+            super::Answer::ClipboardFailed
+        ));
+        crate::sys::send_with_fds(ours.as_raw_fd(), &[super::REFUSED], &[]).unwrap();
+        assert!(matches!(super::answer(&theirs), super::Answer::Refused));
     }
 
     #[test]

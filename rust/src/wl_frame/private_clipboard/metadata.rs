@@ -52,6 +52,19 @@ impl Metadata {
     pub fn deadline(&self) -> Option<Instant> {
         self.client.next_deadline()
     }
+    pub fn disconnect(&mut self) {
+        self.client.disconnect();
+        self.operation = None;
+        self.pending = VecDeque::from([Operation::Probe]);
+        self.caps = None;
+    }
+    pub fn reconnect(&mut self, socket: std::os::unix::net::UnixStream) -> io::Result<()> {
+        self.client.reconnect(socket)?;
+        self.operation = None;
+        self.pending = VecDeque::from([Operation::Probe]);
+        self.caps = None;
+        Ok(())
+    }
     pub fn forget(&mut self, which: Selection) {
         self.pending
             .retain(|op| !matches!(op, Operation::Begin(n) if index(n.which) == index(which)));

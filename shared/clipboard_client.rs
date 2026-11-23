@@ -3,7 +3,7 @@
 //! The controller must authenticate/bind the endpoint before handing it here.
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -160,6 +160,30 @@ impl Client {
         self.closed
     }
 
+    pub fn disconnect(&mut self) {
+        self.closed = true;
+        let _ = self.stream.shutdown(Shutdown::Both);
+        self.reset();
+    }
+
+    /// Replace a disconnected stream without changing its descriptor number.
+    /// The proxy's seccomp filter permits socket operations only on these slots.
+    pub fn reconnect(&mut self, stream: UnixStream) -> io::Result<()> {
+        if !self.closed {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        let target = self.stream.as_raw_fd();
+        // SAFETY: both descriptors are live; the old slot remains open until
+        // dup2 atomically replaces it, so the received FD cannot alias it.
+        if unsafe { libc::dup2(stream.as_raw_fd(), target) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        self.stream.set_nonblocking(true)?;
+        self.reset();
+        self.closed = false;
+        Ok(())
+    }
+
     pub fn start(
         &mut self,
         selection: Selection,
@@ -311,9 +335,6 @@ impl Client {
     }
 
     fn step(&mut self, now: Instant) -> io::Result<Option<Reply>> {
-        if self.deadline.is_some_and(|at| now >= at) {
-            return Err(io::Error::from(io::ErrorKind::TimedOut));
-        }
         let mut budget = QUANTUM;
         while self.written < self.output.0.len() && budget > 0 {
             let end = (self.written + budget).min(self.output.0.len());
@@ -326,11 +347,15 @@ impl Client {
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) =>
                 {
-                    return Ok(None)
+                    if self.deadline.is_some_and(|at| now >= at) {
+                        return Err(io::Error::from(io::ErrorKind::TimedOut));
+                    }
+                    return Ok(None);
                 }
                 Err(e) => return Err(e),
             };
             self.written += n;
+            self.deadline = Some(now + TIMEOUT);
             budget -= n;
         }
         if self.written < self.output.0.len() || budget == 0 {
@@ -340,9 +365,13 @@ impl Client {
             let end = (self.head + budget).min(4);
             let n = read(&mut self.stream, &mut self.header[self.head..end])?;
             if n == 0 {
+                if self.deadline.is_some_and(|at| now >= at) {
+                    return Err(io::Error::from(io::ErrorKind::TimedOut));
+                }
                 return Ok(None);
             }
             self.head += n;
+            self.deadline = Some(now + TIMEOUT);
             budget -= n;
         }
         if self.head < 4 || budget == 0 {
@@ -366,9 +395,13 @@ impl Client {
             let end = (self.read + budget).min(self.input.0.len());
             let n = read(&mut self.stream, &mut self.input.0[self.read..end])?;
             if n == 0 {
+                if self.deadline.is_some_and(|at| now >= at) {
+                    return Err(io::Error::from(io::ErrorKind::TimedOut));
+                }
                 return Ok(None);
             }
             self.read += n;
+            self.deadline = Some(now + TIMEOUT);
             budget -= n;
         }
         if self.read < self.input.0.len() {
@@ -541,6 +574,33 @@ mod tests {
         ));
         assert!(!client.busy());
         assert_eq!(client.output.0.capacity() + client.input.0.capacity(), 0);
+    }
+
+    #[test]
+    fn slow_reply_progress_refreshes_the_idle_deadline() {
+        let (a, mut b) = UnixStream::pair().unwrap();
+        let mut client = Client::new(a).unwrap();
+        let now = Instant::now();
+        client
+            .start(Selection::Clipboard, Request::Types, now)
+            .unwrap();
+        assert_eq!(request(&mut client, &mut b), [1, 0]);
+        let frame = [2, 0, 0, 0, 0, 0];
+        let mut at = now + TIMEOUT;
+        b.write_all(&frame[..1]).unwrap();
+        assert!(client.tick(at).is_none());
+        for (index, byte) in frame[1..].iter().enumerate() {
+            at += TIMEOUT;
+            b.write_all(&[*byte]).unwrap();
+            let reply = client.tick(at);
+            if index + 2 == frame.len() {
+                assert!(matches!(reply, Some(Ok(Reply::Types(None)))));
+            } else {
+                assert!(reply.is_none());
+            }
+        }
+        assert!(!client.closed());
+        assert!(!client.busy());
     }
 
     #[test]

@@ -15,6 +15,8 @@ use metadata::Metadata;
 const LIMIT: usize = 64 << 20;
 const QUANTUM: usize = 64 << 10;
 const PENDING: usize = 64;
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const RECONNECT_RESPONSE: Duration = Duration::from_secs(8);
 /// Explicit opt-in for initialized windowless clients, never clipboard data.
 pub(super) const READY_MIME: &str = "application/x-cellward-private-ready";
 
@@ -42,6 +44,8 @@ pub(crate) fn initialize(bound: Bound) -> io::Result<()> {
         *s.borrow_mut() = Some(State {
             client: Some(client),
             metadata: bound.captures.map(Metadata::new).transpose()?,
+            connected: true,
+            reconnect_at: None,
             local: [0; 2],
             changing: [None; 2],
             epochs: [None; 2],
@@ -98,7 +102,7 @@ pub(crate) fn socket_fds() -> Vec<RawFd> {
 pub(crate) fn smart_enabled() -> bool {
     STATE.with(|s| {
         s.borrow().as_ref().is_some_and(|s| {
-            s.client.is_some()
+            s.connected
                 && s.metadata
                     .as_ref()
                     .and_then(|m| m.caps)
@@ -110,7 +114,7 @@ pub(crate) fn smart_enabled() -> bool {
 pub(crate) fn revision() -> Option<u64> {
     STATE.with(|s| {
         s.borrow().as_ref().and_then(|s| {
-            (s.client.is_some()
+            (s.connected
                 && s.changing[0].is_none()
                 && !s.refresh[0]
                 && !matches!(s.operation, Some(Operation::Types(Selection::Clipboard))))
@@ -128,9 +132,11 @@ pub(crate) fn pollfds() -> Vec<libc::pollfd> {
                 revents: 0,
             };
             let mut fds = Vec::new();
-            if let Some(client) = &s.client {
-                fds.push(p(client.socket().as_raw_fd(), client.wants_write()));
-                fds.push(p(s.changed.as_raw_fd(), false));
+            if s.connected {
+                if let Some(client) = &s.client {
+                    fds.push(p(client.socket().as_raw_fd(), client.wants_write()));
+                    fds.push(p(s.changed.as_raw_fd(), false));
+                }
             }
             for capture in s.capture.iter().flatten() {
                 if let Some(fd) = capture.data.fd() {
@@ -138,8 +144,10 @@ pub(crate) fn pollfds() -> Vec<libc::pollfd> {
                 }
             }
             fds.extend(s.writes.iter().map(|w| p(w.file.as_raw_fd(), true)));
-            if let Some(meta) = &s.metadata {
-                fds.push(meta.pollfd());
+            if s.connected {
+                if let Some(meta) = &s.metadata {
+                    fds.push(meta.pollfd());
+                }
             }
             fds
         })
@@ -152,6 +160,7 @@ pub(crate) fn wake_at() -> Option<Instant> {
                 .as_ref()
                 .and_then(BrokerClient::next_deadline)
                 .into_iter()
+                .chain(s.reconnect_at)
                 .chain(s.capture.iter().flatten().map(|c| c.data.wake_at()))
                 .chain(s.metadata.as_ref().and_then(Metadata::deadline))
                 .chain(s.writes.iter().map(|w| w.deadline))
@@ -163,6 +172,32 @@ pub(crate) fn tick(now: Instant) {
     STATE.with(|s| {
         if let Some(s) = &mut *s.borrow_mut() {
             s.tick(now);
+        }
+    });
+}
+pub(crate) fn reconnect_requested(now: Instant) -> bool {
+    STATE.with(|s| {
+        s.borrow_mut()
+            .as_mut()
+            .is_some_and(|s| s.reconnect_requested(now))
+    })
+}
+pub(crate) fn reconnect(bound: Bound, now: Instant) {
+    let result = STATE.with(|s| {
+        s.borrow_mut()
+            .as_mut()
+            .map_or(Ok(false), |s| s.reconnect(bound).map(|()| true))
+    });
+    match result {
+        Ok(true) => eprintln!("wl-sandbox: private clipboard reconnected"),
+        Ok(false) => {}
+        Err(_) => reconnect_failed(now),
+    }
+}
+pub(crate) fn reconnect_failed(now: Instant) {
+    STATE.with(|s| {
+        if let Some(s) = &mut *s.borrow_mut() {
+            s.reconnect_failed(now);
         }
     });
 }
@@ -255,7 +290,7 @@ pub(super) fn set(
     types.retain(|mime| mime != READY_MIME);
     STATE.with(|s| {
         if let Some(s) = &mut *s.borrow_mut() {
-            if s.client.is_none() {
+            if !s.connected {
                 return;
             }
             let at = index(which);
@@ -331,6 +366,8 @@ enum Operation {
 struct State {
     client: Option<BrokerClient>,
     metadata: Option<Metadata>,
+    connected: bool,
+    reconnect_at: Option<Instant>,
     local: [u64; 2],
     changing: [Option<u64>; 2],
     epochs: [Option<(u64, u64)>; 2],
@@ -350,17 +387,67 @@ struct State {
 
 impl State {
     fn disable(&mut self) {
-        self.client = None;
-        self.metadata = None;
+        let lost = self.connected;
+        self.connected = false;
+        if let Some(client) = &mut self.client {
+            client.disconnect();
+        }
+        if let Some(metadata) = &mut self.metadata {
+            metadata.disconnect();
+        }
         self.changing = [None; 2];
+        self.epochs = [None; 2];
         self.operation = None;
         self.capture = [None, None];
         self.waiting.clear();
         self.publish.clear();
         self.reads.clear();
         self.writes.clear();
+        self.refresh = [true; 2];
         self.selected(Selection::Clipboard, None);
         self.selected(Selection::Primary, None);
+        if lost {
+            eprintln!("wl-sandbox: private clipboard disconnected; requesting a scoped reconnect");
+            self.reconnect_at = Some(Instant::now());
+        }
+    }
+    fn reconnect_requested(&mut self, now: Instant) -> bool {
+        if self.connected || self.reconnect_at.is_none_or(|at| now < at) {
+            return false;
+        }
+        self.reconnect_at = Some(now + RECONNECT_RESPONSE);
+        true
+    }
+    fn reconnect_failed(&mut self, now: Instant) {
+        if !self.connected {
+            self.reconnect_at = Some(now + RECONNECT_DELAY);
+        }
+    }
+    fn reconnect(&mut self, bound: Bound) -> io::Result<()> {
+        if self.connected {
+            return Ok(());
+        }
+        let result = (|| {
+            self.client
+                .as_mut()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?
+                .reconnect(bound.data)?;
+            match (&mut self.metadata, bound.captures) {
+                (Some(metadata), Some(captures)) => metadata.reconnect(captures)?,
+                (None, None) => {}
+                _ => return Err(io::Error::from(io::ErrorKind::InvalidData)),
+            }
+            self.changed = File::from(bound.changed);
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.disable();
+            return Err(error);
+        }
+        self.connected = true;
+        self.reconnect_at = None;
+        self.refresh = [true; 2];
+        Ok(())
     }
     fn selected(&mut self, which: Selection, value: Option<(u64, Vec<String>)>) {
         let at = index(which);
@@ -418,6 +505,9 @@ impl State {
         }
     }
     fn tick(&mut self, now: Instant) {
+        if !self.connected {
+            return;
+        }
         if let Some(meta) = &mut self.metadata {
             match meta.tick(now) {
                 Ok(Some(begun)) => {
@@ -430,9 +520,8 @@ impl State {
                 }
                 Ok(None) => {}
                 Err(()) => {
-                    eprintln!("wl-sandbox: private clipboard metadata unavailable");
-                    self.metadata = None;
-                    self.epochs = [None; 2];
+                    self.disable();
+                    return;
                 }
             }
         }
@@ -492,22 +581,25 @@ impl State {
         }
         let mut budget = QUANTUM;
         self.writes.retain_mut(|w| {
-            if now >= w.deadline {
-                return false;
-            }
             let end = w.bytes.as_slice().len().min(w.written + budget);
             if end > w.written {
                 match w.file.write(&w.bytes.as_slice()[w.written..end]) {
                     Ok(0) => return false,
                     Ok(n) => {
                         w.written += n;
+                        w.deadline = now + Duration::from_secs(3);
                         budget -= n;
                     }
                     Err(e)
                         if matches!(
                             e.kind(),
                             io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        ) => {}
+                        ) =>
+                    {
+                        if now >= w.deadline {
+                            return false;
+                        }
+                    }
                     Err(_) => return false,
                 }
             }
@@ -646,7 +738,7 @@ fn receive(snapshot: &Snapshot, mime: &str, fd: &Rc<OwnedFd>) {
     }
     STATE.with(|s| {
         if let Some(s) = &mut *s.borrow_mut() {
-            if s.client.is_none() || s.reads.len() + s.writes.len() >= PENDING {
+            if !s.connected || s.reads.len() + s.writes.len() >= PENDING {
                 return;
             }
             let Ok(fd) = fd.try_clone() else { return };
@@ -713,5 +805,130 @@ impl ZwpPrimarySelectionOfferV1Handler for PrivatePrimaryOffer {
     }
     fn handle_destroy(&mut self, slf: &Rc<ZwpPrimarySelectionOfferV1>) {
         slf.delete_id();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    fn bound() -> (Bound, UnixStream, UnixStream, OwnedFd) {
+        let (data, data_server) = UnixStream::pair().unwrap();
+        let (captures, metadata_server) = UnixStream::pair().unwrap();
+        let (changed, signal) = crate::sys::pipe_nonblocking().unwrap();
+        (
+            Bound {
+                data,
+                changed,
+                captures: Some(captures),
+            },
+            data_server,
+            metadata_server,
+            signal,
+        )
+    }
+
+    fn state(bound: Bound) -> State {
+        State {
+            client: Some(BrokerClient::new(bound.data).unwrap()),
+            metadata: Some(Metadata::new(bound.captures.unwrap()).unwrap()),
+            connected: true,
+            reconnect_at: None,
+            local: [0; 2],
+            changing: [None; 2],
+            epochs: [None; 2],
+            changed: File::from(bound.changed),
+            operation: None,
+            selections: [None, None],
+            devices: Vec::new(),
+            primary: Vec::new(),
+            refresh: [true; 2],
+            clear: [false; 2],
+            capture: [None, None],
+            waiting: VecDeque::new(),
+            publish: VecDeque::new(),
+            reads: VecDeque::new(),
+            writes: VecDeque::new(),
+        }
+    }
+
+    fn answer(stream: &mut UnixStream, request: &[u8], reply: &[u8]) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut header = [0; 4];
+        stream.read_exact(&mut header).unwrap();
+        let mut body = vec![0; u32::from_le_bytes(header) as usize];
+        stream.read_exact(&mut body).unwrap();
+        assert_eq!(body, request);
+        stream
+            .write_all(&(reply.len() as u32).to_le_bytes())
+            .unwrap();
+        stream.write_all(reply).unwrap();
+    }
+
+    #[test]
+    fn missing_response_times_out_and_a_later_reconnect_succeeds() {
+        let (first, _data, _metadata, _signal) = bound();
+        initialize(first).unwrap();
+        STATE.with(|s| s.borrow_mut().as_mut().unwrap().disable());
+        let requested = Instant::now();
+        assert!(reconnect_requested(requested));
+        let timeout = requested + RECONNECT_RESPONSE;
+        assert_eq!(wake_at(), Some(timeout));
+        assert!(!reconnect_requested(requested + RECONNECT_DELAY));
+        assert_eq!(wake_at(), Some(timeout));
+
+        assert!(reconnect_requested(timeout));
+        assert_eq!(wake_at(), Some(timeout + RECONNECT_RESPONSE));
+        let (second, mut data, mut metadata, _signal) = bound();
+        reconnect(second, timeout);
+        assert!(STATE.with(|s| s.borrow().as_ref().unwrap().connected));
+
+        tick(timeout);
+        answer(&mut metadata, &[9, 0], &[0, 3]);
+        answer(&mut data, &[1, 0], &[0, 0]);
+        tick(timeout + Duration::from_millis(1));
+        STATE.with(|s| {
+            let state = s.borrow();
+            let state = state.as_ref().unwrap();
+            assert!(!state.refresh[0]);
+            assert_eq!(state.metadata.as_ref().unwrap().caps, Some(3));
+        });
+    }
+
+    #[test]
+    fn socket_loss_reconnects_the_same_state_and_restores_metadata() {
+        let now = Instant::now();
+        let (first, old_data, _old_metadata, _old_signal) = bound();
+        let mut state = state(first);
+        let slots = (
+            state.client.as_ref().unwrap().socket().as_raw_fd(),
+            state.metadata.as_ref().unwrap().fd(),
+        );
+        drop(old_data);
+        state.tick(now);
+        assert!(!state.connected);
+        let requested = Instant::now();
+        assert!(state.reconnect_requested(requested));
+        assert!(!state.reconnect_requested(requested));
+
+        let (second, mut data, mut metadata, _signal) = bound();
+        state.reconnect(second).unwrap();
+        assert!(state.connected);
+        assert_eq!(
+            (
+                state.client.as_ref().unwrap().socket().as_raw_fd(),
+                state.metadata.as_ref().unwrap().fd(),
+            ),
+            slots
+        );
+        state.tick(now);
+        answer(&mut metadata, &[9, 0], &[0, 3]);
+        answer(&mut data, &[1, 0], &[0, 0]);
+        state.tick(now + Duration::from_millis(1));
+        assert!(!state.refresh[0]);
+        assert_eq!(state.metadata.as_ref().unwrap().caps, Some(3));
     }
 }
