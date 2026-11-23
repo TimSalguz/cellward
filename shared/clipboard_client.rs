@@ -619,6 +619,9 @@ mod tests {
             } else {
                 now + TIMEOUT
             };
+            if !huge {
+                assert!(client.tick(at).is_none());
+            }
             assert!(client.tick(at).unwrap().is_err());
             assert!(client.closed());
             assert_eq!(client.input.0.capacity(), 0);

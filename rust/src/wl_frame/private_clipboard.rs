@@ -887,6 +887,7 @@ mod tests {
         assert!(STATE.with(|s| s.borrow().as_ref().unwrap().connected));
 
         tick(timeout);
+        tick(timeout);
         answer(&mut metadata, &[9, 0], &[0, 3]);
         answer(&mut data, &[1, 0], &[0, 0]);
         tick(timeout + Duration::from_millis(1));
@@ -924,6 +925,7 @@ mod tests {
             ),
             slots
         );
+        state.tick(now);
         state.tick(now);
         answer(&mut metadata, &[9, 0], &[0, 3]);
         answer(&mut data, &[1, 0], &[0, 0]);
