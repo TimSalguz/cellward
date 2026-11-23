@@ -904,6 +904,7 @@ pub fn run(args: Args) -> u8 {
                     &args.clip_history,
                     owner.as_fd(),
                 )
+                .map(|bound| (bound, runtime_dir.clone(), id.clone()))
                 .map_err(|e| format!("private clipboard unavailable ({e})"))
             })
             .transpose()

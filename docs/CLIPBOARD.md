@@ -60,8 +60,10 @@ records private selections directly from scoped broker endpoints; it does
 not mirror them through the desktop. The controller authenticates host peers
 by credentials, a live peer pidfd and matching user/pid/mount namespaces.
 Confined proxies receive only already-bound same-scope data sockets and a change eventfd,
-not the registration socket. Broker failure clears offers and never enables
-the host clipboard as a fallback. A private launch requires its proxy.
+not the registration socket. Broker socket failure clears offers and asks the
+supervisor for fresh data and metadata sockets bound to the same scope, without
+restarting the application. While disconnected, and if rebinding fails, the host
+clipboard is never enabled as a fallback. A private launch requires its proxy.
 
 **Upgrade:** already-running programs retain their old proxies. Restart them
 through the updated launcher to get private active selections. History paste

@@ -227,9 +227,6 @@ impl Peer {
         mut remaining: usize,
         now: Instant,
     ) -> io::Result<bool> {
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            return Ok(false);
-        }
         if self.output.0.is_empty() {
             if self.head < 4 {
                 let n = match self.stream.read(&mut self.header[self.head..]) {
@@ -241,11 +238,11 @@ impl Peer {
                             io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                         ) =>
                     {
-                        return Ok(true)
+                        return Ok(!self.deadline.is_some_and(|deadline| now >= deadline));
                     }
                     Err(e) => return Err(e),
                 };
-                self.deadline.get_or_insert(now + TIMEOUT);
+                self.deadline = Some(now + TIMEOUT);
                 self.head += n;
                 if self.head < 4 {
                     return Ok(true);
@@ -271,14 +268,17 @@ impl Peer {
                 let end = self.input.0.len().min(self.read + QUANTUM);
                 match self.stream.read(&mut self.input.0[self.read..end]) {
                     Ok(0) => return Ok(false),
-                    Ok(n) => self.read += n,
+                    Ok(n) => {
+                        self.read += n;
+                        self.deadline = Some(now + TIMEOUT);
+                    }
                     Err(e)
                         if matches!(
                             e.kind(),
                             io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                         ) =>
                     {
-                        return Ok(true)
+                        return Ok(!self.deadline.is_some_and(|deadline| now >= deadline));
                     }
                     Err(e) => return Err(e),
                 }
@@ -302,14 +302,17 @@ impl Peer {
         let end = self.output.0.len().min(self.written + QUANTUM);
         match self.stream.write(&self.output.0[self.written..end]) {
             Ok(0) => return Ok(false),
-            Ok(n) => self.written += n,
+            Ok(n) => {
+                self.written += n;
+                self.deadline = Some(now + TIMEOUT);
+            }
             Err(e)
                 if matches!(
                     e.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                 ) =>
             {
-                return Ok(true)
+                return Ok(!self.deadline.is_some_and(|deadline| now >= deadline));
             }
             Err(e) => return Err(e),
         }
@@ -812,6 +815,24 @@ mod tests {
         assert_eq!(slow.read(&mut [0; 1]).unwrap(), 0);
         assert_eq!(server.io_bytes, 0);
         assert_eq!(exchange(&mut server, &mut fast, &[1, 0]), [0, 0]);
+    }
+
+    #[test]
+    fn slow_peer_progress_refreshes_the_idle_deadline() {
+        let mut server = Transport::default();
+        let instance = server.register().unwrap();
+        let mut client = server.connect(instance).unwrap();
+        let now = Instant::now();
+        client.write_all(&[2, 0]).unwrap();
+        server.tick(now);
+        client.write_all(&[0]).unwrap();
+        server.tick(now + TIMEOUT);
+        client.write_all(&[0, 1, 0]).unwrap();
+        server.tick(now + 2 * TIMEOUT);
+        let mut answer = [0; 6];
+        client.read_exact(&mut answer).unwrap();
+        assert_eq!(answer, [2, 0, 0, 0, 0, 0]);
+        assert_eq!(server.sockets().count(), 1);
     }
 
     #[test]

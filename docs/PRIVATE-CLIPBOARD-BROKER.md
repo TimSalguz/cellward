@@ -25,8 +25,8 @@ The adapter is nonblocking and fair per tick (64 KiB in/out per connection).
 It caps connections at 512, I/O buffers at 128 MiB globally and approximately
 64 MiB per instance; these budgets are separate from retained selections.
 Headers are checked before allocating, buffer capacity is charged, incomplete
-requests/blocked responses expire after 5 seconds. There can also be bounded
-temporary copies during decoding/serialization, up to roughly two maximum
+requests/blocked responses expire after 5 seconds without I/O progress. There
+can also be bounded temporary copies during decoding/serialization, up to roughly two maximum
 payloads beyond the retained-selection and queued-I/O budgets. This is not
 zero-copy transport. Allocation/limit failures do not export data elsewhere.
 The caller can poll borrowed socket FDs and the next deadline without spinning.
@@ -68,7 +68,10 @@ synthetic offers to all launches of the instance. Reads are pinned to the
 offer revision. Ordinary upstream clipboard/primary offers are hidden; explicit
 drag-and-drop offers remain separate. Captured copies survive the application's
 source disappearing, until replacement, explicit clear or holder shutdown.
-Proxy failure/broker failure never falls back to the host clipboard.
+A lost data or metadata socket is replaced through the launch supervisor with
+fresh sockets for the same immutable scope; in-flight operations and old offers
+are fail-closed while disconnected. Proxy/broker failure never falls back to the
+host clipboard.
 
 The optional recorder subscribes directly to scoped endpoints. Secret hints,
 disabled histories and manager-restored selections are excluded. The manager
@@ -108,9 +111,9 @@ stages; they are retained as design history, not current missing features.
 crates. It accepts only an already-scoped Unix stream: no instance name,
 registration command, socket discovery or host fallback. It supports typed
 CLIPBOARD/PRIMARY types/set/read/clear requests, bounded nonblocking I/O,
-complete reply validation, one in-flight operation and a five-second deadline.
-Protocol/transport failure closes the endpoint. A valid broker refusal is
-returned explicitly, never translated to a host read. Payload buffers erase
+complete reply validation, one in-flight operation and a five-second idle
+deadline renewed by successful I/O. Protocol/transport failure closes the
+endpoint. A valid broker refusal is returned explicitly, never translated to a host read. Payload buffers erase
 their entire capacity and are freed after exchange; Debug redacts payloads.
 
 An interoperability test uses the real server transport and client, including
