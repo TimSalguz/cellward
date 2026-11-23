@@ -52,6 +52,32 @@ launcher → vpn-zone-pick --id K -- cmd
       → registry → exec: nsenter | unshare → profile-run → program
 ```
 
+### 1.3 Opening links through Cellward
+
+`cellward open <URI>` is the shared host/sandbox opener. It discovers desktop
+entries for `x-scheme-handler/<scheme>`, reads the existing distribution default
+without changing it, and uses Cellward's own handler chooser. A valid default or
+a single candidate skips that chooser. The selected entry must have a usable
+`%u`/`%U`-style field code: an entry without one is rejected, never launched
+bare. The URI remains one unchanged argument, spaces, Unicode and query string
+included. The expanded command goes through the ordinary picker and launch path.
+Cancellation, an unavailable chooser and an unknown chooser answer all start
+nothing; there is no portal or `xdg-open` fallback. The sandbox opener's
+no-broker fallback uses this command too.
+
+Host programs opt in per scheme, never globally:
+
+```nix
+programs.cellward.hostLinks.schemes = [ "http" "https" ];
+```
+
+This installs the hidden `vpn-zone-open.desktop` entry with
+`Exec=cellward open %u` and declares it as the default for exactly those schemes
+through home-manager's `xdg.mimeApps`. Host `xdg-open`/OpenURI therefore reaches
+Cellward before GNOME AppChooser. The default empty list installs neither the
+entry nor associations. Runtime opening never rewrites the user's
+`mimeapps.list`.
+
 ## 2. Problems found
 
 | # | problem | effect | status |

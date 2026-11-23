@@ -94,6 +94,7 @@ const VERBS: &[&str] = &[
     "explain",
     "run",
     "launch",
+    "open",
     "rm",
     "sync",
     "mode",

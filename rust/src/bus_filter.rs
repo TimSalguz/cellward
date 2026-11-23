@@ -12,10 +12,10 @@
 //! the portal says no, the link simply does not open. So the call is answered
 //! HERE, the way the portal would answer it, and the link goes to the broker
 //! on the host (`crate::links`, `docs/PERMISSIONS.md` §11.13): the program
-//! chosen there — the container's rule, the distribution's window of choice
-//! —, then the network and the container in the launch window. The filter
+//! chosen there — the container's rule, Cellward's window of choice —, then
+//! the network and the container in the launch window. The filter
 //! tells the broker whose program's connection asked; with no broker, a
-//! sandbox's filter on the host opens the link with `xdg-open` as before.
+//! sandbox's filter on the host opens the link through `cellward open`.
 //!
 //! ```text
 //! program in bwrap ──► bus-filter (this) ──► xdg-dbus-proxy ──► session bus
@@ -1901,8 +1901,8 @@ fn answer(
 }
 
 /// Hand a link to the broker on the host (`crate::links`): the program is
-/// chosen there — the container's rule, the distribution's window of choice
-/// —, then the network and the container. `who`: whose program's connection
+/// chosen there — the container's rule, Cellward's window of choice —, then
+/// the network and the container. `who`: whose program's connection
 /// asks, which the broker believes from the zone's own filter alone. The
 /// person may take their time over the windows, and the program's bus goes
 /// on meanwhile: handed over in a thread of its own, and the portal's answer
@@ -1934,7 +1934,7 @@ fn open_link(ctx: &Ctx, uri: &str, who: &crate::origin::Who) -> u32 {
         crate::broker::Linked::Refused => {
             eprintln!("bus-filter: link {shown}: the broker did not open it")
         }
-        // A sandbox on the host: its links open as before.
+        // A sandbox on the host: its links go through the shared opener.
         crate::broker::Linked::NotAZone | crate::broker::Linked::NoBroker if !in_zone => {
             run_opener(&opener, &uri, &shown)
         }

@@ -1,4 +1,5 @@
-//! Links opened on behalf of a container (`docs/PERMISSIONS.md` §11.13).
+//! Links opened on behalf of a container or through the host dispatcher
+//! (`docs/PERMISSIONS.md` §11.13).
 //!
 //! A link a program of a zone opens — a messenger's, a mail client's — reaches
 //! the zone's bus filter (`crate::bus_filter`), and the filter hands it to the
@@ -309,6 +310,84 @@ pub fn configured(text: &str) -> Vec<String> {
         })
         .map(str::to_owned)
         .collect()
+}
+
+/// Open one URI from the host through Cellward. Handler discovery and `Exec`
+/// expansion are the broker's; the picker owns the environment choice and the
+/// launch. There is deliberately no `xdg-open` or portal fallback here: either
+/// this path starts the selected handler, or it starts nothing.
+pub fn open(tools: &crate::tools::Tools, args: &[OsString]) -> u8 {
+    if args.len() != 1 {
+        eprintln!("cellward open <URI>");
+        return 1;
+    }
+    let arg = &args[0];
+    let Some(uri) = arg.to_str() else {
+        eprintln!("cellward open: ссылка не в UTF-8");
+        return 1;
+    };
+    let Some(scheme) = scheme_of(uri) else {
+        eprintln!("cellward open: у ссылки нет схемы");
+        return 1;
+    };
+    let dirs = crate::desktop::source_dirs(&tools.home);
+    let default = distro_default(&mimeapps_files(&tools.home), &scheme);
+    let programs = programs_for(
+        &dirs,
+        &tools.home,
+        &tools.state,
+        &scheme,
+        default.as_deref(),
+    );
+    let id = if let Some(default) =
+        default.filter(|default| programs.iter().any(|program| program.id == *default))
+    {
+        default
+    } else if let [only] = programs.as_slice() {
+        only.id.clone()
+    } else {
+        match choose_cellward(&tools.window, &scheme_type(&scheme), uri, &programs, None) {
+            Choice::Chosen(id) => id,
+            Choice::Cancelled => return 0,
+            Choice::Unavailable(why) => {
+                eprintln!("cellward open: {why}");
+                return 1;
+            }
+        }
+    };
+    let Some((file, groups)) = crate::desktop::find_entry(&dirs, &tools.home, &tools.state, &id)
+    else {
+        eprintln!("cellward open: ярлыка {id} нет");
+        return 1;
+    };
+    let Some(entry) = crate::desktop::desktop_entry(&groups) else {
+        eprintln!("cellward open: {id} — не ярлык программы");
+        return 1;
+    };
+    let (cmd, used) = crate::desktop::expand_exec(entry, &file, std::slice::from_ref(arg));
+    if cmd.is_empty() || !used {
+        eprintln!("cellward open: {id} не принимает ссылки");
+        return 1;
+    }
+    let name = entry
+        .get("Name")
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&id);
+    let mut argv: Vec<OsString> = vec![
+        tools.picker.clone().into_os_string(),
+        "--id".into(),
+        crate::desktop::stable_key(&id).into(),
+        "--label".into(),
+        name.into(),
+        "--".into(),
+    ];
+    argv.extend(cmd);
+    let error = crate::profile::exec_command(&argv);
+    eprintln!(
+        "cellward open: не удалось запустить {}: {error}",
+        tools.picker.display()
+    );
+    crate::profile::EXIT_NOT_STARTED
 }
 
 /// Cellward's handler step. It chooses only a handler, never launches it or

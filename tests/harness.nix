@@ -121,6 +121,10 @@ let
     launcher.mode = "picker";
     autostart.unassigned = "offline";
     pathShims.enable = true;
+    hostLinks.schemes = [
+      "https"
+      "cellward-test"
+    ];
     hermetic = {
       default = true;
       exceptions = [ "agents" ];
@@ -493,6 +497,29 @@ in
       ))
       (expect "a container with no word of its own on x11 has one in its declared file" (
         !lib.hasInfix "x11 =" hmDeclared.config.home.file.".config/vpn-zones/declared/containers/work.conf".text
+      ))
+    ];
+
+  # The host dispatcher exists only for explicitly selected schemes.
+  #   nix-instantiate --eval --strict tests/harness.nix -A hostDispatcher
+  hostDispatcher =
+    let
+      entry = hmDeclared.config.xdg.desktopEntries."vpn-zone-open";
+      defaults = hmDeclared.config.xdg.mimeApps.defaultApplications;
+    in
+    lib.all lib.id [
+      (expect "the dispatcher calls the wrapped CLI with one URI" (
+        lib.hasSuffix "/bin/cellward open %u" entry.exec && entry.noDisplay
+      ))
+      (expect "only the selected schemes name the dispatcher" (
+        entry.mimeType == [ "x-scheme-handler/https" "x-scheme-handler/cellward-test" ]
+        && defaults."x-scheme-handler/https" == [ "vpn-zone-open.desktop" ]
+        && defaults."x-scheme-handler/cellward-test" == [ "vpn-zone-open.desktop" ]
+        && lib.length (lib.attrNames defaults) == 2
+      ))
+      (expect "the default configuration installs no dispatcher or association" (
+        !(hm.config.xdg.desktopEntries ? "vpn-zone-open")
+        && hm.config.xdg.mimeApps.defaultApplications == { }
       ))
     ];
 

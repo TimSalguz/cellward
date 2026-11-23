@@ -46,8 +46,8 @@
 //!
 //! **A link to open** (`VZL1\0`, the app-id, the link, the container the
 //! asking program is of — `crate::links`, [`handle_link`]): the program
-//! chosen by the container's rule, else in the distribution's window of
-//! choice; then the launch window as for a choice to make. The container
+//! chosen by the container's rule, else in Cellward's handler chooser; then
+//! the launch window as for a choice to make. The container
 //! is the zone's bus filter's word for its program's connection, believed
 //! from that filter alone — a child of the zone's process, which a program
 //! of the zone cannot be ([`is_zones_filter`]); anyone else's is the
@@ -1568,8 +1568,8 @@ fn is_zones_filter(tools: &Tools, zone: &str, peer: Option<&Peer>) -> bool {
 }
 
 /// A link a program of a zone opens (`crate::links`): the program — the
-/// container's rule, else the distribution's window of choice —, then the
-/// launch window, as for [`handle_pick`], with the rule offered where the
+/// container's rule, else Cellward's handler chooser —, then the launch
+/// window, as for [`handle_pick`], with the rule offered where the
 /// container is known and has none for this scheme.
 fn handle_link(
     tools: &Tools,

@@ -420,7 +420,7 @@ boundary is the container → outside direction (§6).
 | XDG autostart | runs uncontained | **done** (§5.2): assigned programs start in their container; **unassigned ones get the picker at login** (`ask`, since 2026-09-24) — or, with `offline` or no screen, start offline in a home of their own with a notification | 3 |
 | compositor key bindings | only if the binding calls `vpn-zone-pick` | **done** (§5.1): `cellward launch <launcher-id>` reads the entry's `Exec` and goes through the picker | 3 |
 | shell | uncontained | **done**: opt-in PATH shims for assigned programs (`pathShims.enable`); never a boundary | 3 |
-| portal `OpenURI` from a host program | portal → handler entry → shadow → picker | unchanged | — |
+| portal `OpenURI` from a host program | portal → handler entry → shadow → picker | **optional per scheme**: `hostLinks.schemes` makes the `cellward open` dispatcher the default before the desktop AppChooser; empty by default | — |
 | portal `OpenURI` from a container | **done** in hermetic zones and sandboxes: the bus filter answers it and hands the link, with its container, to the broker (§6.2) | — | 4 |
 | a link opened from inside a zone | **done** in hermetic zones (the default): the broker, not `systemd --user` (§6.2); a zone switched out of hermeticity still delegates through `systemd --user` | — | 4 |
 | `systemd-run --user`, `systemctl --user` from inside a zone | **done** in hermetic zones: out of reach (§6.1); reachable, by design, in a zone switched out of hermeticity | — | 4 |

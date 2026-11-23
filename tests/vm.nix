@@ -456,6 +456,7 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.cellward.enable = true;
+          programs.cellward.hostLinks.schemes = [ "cellwardvm" ];
           # Hermeticity declared the way an owner switches it on for one zone:
           # the default spelled out (off, as it is anyway) and the zone as the
           # exception. The holder has to find this in ~/.config on its own.
@@ -468,6 +469,11 @@ let
           # A container declared in Nix: bound to direct, trusting a CA made
           # at build time. What the module writes, the runtime obeys and the
           # CLI refuses to change is asserted below.
+          programs.cellward.containers.vmopen = {
+            home = "main";
+            network = "unconfined";
+            apps = [ "vmopen" ];
+          };
           programs.cellward.containers.vmdecl = {
             home = "overlay";
             network = "direct";
@@ -539,6 +545,8 @@ let
           pkgs.tmux
           # gdbus: a sandboxed program calling the portal (LEAK-MODEL §2).
           pkgs.glib
+          # The host dispatcher path starts at the ordinary xdg-open.
+          pkgs.xdg-utils
           # A real compositor for the restricted-Wayland check, headless.
           pkgs.sway
           # And one without wp_security_context_v1 (tests/vm-promise-no-context.py).
@@ -707,6 +715,26 @@ let
       # a question — set locally, so that a subtest can ask (docs/FIREWALL.md
       # §9).
       alice("cellward defaults set network yes")
+
+      with subtest("host links: xdg-open reaches Cellward before any desktop chooser"):
+          alice("mkdir -p ~/.local/share/vmopen ~/.local/share/applications")
+          script = "#!/bin/sh\nprintf '%s\\n' \"$1\" > /home/alice/vmopen-result\n"
+          alice(
+              "printf %s " + shlex.quote(script)
+              + " > ~/.local/share/vmopen/record && chmod 755 ~/.local/share/vmopen/record"
+          )
+          alice(
+              "printf '[Desktop Entry]\\nType=Application\\nName=VM open\\n"
+              "Exec=/home/alice/.local/share/vmopen/record %%u\\n"
+              "MimeType=x-scheme-handler/cellwardvm;\\n' > ~/.local/share/vmopen/vmopen.desktop"
+          )
+          alice("ln -sfn ~/.local/share/vmopen/vmopen.desktop ~/.local/share/applications/vmopen.desktop")
+          uri = "cellwardvm://пример/путь с пробелом?x=один два&y=%2F"
+          before = alice("sha256sum ~/.config/mimeapps.list")
+          alice("WAYLAND_DISPLAY=wayland-vmtest xdg-open " + shlex.quote(uri))
+          machine.wait_until_succeeds("test -s /home/alice/vmopen-result", timeout=30)
+          assert machine.succeed("cat /home/alice/vmopen-result") == uri + "\n"
+          assert alice("sha256sum ~/.config/mimeapps.list") == before
 
       with subtest("cellward add: synthetic config (wg genkey, TEST-NET endpoint)"):
           alice(
@@ -2428,7 +2456,7 @@ let
               "MimeType=x-scheme-handler/https;\\n' > ~/.local/share/vmurl/vmurl.desktop"
           )
           alice("ln -sfn ~/.local/share/vmurl/vmurl.desktop ~/.local/share/applications/vmurl.desktop")
-          alice("printf '[Default Applications]\\nx-scheme-handler/https=vmurl.desktop\\n' > ~/.config/mimeapps.list")
+          alice("rm -f ~/.config/mimeapps.list && printf '[Default Applications]\\nx-scheme-handler/https=vmurl.desktop\\n' > ~/.config/mimeapps.list")
           # xdg-open looks for a scheme handler only in a graphical session
           # (WAYLAND_DISPLAY or DISPLAY set) and goes for console browsers
           # otherwise; the VM has no compositor, only the variable is needed.
