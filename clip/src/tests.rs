@@ -193,34 +193,90 @@ fn a_torn_tail_is_cut_off() {
 }
 
 #[test]
-fn copying_again_is_an_event_not_an_entry() {
+fn copying_an_old_text_again_moves_the_only_entry_to_the_newest_end() {
     let d = Tmp::new("dedup");
     let k = key(3);
     let mut h = History::open_with(d.path(), &k, small()).unwrap();
-    let a = h.append(text(10, "same text")).unwrap();
-    assert!(matches!(a, Appended::New(_)));
+    let first = h.append(text(10, "same text")).unwrap().id();
+    h.record_paste(first, 15).unwrap();
     for i in 0..40 {
         h.append(text(20 + i, &format!("filler {i}"))).unwrap();
     }
     // The first is sealed by now: dedup finds it in a segment.
     assert!(h.stats().segments > 0);
-    let b = h.append(text(100, "same text")).unwrap();
-    assert_eq!(b, Appended::Again(a.id()));
-    // The same contents offered in another order are the same.
+    let again = h.append(text(100, "same text")).unwrap();
+    let recent = again.id();
+    assert!(matches!(again, Appended::Again(_)));
+    assert!(recent > first);
+    let order = h.query(&Query::default(), None, 1000).unwrap();
+    assert_eq!(order.first(), Some(&recent));
+    assert!(!order.contains(&first));
+    assert_eq!(order.iter().filter(|&&id| id == recent).count(), 1);
+    assert!(h.get(first).unwrap().is_none());
+
+    // The same contents offered in another order move the same entry again.
     let mut swapped = text(110, "same text");
     swapped.contents.reverse();
-    assert_eq!(h.append(swapped).unwrap(), Appended::Again(a.id()));
+    let swapped = h.append(swapped).unwrap();
+    let latest = swapped.id();
+    assert!(matches!(swapped, Appended::Again(_)));
+    assert!(latest > recent);
+    let order = h.query(&Query::default(), None, 1000).unwrap();
+    assert_eq!(order.first(), Some(&latest));
+    assert!(!order.contains(&recent));
     assert!(matches!(
         h.append(text(120, "Same text")).unwrap(),
         Appended::New(_)
     ));
-    let e = h.get(a.id()).unwrap().unwrap();
+    let e = h.get(latest).unwrap().unwrap();
     assert_eq!(e.copies, vec![10, 100, 110]);
+    assert_eq!(e.pastes, [15]);
     assert_eq!(e.copied_at, 10);
+    assert_eq!(
+        h.summary(latest).unwrap().unwrap().copies.last(),
+        Some(&110)
+    );
     // Deleted, it is not copied "again".
-    assert!(h.delete(a.id()).unwrap());
+    assert!(h.delete(latest).unwrap());
     let c = h.append(text(130, "same text")).unwrap();
-    assert!(matches!(c, Appended::New(id) if id > a.id()));
+    assert!(matches!(c, Appended::New(id) if id > latest));
+}
+
+#[test]
+fn copying_binary_again_updates_recency_without_a_duplicate() {
+    let d = Tmp::new("dedup-binary");
+    let k = key(32);
+    let mut h = History::open_with(d.path(), &k, small()).unwrap();
+    let image = || NewEntry {
+        copied_at: 10,
+        contents: vec![Content {
+            mime: "image/png".into(),
+            data: (0..5000u32).map(|i| (i * 7) as u8).collect(),
+        }],
+        preview: Some("картинка".into()),
+    };
+    let first = h.append(image()).unwrap().id();
+    let middle = h.append(text(20, "between copies")).unwrap().id();
+    let mut again = image();
+    again.copied_at = 30;
+    let again = h.append(again).unwrap();
+    let recent = again.id();
+    assert!(matches!(again, Appended::Again(_)));
+    assert!(recent > middle);
+    assert_eq!(
+        h.query(&Query::default(), None, 1000).unwrap(),
+        vec![recent, middle]
+    );
+    assert!(h.get(first).unwrap().is_none());
+    let e = h.get(recent).unwrap().unwrap();
+    assert_eq!(e.contents, image().contents);
+    assert_eq!(e.copies, [10, 30]);
+    assert_eq!(e.copied_at, 10);
+    h.compact().unwrap();
+    assert_eq!(
+        h.query(&Query::default(), None, 1000).unwrap(),
+        vec![recent, middle]
+    );
 }
 
 #[test]

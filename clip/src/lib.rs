@@ -252,7 +252,8 @@ pub struct Summary {
 pub enum Appended {
     /// A new entry, of this id.
     New(u64),
-    /// The same contents were there: a copy event added to this entry.
+    /// The same contents were there: the entry moved to this newest id, with
+    /// its history and another copy event.
     Again(u64),
 }
 
@@ -586,7 +587,7 @@ impl History {
     }
 
     /// Record a copy. The same contents copied before (and not deleted)
-    /// get a copy event instead of a new entry.
+    /// move to the newest id instead of making a second visible entry.
     ///
     /// See `contains_contents` for a lookup which records no copy event.
     pub fn append(&mut self, e: NewEntry) -> Result<Appended> {
@@ -607,10 +608,34 @@ impl History {
             if self.is_deleted(id) {
                 continue;
             }
-            if let Some(old) = self.contents(id)? {
-                if canonical(&old) == canonical(&e.contents) {
-                    self.event(COPIED, id, e.copied_at)?;
-                    return Ok(Appended::Again(id));
+            if let Some(old) = self.get(id)? {
+                if canonical(&old.contents) == canonical(&e.contents) {
+                    let Entry {
+                        copied_at,
+                        copies,
+                        pastes,
+                        contents,
+                        preview,
+                        ..
+                    } = old;
+                    let new = self
+                        .append_new(NewEntry {
+                            copied_at,
+                            contents,
+                            preview: Some(preview),
+                        })?
+                        .id();
+                    for &at in copies.iter().skip(1) {
+                        self.event(COPIED, new, at)?;
+                    }
+                    for &at in &pastes {
+                        self.event(PASTED, new, at)?;
+                    }
+                    self.event(COPIED, new, e.copied_at)?;
+                    self.sync()?;
+                    self.delete(id)?;
+                    self.sync()?;
+                    return Ok(Appended::Again(new));
                 }
             }
         }
