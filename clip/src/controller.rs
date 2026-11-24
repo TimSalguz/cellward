@@ -228,6 +228,7 @@ impl Controller {
         if id.len() > 512 || !crate::recorder::valid_history(history) {
             return Err(endpoint::invalid());
         }
+        let history = crate::clipboard_scope::canonical_history(history);
         let pid = endpoint::owner_pid(owner.as_fd()).ok_or_else(endpoint::invalid)?;
         if let Some(old) = self.scopes.get(id) {
             if endpoint::owner_pid(old.owner.as_fd()) != Some(pid) || old.history != history {
@@ -996,6 +997,30 @@ mod tests {
             endpoint::prepare_paste(&h.runtime, "main:host", revision).unwrap(),
             endpoint::PastePlan::Current(r) if r == revision
         ));
+    }
+
+    #[test]
+    fn real_home_network_endpoints_register_one_canonical_history() {
+        let h = Harness::new();
+        let de = Lease::new();
+        let nl = Lease::new();
+        let private = Lease::new();
+        let _de = endpoint::bind(&h.runtime, "main:DE", "main:DE", de.fd.as_fd()).unwrap();
+        let _nl = endpoint::bind(&h.runtime, "main:NL", "main", nl.fd.as_fd()).unwrap();
+        let _private = endpoint::bind(&h.runtime, "work", "work", private.fd.as_fd()).unwrap();
+        assert_eq!(
+            endpoint::list(&h.runtime).unwrap(),
+            [
+                ("main:DE".into(), "host".into()),
+                ("main:NL".into(), "host".into()),
+                ("work".into(), "work".into()),
+            ]
+        );
+        assert!(
+            endpoint::bind(&h.runtime, "main:DE", "host", de.fd.as_fd()).is_ok(),
+            "aliases of the same live scope must not conflict"
+        );
+        assert!(endpoint::bind(&h.runtime, "work", "main:NL", private.fd.as_fd()).is_err());
     }
 
     #[test]
