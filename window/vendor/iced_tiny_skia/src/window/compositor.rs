@@ -146,6 +146,32 @@ pub fn new(
     Compositor { context, settings }
 }
 
+#[doc(hidden)]
+pub fn layers_damage(
+    previous: &[Layer],
+    current: &[Layer],
+    viewport: Rectangle,
+) -> Vec<Rectangle> {
+    // cellward: translated primitives can draw outside their layer's clip
+    // bounds. A structural change must therefore invalidate the whole surface,
+    // not just the previous and current clip rectangles.
+    if previous.len() != current.len()
+        || previous
+            .iter()
+            .zip(current)
+            .any(|(previous, current)| previous.bounds != current.bounds)
+    {
+        return vec![viewport];
+    }
+
+    damage::diff(
+        previous,
+        current,
+        |layer| vec![layer.bounds],
+        Layer::damage,
+    )
+}
+
 pub fn present(
     renderer: &mut Renderer,
     surface: &mut Surface,
@@ -176,11 +202,10 @@ pub fn present(
     let damage = last_layers
         .and_then(|last_layers| {
             (surface.background_color == background_color).then(|| {
-                damage::diff(
+                layers_damage(
                     last_layers,
                     renderer.layers(),
-                    |layer| vec![layer.bounds],
-                    Layer::damage,
+                    Rectangle::with_size(viewport.logical_size()),
                 )
             })
         })

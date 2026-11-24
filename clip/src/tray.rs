@@ -133,6 +133,137 @@ struct Item {
 
 struct Tray(Arc<Item>);
 
+fn run_json(program: &str, args: &[&str]) -> Result<serde_json::Value, String> {
+    let out = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{program} {} failed", args.join(" ")));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("{program}: {e}"))
+}
+
+fn run_action(program: &str, args: &[String]) -> Result<(), String> {
+    let status = Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} {} failed", args.join(" ")))
+    }
+}
+
+fn sway_windows(value: &serde_json::Value, pid: u32) -> Vec<i64> {
+    fn walk(value: &serde_json::Value, pid: i64, out: &mut Vec<i64>) {
+        if value.get("pid").and_then(serde_json::Value::as_i64) == Some(pid) {
+            if let Some(id) = value.get("id").and_then(serde_json::Value::as_i64) {
+                out.push(id);
+            }
+        }
+        for child in ["nodes", "floating_nodes"]
+            .iter()
+            .filter_map(|key| value.get(key).and_then(serde_json::Value::as_array))
+            .flatten()
+        {
+            walk(child, pid, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(value, i64::from(pid), &mut out);
+    out
+}
+
+fn niri_windows(value: &serde_json::Value, pid: u32) -> Vec<i64> {
+    let Some(windows) = value.as_array() else {
+        return Vec::new();
+    };
+    windows
+        .iter()
+        .filter(|window| {
+            window.get("pid").and_then(serde_json::Value::as_i64) == Some(i64::from(pid))
+        })
+        .filter_map(|window| window.get("id").and_then(serde_json::Value::as_i64))
+        .collect()
+}
+
+fn niri_current_workspace(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_array()?
+        .iter()
+        .find(|workspace| {
+            workspace
+                .get("is_focused")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .and_then(|workspace| {
+            workspace
+                .get("idx")
+                .and_then(serde_json::Value::as_i64)
+                .map(|idx| idx.to_string())
+                .or_else(|| {
+                    workspace
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+        })
+}
+
+fn focus_manager(pid: u32) -> Result<(), String> {
+    const NO_WINDOW: &str = "у менеджера нет окна";
+    if std::env::var_os("NIRI_SOCKET").is_some_and(|value| !value.is_empty()) {
+        let windows = run_json("niri", &["msg", "--json", "windows"])?;
+        let id = niri_windows(&windows, pid)
+            .into_iter()
+            .max()
+            .ok_or(NO_WINDOW)?;
+        let workspaces = run_json("niri", &["msg", "--json", "workspaces"])?;
+        let workspace = niri_current_workspace(&workspaces).ok_or("нет текущего workspace")?;
+        let id = id.to_string();
+        run_action(
+            "niri",
+            &[
+                "msg".into(),
+                "action".into(),
+                "move-window-to-workspace".into(),
+                "--window-id".into(),
+                id.clone(),
+                workspace,
+            ],
+        )?;
+        run_action(
+            "niri",
+            &[
+                "msg".into(),
+                "action".into(),
+                "focus-window".into(),
+                "--id".into(),
+                id,
+            ],
+        )
+    } else if std::env::var_os("SWAYSOCK").is_some_and(|value| !value.is_empty()) {
+        let tree = run_json("swaymsg", &["-t", "get_tree", "-r"])?;
+        let id = sway_windows(&tree, pid)
+            .into_iter()
+            .max()
+            .ok_or(NO_WINDOW)?;
+        run_action(
+            "swaymsg",
+            &[format!(
+                "[con_id={id}] move container to workspace current; [con_id={id}] focus"
+            )],
+        )
+    } else {
+        Err("композитор не отвечает: нужен niri (NIRI_SOCKET) или sway (SWAYSOCK)".into())
+    }
+}
+
 impl Item {
     fn open(&self) {
         let Ok(mut child) = self.open.lock() else {
@@ -142,6 +273,10 @@ impl Item {
             .as_mut()
             .is_some_and(|running| running.try_wait().ok().flatten().is_none())
         {
+            let pid = child.as_ref().expect("running manager").id();
+            if let Err(e) = focus_manager(pid) {
+                eprintln!("cellward-clip: окно менеджера не поднялось: {e}");
+            }
             return;
         }
         match Command::new(&self.window)
@@ -251,6 +386,24 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
+
+    #[test]
+    fn manager_window_lookup_scoped_to_its_pid_and_workspace() {
+        let sway = serde_json::json!({"nodes": [
+            {"id": 1, "pid": 100},
+            {"nodes": [{"id": 8, "pid": 200}], "floating_nodes": [{"id": 9, "pid": 200}]}
+        ]});
+        assert_eq!(sway_windows(&sway, 200), [8, 9]);
+        assert!(sway_windows(&sway, 300).is_empty());
+        let niri = serde_json::json!([
+            {"id": 4, "pid": 100}, {"id": 7, "pid": 200}, {"id": 9, "pid": 200}
+        ]);
+        assert_eq!(niri_windows(&niri, 200), [7, 9]);
+        let workspaces = serde_json::json!([
+            {"idx": 1, "is_focused": false}, {"idx": 3, "is_focused": true}
+        ]);
+        assert_eq!(niri_current_workspace(&workspaces).as_deref(), Some("3"));
+    }
 
     struct Bus(Child);
     impl Drop for Bus {

@@ -101,7 +101,12 @@ preserves the selected entry, expanded text, search, filters and copy destinatio
 large arrivals are paged without gaps. A destination that stops stays selected but
 unavailable until another destination is explicitly chosen; copying never falls
 back silently to the host. The unavailable action remains visible with readable
-disabled colors.
+disabled colors. Wide windows put a compact entry list beside full selected text
+or a large image; narrow windows stack the list and details. Buffer tabs wrap,
+and search stays attached to the feed. Long text wraps and its bounded preview
+remains Unicode-safe. Every entry's destination picker can override the default
+without silently using a stopped target. Reopening the current full-size image
+reuses its decoded original pixels rather than fetching and decoding them again.
 Background replies from an old search or history are ignored. Confirmation,
 password editing and image inspection pause entry refresh until they are closed.
 
@@ -204,8 +209,12 @@ histories does not set an active selection. The separate **Copy to selected
 clipboard** action replaces the chosen live destination. The source history
 entry remains where it was.
 The frame-opened window stays scoped to its own launch and offers paste only
-there. The tray opens one window at a time; closing it does not stop the
-recorder, and the next click reopens it. Empty containers with no history yet
+there. The tray opens one window at a time. Another tray click moves that
+window to the current workspace and focuses it on niri or sway; it does not
+open another process or close the manager when focus is lost. The visible **✕**
+closes it without copying or pasting, even without server-side window
+decorations. Closing it does not stop the recorder, and the next click reopens
+it. Empty containers with no history yet
 do not appear until they copy something.
 Each buffer has **History**, **Favourites**, and **Passwords** tabs. "☆ Add to favourites"
 stores an encrypted copy below that buffer's hidden `.favorites` directory;

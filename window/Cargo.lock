@@ -2997,6 +2997,7 @@ name = "vpn-zone-window"
 version = "0.1.0"
 dependencies = [
  "iced",
+ "iced_tiny_skia",
  "libc",
  "png",
  "regex",

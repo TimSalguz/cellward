@@ -2103,6 +2103,31 @@ fn main() -> iced::Result {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn structural_layer_changes_redraw_the_whole_viewport() {
+        use iced_tiny_skia::core::{Rectangle, Size};
+        use iced_tiny_skia::{window::compositor::layers_damage, Layer};
+
+        let viewport = Rectangle::with_size(Size::new(1280.0, 900.0));
+        let layer = |x| Layer {
+            bounds: Rectangle {
+                x,
+                y: 0.0,
+                width: 400.0,
+                height: 600.0,
+            },
+            ..Layer::default()
+        };
+        assert!(layers_damage(&[layer(0.0)], &[layer(0.0)], viewport).is_empty());
+        assert_eq!(
+            layers_damage(&[layer(0.0)], &[layer(10.0)], viewport),
+            [viewport]
+        );
+        assert_eq!(
+            layers_damage(&[layer(0.0)], &[layer(0.0), layer(0.0)], viewport),
+            [viewport]
+        );
+    }
 
     #[test]
     fn filesystem_drafts_follow_container_and_never_leak_into_unconfined_launches() {

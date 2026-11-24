@@ -23,6 +23,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('window', 'sway', 'swaymsg', 'grim', 'wtype', 'xkbcommon', 'font'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--width', type=int, default=800)
+    parser.add_argument('--height', type=int, default=900)
+    parser.add_argument('--destination-shot', action='store_true')
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location('typing_smoke', Path(__file__).with_name('typing-smoke.py'))
     wire = importlib.util.module_from_spec(spec)
@@ -58,6 +61,7 @@ def main():
     png = (b'\x89PNG\r\n\x1a\n'
            + chunk(b'IHDR', struct.pack('>IIBBBBB', 800, 400, 8, 2, 0, 0, 0))
            + chunk(b'IDAT', zlib.compress((b'\0' + color * 800) * 400)) + chunk(b'IEND', b''))
+    long_url = 'https://example.com/open?' + 'parameter=value&' * 30
 
     def server():
         while not stop.is_set():
@@ -79,14 +83,20 @@ def main():
                     answer = b'host\n'
                     if lists_epoch[0]:
                         answer += b'app-one\n'
+                        answer += b'work-browser\nnotes\nmail\npasswords\nresearch\nshared\n'
                 elif request == 'instances':
                     answer = b'app-one\trunning\n' if lists_epoch[0] else b''
                 elif request.startswith('search\thost\t'):
                     answer = b'1\t1700000000000\t1700000000000\t1\t0\t0\ttext/plain:12\tInitial clip\n'
                     if epoch[0]:
                         answer = f'2\t1700000001000\t1700000001000\t1\t0\t0\timage/png:{len(png)}\tScreenshot\n'.encode() + answer
+                        answer = f'3\t1700000002000\t1700000002000\t1\t0\t0\ttext/plain:{len(long_url)}\t{long_url}\n'.encode() + answer
                 elif request == 'get\thost\t2\timage/png':
                     answer = f'ok\t{len(png)}\n'.encode() + png
+                elif request == 'get\thost\t1\ttext/plain':
+                    answer = b'ok\t12\nInitial clip'
+                elif request == 'get\thost\t3\ttext/plain':
+                    answer = f'ok\t{len(long_url)}\n'.encode() + long_url.encode()
                 else:
                     answer = b'error\tunexpected test request\n'
                 client.sendall(answer)
@@ -110,9 +120,16 @@ def main():
         positions = [i // 3 for i in range(0, len(body), 3) if body[i:i + 3] == color]
         return width, height, positions
 
+    def pixel(x, y):
+        raw = subprocess.check_output([args.grim, '-t', 'ppm', '-'], env=env, timeout=5)
+        _, size, _, body = raw.split(b'\n', 3)
+        width, _ = map(int, size.split())
+        at = (y * width + x) * 3
+        return body[at:at + 3]
+
     try:
         config = root / 'sway.conf'
-        config.write_text('output * mode 800x900\nseat seat0 fallback true\ndefault_border none\n')
+        config.write_text(f'output * mode {args.width}x{args.height}\nseat seat0 fallback true\ndefault_border none\n')
         start([args.sway, '--unsupported-gpu', '-c', str(config)], 'sway')
         env['WAYLAND_DISPLAY'] = wire.wait_for(lambda: next((p.name for p in runtime.glob('wayland-*') if not p.name.endswith('.lock')), None))
         env['SWAYSOCK'] = str(wire.wait_for(lambda: next(runtime.glob('sway-ipc*.sock'), None)))
@@ -134,6 +151,13 @@ def main():
         subprocess.run([args.grim, str(root / 'live-manager.png')], env=env, check=True)
         width, _, small = wire.wait_for(lambda: (p if (p := pixels())[2] else None))
         subprocess.run([args.grim, str(root / 'live-image.png')], env=env, check=True)
+        if args.destination_shot:
+            destination_x = width * (.835 if width >= 900 else .4)
+            with open(fifo, 'w') as pointer:
+                pointer.write(f'move {int(destination_x)} {output_height - 72}\npress\nrelease\n')
+            time.sleep(.3)
+            subprocess.run([args.grim, str(root / 'entry-destination.png')], env=env, check=True)
+            subprocess.run([args.wtype, '-s', '400', '-k', 'Escape'], env=env, check=True, timeout=5)
         middle = small[len(small) // 2]
         with open(fifo, 'w') as pointer:
             pointer.write(f'move {middle % width} {middle // width}\npress\nrelease\n')
@@ -141,19 +165,34 @@ def main():
         _, _, large = wire.wait_for(lambda: (p if len((p := pixels())[2]) > len(small) * 4 else None))
         subprocess.run([args.grim, str(root / 'original-image-preview.png')], env=env, check=True)
         assert len(large) > len(small) * 4, 'preview enlarged only the list thumbnail'
-        subprocess.run([args.wtype, '-k', 'Escape'], env=env, check=True, timeout=5)
-        time.sleep(.2)
+        subprocess.run([args.wtype, '-s', '400', '-k', 'Escape'], env=env, check=True, timeout=5)
+        wire.wait_for(lambda: len(pixels()[2]) < len(large))
         assert window.poll() is None, 'Escape closed the manager instead of the preview'
+        assert pixel(11, output_height // 2) == pixel(12, output_height // 2), 'viewer left stale damage at the far left'
+        subprocess.run([args.grim, str(root / 'after-preview.png')], env=env, check=True)
+        _, _, detail = pixels()
         before_targets = len(requests)
         lists_epoch[0] = False
         wire.wait_for(lambda: 'instances' in requests[before_targets:], timeout=4)
         time.sleep(.3)
         subprocess.run([args.grim, str(root / 'unavailable-target.png')], env=env, check=True)
-        search_count = sum(r.startswith('search\t') for r in requests)
-        wire.wait_for(lambda: sum(r.startswith('search\t') for r in requests) > search_count, timeout=4)
+        decoded_requests = requests.count('get\thost\t2\timage/png')
+        with open(fifo, 'w') as pointer:
+            pointer.write(f'move {middle % width} {middle // width}\npress\nrelease\n')
+        wire.wait_for(lambda: len(pixels()[2]) > len(detail) * 1.2)
+        assert requests.count('get\thost\t2\timage/png') == decoded_requests, 'cached preview fetched or decoded again'
+        subprocess.run([args.grim, str(root / 'cached-image-preview.png')], env=env, check=True)
+        subprocess.run([args.wtype, '-s', '400', '-k', 'Escape'], env=env, check=True, timeout=5)
+        wire.wait_for(lambda: len(pixels()[2]) < len(detail) * 1.2)
+        subprocess.run([args.grim, str(root / 'close-control.png')], env=env, check=True)
+        with open(fifo, 'w') as pointer:
+            pointer.write(f'move {width - 28} 60\npress\nrelease\n')
+        wire.wait_for(lambda: window.poll() is not None)
+        assert window.returncode == 1, f'close control exited with {window.returncode}'
+        subprocess.run([args.grim, str(root / 'after-close.png')], env=env, check=True)
         assert not any(r.startswith(('copy\t', 'copy-to\t', 'select\t')) for r in requests)
         vk.close()
-        print('PASS: entries, tabs and targets update without input; selected target survives then becomes unavailable; original PNG, Escape and polling recovery work; no clipboard mutation', flush=True)
+        print('PASS: live lists and target state update; cached full image; Escape returns to detail; close control exits without clipboard mutation', flush=True)
     finally:
         stop.set()
         worker.join(timeout=3)
