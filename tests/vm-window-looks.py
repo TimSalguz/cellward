@@ -213,7 +213,9 @@ with subtest("looks: the tag instead of a frame; beside it a press is not the fr
     ends = [c for c in range(x, x + w) if at(c, row) == border]
     assert ends and ends[0] == x, ends[:5]
     tag_right = max(ends)
-    assert 100 < tag_right - x < w // 2, (x, tag_right, w)
+    # Eight buttons plus the text may take over half the row, but the tag
+    # still leaves a clear part beside it.
+    assert 100 < tag_right - x < w, (x, tag_right, w)
     assert at(x, y) != border, "the tag's corner not round"
     assert at(x, y + title - 1) == border
     # The text on it.

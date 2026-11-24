@@ -50,8 +50,8 @@ def panel_of(before, after, x, y, w):
 
 
 def buttons_of(at, box):
-    """The panel's two upper buttons and one lower button as
-    (left, right, row), detected against the panel's own colour."""
+    """The panel's three buttons in reading order, as many to a row as fit,
+    detected against the panel's own colour."""
     x0, y0, x1, y1 = box
     bg = at(x0 + 3, y0 + 3)
     def at_row(row):
@@ -69,7 +69,7 @@ def buttons_of(at, box):
 
     upper = at_row(y1 - 60)
     lower = at_row(y1 - 26)
-    assert len(upper) == 2 and len(lower) == 1, (upper, lower, box)
+    assert len(upper) + len(lower) == 3, (upper, lower, box)
     return upper + lower
 
 

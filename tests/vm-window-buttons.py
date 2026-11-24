@@ -10,10 +10,10 @@ this one moves and clicks it through a FIFO.
 """
 
 # The look there is (rust/src/wl_title.rs, LOOK, and the fullscreen button
-# of `frame fullscreen-button one`): menu, network, fullscreen, close at the
-# right end of the title strip, 24 wide each; close red under the pointer,
-# the others a shade of the frame's colour — on magenta, whose text is
-# near-black, 22 % toward black.
+# of `frame fullscreen-button one`): menu, network, maximize, fullscreen,
+# three screenshot buttons and close at the right end of the title strip,
+# 24 wide each; close red under the pointer, the others a shade of the
+# frame's colour — on magenta, whose text is near-black, 22 % toward black.
 button_w = 24
 close_lit = (0xE0, 0x1B, 0x24)
 shade_lit = (199, 0, 199)
@@ -37,10 +37,10 @@ def node(app_id):
 
 
 def cells(x, y, w):
-    """The top left of each button's cell, left to right: the row ends
-    where the right border begins, under the top border."""
+    """The top left of all eight cells, left to right: the row ends where
+    the right border begins, under the top border."""
     right = x + w - width
-    return [(right - (4 - i) * button_w, y + width) for i in range(4)]
+    return [(right - (8 - i) * button_w, y + width) for i in range(8)]
 
 
 def glyph(at, cx, cy):
@@ -86,7 +86,9 @@ with subtest("the frame's buttons: at the right end of the title, lit under the 
     x, y, w, h = view("btn")
     at = shot("frame-buttons")
     framed(at, x, y, w, h, top=width + title)
-    menu, network, square, close = cells(x, y, w)
+    menu, network, _maximize, square, _shot_window, _shot_area, _shot_hover, close = cells(
+        x, y, w
+    )
     for cell in (menu, network, square, close):
         assert at(*cell) == border, (cell, at(*cell))
         assert glyph(at, *cell) > 8, f"no glyph on the button at {cell}"
@@ -201,7 +203,7 @@ with subtest("the frame's □: the compositor's fullscreen; its right click, ins
         assert fullscreen_mode() == mode, node("btn")
 
     x, y, w, h = view("btn")
-    square = cells(x, y, w)[2]
+    square = cells(x, y, w)[3]
     click(square[0] + button_w // 2, square[1] + title // 2)
     until_mode(1)
     # sway has it fullscreen: the whole output, the border at its edges.
@@ -219,7 +221,7 @@ with subtest("the frame's □: the compositor's fullscreen; its right click, ins
     alice("cellward frame fullscreen title hover")
     machine.sleep(2)
     x, y, w, h = view("btn")
-    square = cells(x, y, w)[2]
+    square = cells(x, y, w)[3]
     click(square[0] + button_w // 2, square[1] + title // 2)
     until_mode(1)
     machine.sleep(2)
@@ -238,7 +240,7 @@ with subtest("the frame's □: the compositor's fullscreen; its right click, ins
     # told is the proxy's wire test.)
     x, y, w, h = view("btn")
     before = node("btn")["rect"]
-    square = cells(x, y, w)[2]
+    square = cells(x, y, w)[3]
     pointer("move", square[0] + button_w // 2, square[1] + title // 2)
     pointer("press", "right")
     pointer("release", "right")
@@ -297,7 +299,7 @@ with subtest("dragging the title moves the window; its border resizes it"):
 
 with subtest("the frame's × closes the program, as its own close would"):
     x, y, w, h = view("btn")
-    close = cells(x, y, w)[3]
+    close = cells(x, y, w)[7]
     click(close[0] + button_w // 2, close[1] + title // 2)
     machine.wait_until_fails(
         f"su -l alice -c 'SWAYSOCK={swaysock} swaymsg -t get_tree' | grep -q '\"app_id\": *\"btn\"'",
