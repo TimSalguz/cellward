@@ -309,18 +309,30 @@ pub fn leaves(dir: &Path) -> Vec<String> {
     names
 }
 
-/// The launches' cgroups of `epoch` nobody is in, taken away (the keeper's,
-/// at each look). One something entered meanwhile stays: the kernel refuses
-/// to remove a cgroup with a process in it.
-pub fn sweep(epoch: &Epoch) {
-    for leaf in leaves(&epoch.dir()) {
-        let dir = epoch.leaf_dir(&leaf);
-        let empty =
-            fs::read_to_string(dir.join("cgroup.events")).is_ok_and(|t| !events_populated(&t));
-        if empty {
-            let _ = fs::remove_dir(&dir);
+fn launch_running(leaf: &str) -> bool {
+    leaf_of(leaf).is_some_and(|(pid, start)| crate::sys::start_time(pid) == Some(start))
+}
+
+fn sweepable(dir: &Path, leaf: &str, running: &dyn Fn(&str) -> bool) -> bool {
+    !running(leaf)
+        && fs::read_to_string(dir.join(leaf).join("cgroup.events"))
+            .is_ok_and(|t| !events_populated(&t))
+}
+
+fn sweep_dir(dir: &Path, running: &dyn Fn(&str) -> bool) {
+    for leaf in leaves(dir) {
+        if sweepable(dir, &leaf, running) {
+            let _ = fs::remove_dir(dir.join(&leaf));
         }
     }
+}
+
+/// The launches' cgroups of `epoch` nobody is in, taken away (the keeper's,
+/// at each look). One something entered meanwhile stays: the kernel refuses
+/// to remove a cgroup with a process in it. A live waiter's empty cgroup is
+/// still being entered and stays too.
+pub fn sweep(epoch: &Epoch) {
+    sweep_dir(&epoch.dir(), &launch_running);
 }
 
 /// The epoch in the instance's directory `dir`, when there is one that
@@ -735,6 +747,33 @@ mod tests {
         ] {
             assert!(!is_leaf(not), "{not}");
         }
+    }
+
+    #[test]
+    fn an_empty_cgroup_is_not_swept_while_its_launch_is_alive() {
+        let dir = std::env::temp_dir().join(format!("vz-sweep-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for (leaf, populated) in [("l1-1", 0), ("l2-2", 0), ("l3-3", 1)] {
+            fs::create_dir_all(dir.join(leaf)).unwrap();
+            fs::write(
+                dir.join(leaf).join("cgroup.events"),
+                format!("populated {populated}\n"),
+            )
+            .unwrap();
+        }
+        let running = |leaf: &str| leaf == "l1-1";
+        assert!(!sweepable(&dir, "l1-1", &running));
+        assert!(sweepable(&dir, "l2-2", &running));
+        assert!(!sweepable(&dir, "l3-3", &running));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_launch_is_alive_only_at_its_recorded_pid_and_start() {
+        let pid = std::process::id() as i32;
+        let start = crate::sys::start_time(pid).unwrap();
+        assert!(launch_running(&leaf_name(pid, start)));
+        assert!(!launch_running(&leaf_name(pid, start + 1)));
     }
 
     /// Launches put where their rule says: into DENIED, out of it, left
