@@ -778,7 +778,7 @@ fn start_uplink(
     }
     let routes = zone::tool_output(&tools.ip, &["-n", uns.as_str(), "route", "show", "default"])
         .unwrap_or_default();
-    if routes.contains(&format!("dev {UPLINK_IFACE}")) {
+    if default_route_through(&routes, UPLINK_IFACE) {
         println!("system zone {name}: the uplink goes out through {interface} only");
         return Ok(child);
     }
@@ -824,6 +824,16 @@ pub(crate) fn pasta_done(pid_file: &Path, pasta: &mut Child) -> bool {
     let done = crate::sys::wait_for_child_entry(pid_file, pasta, crate::sys::written);
     let _ = fs::remove_file(pid_file);
     done
+}
+
+/// A real default route through `interface`, not just an address or a
+/// connected subnet on it. The route's fields are read by keyword: pasta's
+/// route has no `via`, an ordinary network's does.
+fn default_route_through(routes: &str, interface: &str) -> bool {
+    routes.lines().any(|line| {
+        line.split_whitespace().next() == Some("default")
+            && zone::parse_default_route(line).dev.as_deref() == Some(interface)
+    })
 }
 
 /// How a child that ended did: its status, collected.
@@ -942,7 +952,8 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     if let Some(interface) = &uplink {
         watch_uplink(name, interface, &mut pasta)?;
     }
-    // Up once pasta says it is done, then its interface looked at — once.
+    // Up once pasta says it is done, then its interface and IPv4 default route
+    // are looked at — once.
     if !pasta_done(&pid_file, &mut pasta) {
         return Err(format!(
             "pasta exited ({}) — the zone has no way out",
@@ -958,6 +969,21 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
         let _ = pasta.kill();
         let _ = pasta.wait();
         return Err("pasta gave the zone no interface".to_owned());
+    }
+    // An interface with only its connected subnet is not a way out: pasta may
+    // have picked a bridge before NetworkManager gave the real uplink its
+    // address and default route. Fail this start so systemd tries again after
+    // the host's route appears; never publish a routeless zone as ready.
+    let route_args = in_zone_args(&netns(name), &["-4", "route", "show", "default"]);
+    let route_args: Vec<&str> = route_args.iter().map(String::as_str).collect();
+    let routes = zone::tool_output(&tools.ip, &route_args).unwrap_or_default();
+    if !default_route_through(&routes, TUN) {
+        let _ = pasta.kill();
+        let _ = pasta.wait();
+        return Err(
+            "pasta gave the zone no IPv4 default route — is the host's uplink up, with a route?"
+                .to_owned(),
+        );
     }
     let own_dns = settings(name).map(|s| s.dns).unwrap_or_default();
     let (mut resolvers, whose) = plain_resolvers(&own_dns);
@@ -1706,6 +1732,26 @@ mod tests {
 
     fn os(words: &[&str]) -> Vec<OsString> {
         words.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn plain_readiness_requires_a_default_route_through_pasta() {
+        for route in [
+            "default dev awg0 scope link",
+            "default via 192.168.1.1 dev awg0 proto dhcp metric 100",
+            "default via 192.168.122.1 dev virbr0\ndefault via 192.168.1.1 dev awg0",
+        ] {
+            assert!(default_route_through(route, "awg0"), "{route}");
+        }
+        for route in [
+            "",
+            "192.168.122.0/24 dev awg0 proto kernel scope link",
+            "default via 192.168.122.1 dev virbr0",
+            "unreachable default dev awg0",
+            "default via 192.168.1.1 dev scope link",
+        ] {
+            assert!(!default_route_through(route, "awg0"), "{route}");
+        }
     }
 
     #[test]

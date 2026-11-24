@@ -52,7 +52,10 @@ keeps exactly two capabilities, CAP_SYS_ADMIN and CAP_NET_ADMIN, as ambient ones
 holder before exec — what it needs to enter a namespace the host's user namespace owns and
 configure its interface. Not `--runas`: pasta changes its uid first, which clears every
 capability, and then cannot enter the namespace (the VM test's "Couldn't switch to pasta
-namespaces").
+namespaces"). An interface alone is not readiness: after pasta says it is done, the holder
+requires an IPv4 default route through `awg0`. If pasta picked a routeless bridge during the
+host network's startup, it is killed and the holder fails; `Restart=on-failure` tries again once
+the real uplink has its address and route. No `ready` or `connected: yes` is published meanwhile.
 
 What it is for: the TTY console's second step when the VPN cannot come up (ARCHITECTURE §4),
 and the way a program goes out directly once the host has no network of its own —
@@ -804,6 +807,11 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   the second network: closed, no handshake ever, not rerouted; a plain zone through eth2
   reaching the second network and not the first; the uplink namespace and its pasta gone
   with the zone and back with it.
+- **VM `tests/vm-plain-readiness.nix`:** pasta first finds only a routeless `virbr0`; the plain
+  zone publishes neither `ready` nor `connected: yes`, its pasta is gone while systemd waits to
+  retry, and the already-attached Nix daemon has neither DNS nor egress. Once `eth1` gets its
+  address and default route, a retry brings the zone up and the same daemon resolves the test
+  name and downloads through it.
 - **VM `tests/vm-host.nix`:** the strict policy. `server` has a LAN address and one outside
   every private range (198.51.100.1) that stands for the internet, with a TCP responder, an
   HTTP file and an NTP server (chrony) there; `machine` runs `strict` with a plain zone `pl`
