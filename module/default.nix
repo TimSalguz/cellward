@@ -1787,7 +1787,7 @@ in
     noDisplay = true;
     mimeType = hostLinkTypes;
   };
-  xdg.mimeApps.enable = lib.mkIf (cfg.hostLinks.schemes != [ ]) true;
+  xdg.mimeApps.enable = lib.mkIf (cfg.hostLinks.schemes != [ ]) (lib.mkDefault true);
   xdg.mimeApps.defaultApplications = lib.mkIf (hostLinkTypes != [ ]) hostLinkDefaults;
 
   # Объявленное — в ~/.config/vpn-zones/declared, а не в xdg.configHome: CLI,
