@@ -238,7 +238,7 @@ impl Peer {
                             io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                         ) =>
                     {
-                        return Ok(!self.deadline.is_some_and(|deadline| now >= deadline));
+                        return Ok(self.deadline.is_none_or(|deadline| now < deadline));
                     }
                     Err(e) => return Err(e),
                 };
@@ -278,7 +278,7 @@ impl Peer {
                             io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                         ) =>
                     {
-                        return Ok(!self.deadline.is_some_and(|deadline| now >= deadline));
+                        return Ok(self.deadline.is_none_or(|deadline| now < deadline));
                     }
                     Err(e) => return Err(e),
                 }
@@ -312,7 +312,7 @@ impl Peer {
                     io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                 ) =>
             {
-                return Ok(!self.deadline.is_some_and(|deadline| now >= deadline));
+                return Ok(self.deadline.is_none_or(|deadline| now < deadline));
             }
             Err(e) => return Err(e),
         }
