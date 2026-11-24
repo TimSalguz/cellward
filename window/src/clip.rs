@@ -24,6 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use iced::keyboard::{self, key, Key};
 use iced::widget::scrollable::{AbsoluteOffset, Viewport};
@@ -201,7 +202,13 @@ pub enum Msg {
         result: Result<Vec<Entry>, String>,
     },
     Preview(u64),
-    PreviewLoaded(String, u64, Result<crate::thumb::Thumb, String>),
+    PreviewLoaded(
+        String,
+        u64,
+        Result<(Arc<crate::thumb::Source>, crate::thumb::Thumb, u32), String>,
+    ),
+    FitLoaded(String, u64, u32, Result<crate::thumb::Thumb, String>),
+    NativeLoaded(String, u64, Result<crate::thumb::Thumb, String>),
     PreviewNative(bool),
     PreviewExpand,
     PreviewMaximize,
@@ -311,6 +318,13 @@ struct LiveRefresh {
 
 type FullImage = Result<(iced::widget::image::Handle, u32, u32), String>;
 
+struct CachedImage {
+    source: Arc<crate::thumb::Source>,
+    fit: iced::widget::image::Handle,
+    fit_width: u32,
+    full: Option<iced::widget::image::Handle>,
+}
+
 struct ImagePreview {
     id: u64,
     history: String,
@@ -351,7 +365,7 @@ pub struct Clip {
     loading: bool,
     live: Option<LiveRefresh>,
     image_preview: Option<ImagePreview>,
-    full_images: HashMap<(String, u64), FullImage>,
+    full_images: HashMap<(String, u64), Result<CachedImage, String>>,
     window_width: f32,
     /// The search's generation: an answer to an older one is dropped.
     gen: u64,
@@ -1147,6 +1161,82 @@ impl Clip {
         )
     }
 
+    fn fit_width(&self) -> u32 {
+        const LEVELS: [u32; 6] = [640, 1280, 2560, 3840, 7680, 16_384];
+        let needed = self.window_width.ceil().max(1.0) as u32;
+        LEVELS
+            .into_iter()
+            .find(|width| *width >= needed)
+            .unwrap_or(16_384)
+    }
+
+    fn ensure_fit(&mut self) -> Task<Msg> {
+        let Some(preview) = self.image_preview.as_ref().filter(|p| !p.native) else {
+            return Task::none();
+        };
+        let (history, id) = (preview.history.clone(), preview.id);
+        let Some(Ok(cached)) = self.full_images.get(&(history.clone(), id)) else {
+            return Task::none();
+        };
+        let width = self.fit_width().min(cached.source.width());
+        if cached.fit_width >= width {
+            return Task::none();
+        }
+        let source = cached.source.clone();
+        Task::perform(
+            clipd::off_thread(move || source.scaled(width, width)),
+            move |result| {
+                Msg::FitLoaded(
+                    history.clone(),
+                    id,
+                    width,
+                    result.unwrap_or_else(|| Err("обработка изображения прервана".into())),
+                )
+            },
+        )
+    }
+
+    fn preview_native(&mut self, native: bool) -> Task<Msg> {
+        let Some(preview) = &mut self.image_preview else {
+            return Task::none();
+        };
+        preview.native = native;
+        let (history, id) = (preview.history.clone(), preview.id);
+        let Some(Ok(cached)) = self.full_images.get(&(history.clone(), id)) else {
+            return Task::none();
+        };
+        if !native {
+            let image = (
+                cached.fit.clone(),
+                cached.source.width(),
+                cached.source.height(),
+            );
+            if let Some(preview) = &mut self.image_preview {
+                preview.image = Some(Ok(image));
+            }
+            return self.ensure_fit();
+        }
+        if let Some(full) = &cached.full {
+            let image = Some(Ok((
+                full.clone(),
+                cached.source.width(),
+                cached.source.height(),
+            )));
+            if let Some(preview) = &mut self.image_preview {
+                preview.image = image;
+            }
+            return Task::none();
+        }
+        let source = cached.source.clone();
+        Task::perform(clipd::off_thread(move || source.full()), move |result| {
+            Msg::NativeLoaded(
+                history.clone(),
+                id,
+                result.unwrap_or_else(|| Err("обработка изображения прервана".into())),
+            )
+        })
+    }
+
     fn preview_image(&mut self, id: u64, expanded: bool) -> Task<Msg> {
         if self.secrets || self.type_busy {
             return Task::none();
@@ -1158,7 +1248,18 @@ impl Clip {
         let history = self.active_history();
         self.full_images
             .retain(|(at, cached), _| *at == history && *cached == id);
-        let cached = self.full_images.get(&(history.clone(), id)).cloned();
+        let cached = self.full_images.get(&(history.clone(), id)).map(|cached| {
+            cached
+                .as_ref()
+                .map(|cached| {
+                    (
+                        cached.fit.clone(),
+                        cached.source.width(),
+                        cached.source.height(),
+                    )
+                })
+                .map_err(Clone::clone)
+        });
         let error = if mime != "image/png" {
             Some(ui(UiKey::PreviewUnsupported).to_owned())
         } else if size > MAX_THUMB_SOURCE {
@@ -1173,9 +1274,13 @@ impl Clip {
             native: false,
             expanded,
         });
-        if error.is_some() || self.image_preview.as_ref().unwrap().image.is_some() {
+        if error.is_some() {
             return Task::none();
         }
+        if self.image_preview.as_ref().unwrap().image.is_some() {
+            return self.ensure_fit();
+        }
+        let fit_width = self.fit_width();
         let socket = self.socket.clone();
         let request = clipd::get_request(&history, id, &mime);
         Task::perform(
@@ -1183,7 +1288,12 @@ impl Clip {
                 clipd::ask(&socket, &request)
                     .map_err(|e| e.text())
                     .and_then(|bytes| clipd::read_got(bytes.as_slice()))
-                    .and_then(|png| crate::thumb::full_png(&png))
+                    .and_then(|png| {
+                        let source = Arc::new(crate::thumb::decode(&png)?);
+                        let width = fit_width.min(source.width());
+                        let fit = source.scaled(width, width)?;
+                        Ok((source, fit, width))
+                    })
             }),
             move |r| {
                 Msg::PreviewLoaded(
@@ -1217,33 +1327,120 @@ impl Clip {
             Msg::Appearance => {}
             Msg::Preview(id) => return self.preview_image(id, true),
             Msg::PreviewLoaded(history, id, result) => {
-                let image = result.map(|p| {
-                    (
-                        iced::widget::image::Handle::from_rgba(p.width, p.height, p.rgba),
-                        p.width,
-                        p.height,
-                    )
+                let image = result.map(|(source, fit, fit_width)| {
+                    let handle =
+                        iced::widget::image::Handle::from_rgba(fit.width, fit.height, fit.rgba);
+                    CachedImage {
+                        source,
+                        fit: handle,
+                        fit_width,
+                        full: None,
+                    }
                 });
-                self.full_images
-                    .insert((history.clone(), id), image.clone());
+                let current = image
+                    .as_ref()
+                    .map(|cached| {
+                        (
+                            cached.fit.clone(),
+                            cached.source.width(),
+                            cached.source.height(),
+                        )
+                    })
+                    .map_err(Clone::clone);
+                self.full_images.insert((history.clone(), id), image);
                 if let Some(preview) = self
                     .image_preview
                     .as_mut()
                     .filter(|p| p.id == id && p.history == history)
                 {
-                    preview.image = Some(image);
+                    if preview.native {
+                        return self.preview_native(true);
+                    }
+                    preview.image = Some(current);
+                }
+            }
+            Msg::FitLoaded(history, id, width, result) => {
+                let mut current = None;
+                match result {
+                    Ok(fit) => {
+                        let handle =
+                            iced::widget::image::Handle::from_rgba(fit.width, fit.height, fit.rgba);
+                        if let Some(Ok(cached)) = self.full_images.get_mut(&(history.clone(), id)) {
+                            if cached.fit_width <= width {
+                                cached.fit = handle;
+                                cached.fit_width = width;
+                                current = Some((
+                                    cached.fit.clone(),
+                                    cached.source.width(),
+                                    cached.source.height(),
+                                ));
+                            }
+                        }
+                    }
+                    Err(why) => {
+                        if let Some(preview) = self
+                            .image_preview
+                            .as_mut()
+                            .filter(|p| p.id == id && p.history == history && !p.native)
+                        {
+                            preview.image = Some(Err(why));
+                        }
+                    }
+                }
+                if let Some(preview) = self
+                    .image_preview
+                    .as_mut()
+                    .filter(|p| p.id == id && p.history == history && !p.native)
+                {
+                    if let Some(image) = current {
+                        preview.image = Some(Ok(image));
+                    }
+                }
+            }
+            Msg::NativeLoaded(history, id, result) => {
+                let mut current = None;
+                match result {
+                    Ok(full) => {
+                        let handle = iced::widget::image::Handle::from_rgba(
+                            full.width,
+                            full.height,
+                            full.rgba,
+                        );
+                        if let Some(Ok(cached)) = self.full_images.get_mut(&(history.clone(), id)) {
+                            cached.full = Some(handle);
+                            current = cached
+                                .full
+                                .clone()
+                                .map(|full| (full, cached.source.width(), cached.source.height()));
+                        }
+                    }
+                    Err(why) => {
+                        if let Some(preview) = self
+                            .image_preview
+                            .as_mut()
+                            .filter(|p| p.id == id && p.history == history && p.native)
+                        {
+                            preview.image = Some(Err(why));
+                        }
+                    }
+                }
+                if let Some(preview) = self
+                    .image_preview
+                    .as_mut()
+                    .filter(|p| p.id == id && p.history == history && p.native)
+                {
+                    if let Some(image) = current {
+                        preview.image = Some(Ok(image));
+                    }
                 }
             }
             Msg::PreviewExpand => {
                 if let Some(preview) = &mut self.image_preview {
                     preview.expanded = true;
                 }
+                return self.ensure_fit();
             }
-            Msg::PreviewNative(native) => {
-                if let Some(preview) = &mut self.image_preview {
-                    preview.native = native;
-                }
-            }
+            Msg::PreviewNative(native) => return self.preview_native(native),
             Msg::PreviewMaximize => {
                 return iced::window::latest().then(|window| {
                     window.map_or_else(Task::none, |id| iced::window::maximize(id, true))
@@ -1253,7 +1450,10 @@ impl Clip {
                 self.image_preview = None;
                 return self.detail_task();
             }
-            Msg::Resized(width) => self.window_width = width,
+            Msg::Resized(width) => {
+                self.window_width = width;
+                return self.ensure_fit();
+            }
             Msg::LivePoll => {
                 return Task::batch([self.poll_live(), self.load_tabs(), self.load_targets()]);
             }
@@ -2672,6 +2872,7 @@ impl Clip {
                     } else {
                         iced::ContentFit::Contain
                     })
+                    .filter_method(iced::widget::image::FilterMethod::Nearest)
                     .min_scale(0.05)
                     .max_scale(20.0),
             ]
@@ -3751,11 +3952,19 @@ mod tests {
         let _ = c.update(Msg::PreviewLoaded(
             "main".into(),
             1,
-            Ok(crate::thumb::Thumb {
-                width: 2,
-                height: 1,
-                rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
-            }),
+            Ok((
+                Arc::new(crate::thumb::Source::from_rgba(
+                    2,
+                    1,
+                    vec![1, 2, 3, 4, 5, 6, 7, 8],
+                )),
+                crate::thumb::Thumb {
+                    width: 2,
+                    height: 1,
+                    rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                },
+                2,
+            )),
         ));
         assert!(c.full_images.contains_key(&("main".into(), 1)));
         let _ = c.update(Msg::PreviewClose);
@@ -3763,6 +3972,63 @@ mod tests {
         let preview = c.image_preview.as_ref().unwrap();
         assert!(preview.expanded);
         assert!(preview.image.is_some(), "a cached image must not reload");
+        assert_eq!(c.full_images.len(), 1);
+    }
+
+    #[test]
+    fn full_rgba_is_allocated_only_for_native_and_reused_when_returning() {
+        let mut c = clip();
+        let mut image = entry(1, 10);
+        image.types = vec![("image/png".into(), 100)];
+        c.entries = vec![image];
+        let _ = c.update(Msg::Preview(1));
+        let _ = c.update(Msg::PreviewLoaded(
+            "main".into(),
+            1,
+            Ok((
+                Arc::new(crate::thumb::Source::from_rgba(
+                    2,
+                    1,
+                    vec![1, 2, 3, 4, 5, 6, 7, 8],
+                )),
+                crate::thumb::Thumb {
+                    width: 2,
+                    height: 1,
+                    rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                },
+                2,
+            )),
+        ));
+        assert!(c.full_images.get(&("main".to_owned(), 1)).unwrap().is_ok());
+        assert!(c
+            .full_images
+            .get(&("main".to_owned(), 1))
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .full
+            .is_none());
+        let _ = c.update(Msg::PreviewNative(true));
+        let _ = c.update(Msg::NativeLoaded(
+            "main".into(),
+            1,
+            Ok(crate::thumb::Thumb {
+                width: 2,
+                height: 1,
+                rgba: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            }),
+        ));
+        assert!(c
+            .full_images
+            .get(&("main".to_owned(), 1))
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .full
+            .is_some());
+        let _ = c.update(Msg::PreviewNative(false));
+        let _ = c.update(Msg::PreviewNative(true));
+        assert!(c.image_preview.as_ref().unwrap().image.is_some());
         assert_eq!(c.full_images.len(), 1);
     }
 

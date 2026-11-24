@@ -623,6 +623,7 @@ impl Engine {
                     _pixels,
                     transform,
                     clip_mask,
+                    _clip_bounds,
                 );
             }
             #[cfg(feature = "svg")]

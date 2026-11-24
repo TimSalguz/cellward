@@ -23,6 +23,116 @@ pub struct Thumb {
     pub rgba: Vec<u8>,
 }
 
+/// One decoded PNG, retained so other display levels need no second decode.
+#[derive(Debug)]
+pub struct Source {
+    width: u32,
+    height: u32,
+    channels: usize,
+    line_size: usize,
+    data: Vec<u8>,
+}
+
+impl Source {
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn full(&self) -> Result<Thumb, String> {
+        self.scaled(MAX_SIDE, MAX_SIDE)
+    }
+
+    pub fn scaled(&self, height: u32, max_width: u32) -> Result<Thumb, String> {
+        self.scale(height, max_width)
+    }
+
+    fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
+        let at = y as usize * self.line_size + x as usize * self.channels;
+        let p = &self.data[at..at + self.channels];
+        match self.channels {
+            1 => [p[0], p[0], p[0], 255],
+            2 => [p[0], p[0], p[0], p[1]],
+            3 => [p[0], p[1], p[2], 255],
+            _ => [p[0], p[1], p[2], p[3]],
+        }
+    }
+
+    fn scale(&self, height: u32, max_width: u32) -> Result<Thumb, String> {
+        let (tw, th) = fit(self.width, self.height, height.max(1), max_width);
+        let output_size = (tw as usize)
+            .checked_mul(th as usize)
+            .and_then(|n| n.checked_mul(4))
+            .filter(|n| *n <= MAX_DECODED)
+            .ok_or("картинка слишком большая")?;
+        let mut rgba = Vec::with_capacity(output_size);
+        if tw == self.width && th == self.height {
+            if self.channels == 4 {
+                rgba.extend_from_slice(&self.data);
+            } else {
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        rgba.extend(self.pixel(x, y));
+                    }
+                }
+            }
+            return Ok(Thumb {
+                width: tw,
+                height: th,
+                rgba,
+            });
+        }
+        // Each pixel of the thumbnail the mean of the block of the image under
+        // it: a scaled-down screenshot keeps its text readable as a texture.
+        for ty in 0..th {
+            let y0 = u64::from(ty) * u64::from(self.height) / u64::from(th);
+            let y1 = (u64::from(ty + 1) * u64::from(self.height) / u64::from(th)).max(y0 + 1);
+            for tx in 0..tw {
+                let x0 = u64::from(tx) * u64::from(self.width) / u64::from(tw);
+                let x1 = (u64::from(tx + 1) * u64::from(self.width) / u64::from(tw)).max(x0 + 1);
+                // At most a few samples a side: a huge image costs no more.
+                let step_y = ((y1 - y0) / 4).max(1);
+                let step_x = ((x1 - x0) / 4).max(1);
+                let mut sum = [0u64; 4];
+                let mut n = 0u64;
+                let mut y = y0;
+                while y < y1 {
+                    let mut x = x0;
+                    while x < x1 {
+                        let p = self.pixel(x as u32, y as u32);
+                        for (s, v) in sum.iter_mut().zip(p) {
+                            *s += u64::from(v);
+                        }
+                        n += 1;
+                        x += step_x;
+                    }
+                    y += step_y;
+                }
+                rgba.extend(sum.map(|s| (s / n) as u8));
+            }
+        }
+        Ok(Thumb {
+            width: tw,
+            height: th,
+            rgba,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+        Self {
+            width,
+            height,
+            channels: 4,
+            line_size: width as usize * 4,
+            data: rgba,
+        }
+    }
+}
+
 /// `png` scaled down to `height` pixels high (never up), at most
 /// [`MAX_WIDTH`] wide; `Err` says why not.
 pub fn of_png(png: &[u8], height: u32) -> Result<Thumb, String> {
@@ -32,10 +142,15 @@ pub fn of_png(png: &[u8], height: u32) -> Result<Thumb, String> {
 /// A separate, explicitly opened preview keeps the original pixels. Never
 /// enlarge the already reduced list thumbnail to inspect screenshot text.
 pub fn full_png(png: &[u8]) -> Result<Thumb, String> {
-    decode_png(png, MAX_SIDE, MAX_SIDE)
+    decode(png)?.full()
 }
 
-fn decode_png(png: &[u8], height: u32, max_width: u32) -> Result<Thumb, String> {
+/// Decode once, then make any display level without touching the PNG again.
+pub fn decode(png: &[u8]) -> Result<Source, String> {
+    decode_source(png)
+}
+
+fn decode_source(png: &[u8]) -> Result<Source, String> {
     let mut decoder =
         png::Decoder::new_with_limits(Cursor::new(png), png::Limits { bytes: MAX_DECODED });
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -48,8 +163,8 @@ fn decode_png(png: &[u8], height: u32, max_width: u32) -> Result<Thumb, String> 
         .output_buffer_size()
         .filter(|s| *s <= MAX_DECODED)
         .ok_or("картинка слишком большая")?;
-    let mut buf = vec![0; size];
-    let info = reader.next_frame(&mut buf).map_err(|e| e.to_string())?;
+    let mut data = vec![0; size];
+    let info = reader.next_frame(&mut data).map_err(|e| e.to_string())?;
     let channels = match info.color_type {
         png::ColorType::Grayscale => 1,
         png::ColorType::GrayscaleAlpha => 2,
@@ -57,57 +172,17 @@ fn decode_png(png: &[u8], height: u32, max_width: u32) -> Result<Thumb, String> 
         png::ColorType::Rgba => 4,
         png::ColorType::Indexed => return Err("палитра не развёрнута".to_owned()),
     };
-    let pixel = |x: u32, y: u32| -> [u8; 4] {
-        let at = y as usize * info.line_size + x as usize * channels;
-        let p = &buf[at..at + channels];
-        match channels {
-            1 => [p[0], p[0], p[0], 255],
-            2 => [p[0], p[0], p[0], p[1]],
-            3 => [p[0], p[1], p[2], 255],
-            _ => [p[0], p[1], p[2], p[3]],
-        }
-    };
-    let (tw, th) = fit(info.width, info.height, height.max(1), max_width);
-    let output_size = (tw as usize)
-        .checked_mul(th as usize)
-        .and_then(|n| n.checked_mul(4))
-        .filter(|n| *n <= MAX_DECODED)
-        .ok_or("картинка слишком большая")?;
-    let mut rgba = Vec::with_capacity(output_size);
-    // Each pixel of the thumbnail the mean of the block of the image under
-    // it: a scaled-down screenshot keeps its text readable as a texture.
-    for ty in 0..th {
-        let y0 = u64::from(ty) * u64::from(info.height) / u64::from(th);
-        let y1 = (u64::from(ty + 1) * u64::from(info.height) / u64::from(th)).max(y0 + 1);
-        for tx in 0..tw {
-            let x0 = u64::from(tx) * u64::from(info.width) / u64::from(tw);
-            let x1 = (u64::from(tx + 1) * u64::from(info.width) / u64::from(tw)).max(x0 + 1);
-            // At most a few samples a side: a huge image costs no more.
-            let step_y = ((y1 - y0) / 4).max(1);
-            let step_x = ((x1 - x0) / 4).max(1);
-            let mut sum = [0u64; 4];
-            let mut n = 0u64;
-            let mut y = y0;
-            while y < y1 {
-                let mut x = x0;
-                while x < x1 {
-                    let p = pixel(x as u32, y as u32);
-                    for (s, v) in sum.iter_mut().zip(p) {
-                        *s += u64::from(v);
-                    }
-                    n += 1;
-                    x += step_x;
-                }
-                y += step_y;
-            }
-            rgba.extend(sum.map(|s| (s / n) as u8));
-        }
-    }
-    Ok(Thumb {
-        width: tw,
-        height: th,
-        rgba,
+    Ok(Source {
+        width: info.width,
+        height: info.height,
+        channels,
+        line_size: info.line_size,
+        data,
     })
+}
+
+fn decode_png(png: &[u8], height: u32, max_width: u32) -> Result<Thumb, String> {
+    decode(png)?.scaled(height, max_width)
 }
 
 /// A `w`×`h` image's size scaled down to `height` high, no wider than
@@ -151,6 +226,18 @@ mod tests {
         let small = of_png(&png, 60).unwrap();
         let full = full_png(&png).unwrap();
         assert_eq!(small.width, MAX_WIDTH);
+        assert_eq!((full.width, full.height), (800, 1));
+        for (pixel, value) in full.rgba.chunks_exact(4).zip(data) {
+            assert_eq!(pixel, &[value, value, value, 255]);
+        }
+    }
+
+    #[test]
+    fn one_source_makes_fit_and_native_levels_without_another_decode() {
+        let data: Vec<u8> = (0..800).map(|i| (i % 256) as u8).collect();
+        let source = decode(&png_of(800, 1, png::ColorType::Grayscale, &data)).unwrap();
+        assert_eq!(source.scaled(60, 80).unwrap().width, 80);
+        let full = source.full().unwrap();
         assert_eq!((full.width, full.height), (800, 1));
         for (pixel, value) in full.rgba.chunks_exact(4).zip(data) {
             assert_eq!(pixel, &[value, value, value, 255]);

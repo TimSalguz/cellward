@@ -41,7 +41,7 @@ opt-level = "s"
 lto = "thin"
 strip = true
 
-# Renderer damage fixes carried here until iced has them (vendor/README.md):
-# changed text edges and structural layer changes left pixels behind.
+# Renderer damage and opaque-image rendering fixes carried here until iced has
+# them (vendor/README.md).
 [patch.crates-io]
 iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
