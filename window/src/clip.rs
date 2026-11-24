@@ -4171,7 +4171,7 @@ mod tests {
             let mut widths = Vec::new();
             sizes(&node, &mut widths);
             assert!(
-                widths.iter().any(|width| *width == expected),
+                widths.contains(&expected),
                 "viewport {viewport}: expected card width {expected}, got {widths:?}"
             );
         }

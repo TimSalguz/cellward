@@ -14,6 +14,9 @@ use zbus::zvariant::{ObjectPath, OwnedValue, Value};
 #[allow(dead_code)]
 #[path = "../../shared/i18n.rs"]
 mod i18n;
+#[allow(dead_code)]
+#[path = "../../rust/src/json.rs"]
+mod json;
 
 type Properties = HashMap<String, OwnedValue>;
 type Layout = (i32, Properties, Vec<OwnedValue>);
@@ -133,7 +136,7 @@ struct Item {
 
 struct Tray(Arc<Item>);
 
-fn run_json(program: &str, args: &[&str]) -> Result<serde_json::Value, String> {
+fn run_json(program: &str, args: &[&str]) -> Result<json::Value, String> {
     let out = Command::new(program)
         .args(args)
         .output()
@@ -141,7 +144,7 @@ fn run_json(program: &str, args: &[&str]) -> Result<serde_json::Value, String> {
     if !out.status.success() {
         return Err(format!("{program} {} failed", args.join(" ")));
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("{program}: {e}"))
+    json::parse(&String::from_utf8_lossy(&out.stdout)).map_err(|e| format!("{program}: {e}"))
 }
 
 fn run_action(program: &str, args: &[String]) -> Result<(), String> {
@@ -158,16 +161,16 @@ fn run_action(program: &str, args: &[String]) -> Result<(), String> {
     }
 }
 
-fn sway_windows(value: &serde_json::Value, pid: u32) -> Vec<i64> {
-    fn walk(value: &serde_json::Value, pid: i64, out: &mut Vec<i64>) {
-        if value.get("pid").and_then(serde_json::Value::as_i64) == Some(pid) {
-            if let Some(id) = value.get("id").and_then(serde_json::Value::as_i64) {
+fn sway_windows(value: &json::Value, pid: u32) -> Vec<i64> {
+    fn walk(value: &json::Value, pid: i64, out: &mut Vec<i64>) {
+        if value.get("pid").and_then(json::Value::as_i64) == Some(pid) {
+            if let Some(id) = value.get("id").and_then(json::Value::as_i64) {
                 out.push(id);
             }
         }
         for child in ["nodes", "floating_nodes"]
             .iter()
-            .filter_map(|key| value.get(key).and_then(serde_json::Value::as_array))
+            .filter_map(|key| value.get(key).and_then(json::Value::as_array))
             .flatten()
         {
             walk(child, pid, out);
@@ -178,38 +181,31 @@ fn sway_windows(value: &serde_json::Value, pid: u32) -> Vec<i64> {
     out
 }
 
-fn niri_windows(value: &serde_json::Value, pid: u32) -> Vec<i64> {
+fn niri_windows(value: &json::Value, pid: u32) -> Vec<i64> {
     let Some(windows) = value.as_array() else {
         return Vec::new();
     };
     windows
         .iter()
-        .filter(|window| {
-            window.get("pid").and_then(serde_json::Value::as_i64) == Some(i64::from(pid))
-        })
-        .filter_map(|window| window.get("id").and_then(serde_json::Value::as_i64))
+        .filter(|window| window.get("pid").and_then(json::Value::as_i64) == Some(i64::from(pid)))
+        .filter_map(|window| window.get("id").and_then(json::Value::as_i64))
         .collect()
 }
 
-fn niri_current_workspace(value: &serde_json::Value) -> Option<String> {
+fn niri_current_workspace(value: &json::Value) -> Option<String> {
     value
         .as_array()?
         .iter()
-        .find(|workspace| {
-            workspace
-                .get("is_focused")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        })
+        .find(|workspace| workspace.get("is_focused").and_then(json::Value::as_bool) == Some(true))
         .and_then(|workspace| {
             workspace
                 .get("idx")
-                .and_then(serde_json::Value::as_i64)
+                .and_then(json::Value::as_i64)
                 .map(|idx| idx.to_string())
                 .or_else(|| {
                     workspace
                         .get("name")
-                        .and_then(serde_json::Value::as_str)
+                        .and_then(json::Value::as_str)
                         .map(str::to_owned)
                 })
         })
@@ -389,19 +385,20 @@ mod tests {
 
     #[test]
     fn manager_window_lookup_scoped_to_its_pid_and_workspace() {
-        let sway = serde_json::json!({"nodes": [
-            {"id": 1, "pid": 100},
-            {"nodes": [{"id": 8, "pid": 200}], "floating_nodes": [{"id": 9, "pid": 200}]}
-        ]});
+        let sway = json::parse(
+            r#"{"nodes":[
+                {"id":1,"pid":100},
+                {"nodes":[{"id":8,"pid":200}],"floating_nodes":[{"id":9,"pid":200}]}
+            ]}"#,
+        )
+        .unwrap();
         assert_eq!(sway_windows(&sway, 200), [8, 9]);
         assert!(sway_windows(&sway, 300).is_empty());
-        let niri = serde_json::json!([
-            {"id": 4, "pid": 100}, {"id": 7, "pid": 200}, {"id": 9, "pid": 200}
-        ]);
+        let niri =
+            json::parse(r#"[{"id":4,"pid":100},{"id":7,"pid":200},{"id":9,"pid":200}]"#).unwrap();
         assert_eq!(niri_windows(&niri, 200), [7, 9]);
-        let workspaces = serde_json::json!([
-            {"idx": 1, "is_focused": false}, {"idx": 3, "is_focused": true}
-        ]);
+        let workspaces =
+            json::parse(r#"[{"idx":1,"is_focused":false},{"idx":3,"is_focused":true}]"#).unwrap();
         assert_eq!(niri_current_workspace(&workspaces).as_deref(), Some("3"));
     }
 
