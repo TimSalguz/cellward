@@ -414,10 +414,10 @@ let
       # text on magenta: near-black, the one that stands out more.
       title = 20
       ink = (0x14, 0x14, 0x14)
-      # The row of buttons at the strip's right end (wl_title::LOOK and the
-      # maximize and fullscreen buttons): five of 24 —
-      # their glyphs are not the title's text.
-      buttons = 5 * 24
+      # The row at the strip's right end: menu, network and close, the
+      # maximize and fullscreen buttons, and three screenshot buttons —
+      # eight of 24; their glyphs are not the title's text.
+      buttons = 8 * 24
 
       def view(app_id):
           """Where sway shows a window's contents, in logical pixels."""
@@ -507,9 +507,9 @@ let
           return [(c, r) for r in rows for c in cols if at(c, r) != border]
 
       def titled(at, x, y, w, scale=1):
-          """The zone's name in the strip: text there, at the left after the
-          pad, and nowhere else; and crisp — drawn at this scale, not
-          blurred up from another: a fifth of its pixels or more at least
+          """The network and container in the strip: text at the left after
+          the pad and clear of the buttons; and crisp — drawn at this scale,
+          not blurred up from another: a fifth of its pixels or more at least
           three quarters ink (the line drawn at 1 and 1.5 has 26% and 41%;
           drawn at 1 and stretched to 1.5 bilinearly, 6%). On magenta the
           ink's share of a pixel is in its red: 255 - 235 × share."""
@@ -521,7 +521,11 @@ let
           pad = round((x + width + 8) * scale)
           # The first glyph's own side bearing: 2 pixels at 1.
           assert pad - 1 <= left <= pad + 4 * scale, (left, pad)
-          assert max(c for c, _ in text) < round((x + w / 2) * scale), "text across the strip"
+          # wl_frame::title_layout/text_shown leaves one pad before the
+          # buttons. The explicit "Сеть"/"Контейнер" labels may take over
+          # half the strip; their actual right boundary is what matters.
+          right = round((x + w - width - buttons - 8) * scale)
+          assert max(c for c, _ in text) <= right + 1, "title text overlaps the buttons"
 
       with subtest("the zone's border and title: inside the window, the declared colour and width"):
           x, y, w, h = view("foot")

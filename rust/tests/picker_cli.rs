@@ -366,12 +366,11 @@ fn a_program_nobody_has_run_before_is_asked_about_and_started() {
     assert_eq!(home.read("state/.last/firefox").as_deref(), Some("nl"));
 }
 
-/// "Always" in the main home: the network is a container's, never a
-/// program's (docs/PERMISSIONS.md §11.8) — the program moves to the
-/// container of the main home bound to that network, and the next launch
-/// goes there without a question.
+/// "Always" in the main home pins both the built-in main home and the
+/// program's network there (docs/PERMISSIONS.md §11.8); the next launch goes
+/// to the same network without a question and without a container flag.
 #[test]
-fn choosing_always_in_the_main_home_moves_the_program_to_its_container() {
+fn choosing_always_in_the_main_home_pins_its_network() {
     let home = Home::new("pin");
     home.zone("nl");
     // The main home, chosen for it before: an empty file.
@@ -379,20 +378,14 @@ fn choosing_always_in_the_main_home_moves_the_program_to_its_container() {
     home.answers(&["pin:nl"]);
     let out = home.run(&pick("firefox"), &[]);
     assert!(out.status.success(), "{}", stderr(&out));
-    let line = ["run", "nl", "--container", "main-nl", "--", "firefox", "%u"];
+    let line = ["run", "nl", "--", "firefox", "%u"];
     assert_eq!(home.launched()[0], line);
     assert_eq!(
         home.read("state/.pinnedprofile/firefox").as_deref(),
-        Some("main-nl")
+        Some("__main__")
     );
-    let conf = home
-        .read("config/containers/main-nl/container.conf")
-        .unwrap_or_default();
-    assert!(
-        conf.contains("home = main") && conf.contains("network = nl"),
-        "{conf}"
-    );
-    assert_eq!(home.read("state/.pinned/firefox"), None);
+    assert_eq!(home.read("state/.pinned/firefox").as_deref(), Some("nl"));
+    assert_eq!(home.read("config/containers/main-nl/container.conf"), None);
 
     let _ = fs::remove_file(home.path("runner.log"));
     let out = home.run(&pick("firefox"), &[]);
@@ -1267,12 +1260,16 @@ fn an_unassigned_autostart_asks_and_remembers_always() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!home.asked().is_empty(), "the picker asked");
-    // "Always" in the main home: the container of the main home in nl.
+    // "Always" in the main home: the built-in main home and its network pin.
     assert_eq!(
         home.read("state/.pinnedprofile/tg").as_deref(),
-        Some("main-nl")
+        Some("__main__")
     );
-    assert_eq!(home.launched()[0][1], "nl");
+    assert_eq!(home.read("state/.pinned/tg").as_deref(), Some("nl"));
+    assert_eq!(
+        home.launched()[0],
+        ["run", "nl", "--", "telegram", "-autostart"]
+    );
 }
 
 /// With nothing to draw a dialog on (a login on a text console) the question
@@ -1325,30 +1322,37 @@ fn an_assigned_autostart_starts_where_it_was_put_and_says_nothing() {
     );
 }
 
-/// Step 3 (2026-09-29): what the program's preset only offers is a
-/// checkbox each in the window, unticked; what is ticked becomes the words
-/// of the container chosen — the program's own, made with the preset's safe
-/// part. A line the preset does not offer is nothing.
+/// The launch window's permission row is authoritative for the camera; the
+/// preset does not offer a second control for it. Other offered items remain
+/// checkboxes, and only a line the preset offers may come back.
 #[test]
-fn the_window_offers_what_the_preset_offers_and_ticked_is_given() {
+fn the_window_applies_camera_from_its_permission_row_without_a_duplicate_offer() {
     let home = Home::new("offers");
     home.zone("nl");
     home.window(
         "net\tnl\ncontainer\t__ownsb__\npin-net\t0\npin-container\t0\n\
-         offer\tcamera=on\noffer\tnix_daemon=on\n",
+         perm\tcamera\tyes\nperm\tmicrophone\task\n\
+         offer\tfolder=~/Downloads\noffer\tnix_daemon=on\n",
         0,
     );
-    let out = home.run(&["--id", "vesktop", "--", "vesktop"], &[]);
+    let out = home.run(&["--id", "firefox", "--", "firefox"], &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     let told = home.read("window.in").unwrap();
-    assert!(told.contains("offer\tcamera=on\tкамеры\n"), "{told}");
+    assert!(
+        told.contains(
+            "perm\tcamera\tКамера\tdefault:как у всех (спрашивать);no:нет;black:чёрная;ask:спрашивать;yes:да\n"
+        ),
+        "{told}"
+    );
+    assert!(!told.contains("offer\tcamera=on"), "{told}");
+    assert!(told.contains("offer\tfolder=~/Downloads\t"), "{told}");
     assert!(
         !told.contains("offer\tmicrophone"),
         "given by itself: {told}"
     );
     let record = fs::read_to_string(
         home.path("config")
-            .join("containers/app-vesktop/container.conf"),
+            .join("containers/app-firefox/container.conf"),
     )
     .unwrap();
     assert!(record.contains("camera = true"), "{record}");

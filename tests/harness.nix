@@ -508,6 +508,9 @@ in
       defaults = hmDeclared.config.xdg.mimeApps.defaultApplications;
     in
     lib.all lib.id [
+      (expect "MIME associations are enabled only for selected host links" (
+        hmDeclared.config.xdg.mimeApps.enable && !hm.config.xdg.mimeApps.enable
+      ))
       (expect "the dispatcher calls the wrapped CLI with one URI" (
         lib.hasSuffix "/bin/cellward open %u" entry.exec && entry.noDisplay
       ))

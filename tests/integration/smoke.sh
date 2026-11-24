@@ -235,15 +235,18 @@ CELLWARD_BUILT="$VPN_ZONE"
 VZ_BIN=$(grep -m1 -o '/nix/store/[^ "]*/bin/vpn-zone' "$CELLWARD_BUILT")
 VZ_TOOLS=$(grep -m1 -o '/nix/store/[^ "]*-vpn-zone-tools.json' "$CELLWARD_BUILT")
 [ -x "$VZ_BIN" ] && [ -f "$VZ_TOOLS" ] || fail "в обёртке cellward нет бинаря или манифеста"
-sed "s|\"systemctl\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"systemctl\": \"$WORK/fake-systemctl\"|" \
+sed -e "s|\"systemctl\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"systemctl\": \"$WORK/fake-systemctl\"|" \
+  -e "s|\"runner\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"runner\": \"$WORK/cellward-smoke\"|" \
   "$VZ_TOOLS" > "$WORK/cellward-tools.json"
 grep -q "\"systemctl\": \"$WORK/fake-systemctl\"" "$WORK/cellward-tools.json" \
   || fail "не подменился systemctl в манифесте"
+grep -q "\"runner\": \"$WORK/cellward-smoke\"" "$WORK/cellward-tools.json" \
+  || fail "не подменился runner в манифесте"
 printf '#!/usr/bin/env bash\nexport VPN_ZONE_TOOLS=%s\nexec %s "$@"\n' \
   "$WORK/cellward-tools.json" "$VZ_BIN" > "$WORK/cellward-smoke"
 chmod 755 "$WORK/cellward-smoke"
 VPN_ZONE="$WORK/cellward-smoke"
-echo "ok: $VPN_ZONE — cellward с подставным systemctl"
+echo "ok: $VPN_ZONE — cellward с подставными systemctl и runner"
 
 step "Убираю остатки прошлых прогонов"
 for z in "${TEST_ZONES[@]}"; do
