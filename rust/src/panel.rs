@@ -78,7 +78,7 @@ pub(crate) fn zones(state: &Path) -> Vec<String> {
 }
 
 /// The immediate upstream, system or user, of this zone.
-fn upstream(state: &Path, zone: &str) -> (String, &'static str) {
+pub(crate) fn upstream(state: &Path, zone: &str) -> (String, &'static str) {
     let raw = match crate::chain::read_zone_config(state, zone) {
         Ok(raw) => raw,
         Err(_) => return (String::new(), ""),

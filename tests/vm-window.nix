@@ -110,6 +110,7 @@ let
       };
 
     testScript = ''
+      import json
       import os
       import shlex
       import shutil
@@ -275,6 +276,39 @@ let
           machine.copy_from_vm("/tmp/panel-settings.png", "")
           alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
           machine.wait_until_fails("pgrep -f '[v]pn-zone-window panel'", timeout=15)
+
+          # The metro with a real nested route: separate inner and outer
+          # tunnel columns, then their servers from outside in.
+          machine.copy_from_host("${../window/tests/scheme-chain.lines}", "/tmp/scheme-chain.lines")
+          real = alice("readlink -f $(command -v cellward)").strip()
+          fake = (
+              "#!/bin/sh\n"
+              'if [ "$1" = scheme ]; then\n'
+              "  cat /tmp/scheme-chain.lines\n"
+              "  exit 0\n"
+              "fi\n"
+              f'exec {real} "$@"\n'
+          )
+          machine.succeed(f"printf %s {shlex.quote(fake)} > /tmp/scheme-cellward && chmod 755 /tmp/scheme-cellward")
+          tools = alice(
+              "grep -m1 -o '/nix/store/[^ \"]*-vpn-zone-tools.json' "
+              "$(readlink -f $(command -v cellward))"
+          ).strip()
+          win = machine.succeed(f"grep -o '\"window\": *\"[^\"]*\"' {tools}").strip().split('"')[3]
+          swaysock = machine.succeed("ls /run/user/1000/sway-ipc.*.sock | head -1").strip()
+          output = json.loads(alice(f"SWAYSOCK={swaysock} swaymsg -t get_outputs -r"))[0]["name"]
+          alice(f"SWAYSOCK={swaysock} swaymsg output {output} mode 3200x720")
+          alice(
+              f"systemd-run --user --unit=vmscheme --setenv=WAYLAND_DISPLAY={display} "
+              f"{win} panel --cellward /tmp/scheme-cellward --tab scheme"
+          )
+          machine.wait_until_succeeds("pgrep -f '[v]pn-zone-window panel'", timeout=30)
+          machine.sleep(4)
+          alice(f"WAYLAND_DISPLAY={display} grim /tmp/panel-scheme-chain.png")
+          machine.copy_from_vm("/tmp/panel-scheme-chain.png", "")
+          alice(f"WAYLAND_DISPLAY={display} wtype -s 400 -k Escape")
+          machine.wait_until_fails("pgrep -f '[v]pn-zone-window panel'", timeout=15)
+          alice(f"SWAYSOCK={swaysock} swaymsg output {output} mode 1280x720")
           # The data it reads.
           out = alice("cellward _panel")
           assert "network\toffline\toffline\t1\t" in out, out

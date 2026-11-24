@@ -1148,8 +1148,8 @@ enum Msg {
     /// Space and Delete, outside a field.
     TasksSpace,
     TasksDelete,
-    /// `cellward scheme --lines`, read.
-    SchemeLoaded(Result<String, String>),
+    /// `cellward scheme --lines`, read and laid out off the UI thread.
+    SchemeLoaded(Result<Box<crate::metro::Metro>, String>),
     /// A row of the scheme chosen, or let go (chosen again).
     SchemePin(String),
     /// The stretch under the pointer: `(row, hop)`.
@@ -1214,32 +1214,31 @@ struct Panel {
     route_details: HashSet<String>,
 }
 
+fn cellward_read(path: &std::path::Path, args: &[String]) -> Result<String, String> {
+    match Command::new(path).args(args).stdin(Stdio::null()).output() {
+        Ok(out) => {
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+            .trim()
+            .to_owned();
+            if out.status.success() {
+                Ok(said)
+            } else {
+                Err(said)
+            }
+        }
+        Err(e) => Err(format!("cellward не запустился: {e}")),
+    }
+}
+
 /// Run `cellward <args>` off the window's threads; its output, or why not.
 async fn cellward(path: PathBuf, args: Vec<String>) -> Result<String, String> {
     let (done, over) = iced::futures::channel::oneshot::channel();
     std::thread::spawn(move || {
-        let result = match Command::new(&path)
-            .args(&args)
-            .stdin(Stdio::null())
-            .output()
-        {
-            Ok(out) => {
-                let said = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&out.stdout),
-                    String::from_utf8_lossy(&out.stderr)
-                )
-                .trim()
-                .to_owned();
-                if out.status.success() {
-                    Ok(said)
-                } else {
-                    Err(said)
-                }
-            }
-            Err(e) => Err(format!("cellward не запустился: {e}")),
-        };
-        let _ = done.send(result);
+        let _ = done.send(cellward_read(&path, &args));
     });
     over.await
         .unwrap_or_else(|_| Err("cellward не ответил".to_owned()))
@@ -1983,8 +1982,21 @@ impl Panel {
                 self.metro_busy = false;
                 self.metro_at = Some(Instant::now());
                 match said {
-                    Ok(lines) => {
-                        let metro = crate::metro::Metro::new(crate::metro::parse(&lines));
+                    Ok(metro) => {
+                        let mut metro = *metro;
+                        if self
+                            .metro
+                            .as_ref()
+                            .is_some_and(|old| old.scheme == metro.scheme)
+                        {
+                            self.metro_trouble = None;
+                            return Task::none();
+                        }
+                        if let Some(old) = &self.metro {
+                            if old.same_drawing(&metro) {
+                                metro.stamp = old.stamp;
+                            }
+                        }
                         // What was chosen, gone: let go.
                         let there = |id: &Option<String>| {
                             id.as_ref().is_some_and(|id| metro.row(id).is_some())
@@ -3528,8 +3540,22 @@ impl Panel {
             return Task::none();
         }
         self.metro_busy = true;
-        let args = vec!["scheme".to_owned(), "--lines".to_owned()];
-        Task::perform(cellward(self.cellward.clone(), args), Msg::SchemeLoaded)
+        let path = self.cellward.clone();
+        Task::perform(
+            async move {
+                let (done, over) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let args = vec!["scheme".to_owned(), "--lines".to_owned()];
+                    let result = cellward_read(&path, &args).map(|lines| {
+                        Box::new(crate::metro::Metro::new(crate::metro::parse(&lines)))
+                    });
+                    let _ = done.send(result);
+                });
+                over.await
+                    .unwrap_or_else(|_| Err("cellward не ответил".to_owned()))
+            },
+            Msg::SchemeLoaded,
+        )
     }
 
     /// **Схема**: every flow and every kind of packet, each a line from its
@@ -5116,6 +5142,41 @@ mod tests {
         assert!(panel.route_details.contains("apps"));
         let _ = panel.update(Msg::RouteDetails("apps".into()));
         assert!(!panel.route_details.contains("apps"));
+    }
+
+    #[test]
+    fn unchanged_and_traffic_only_readings_keep_the_canvas_cache() {
+        let sample = include_str!("../tests/scheme.lines");
+        let first = crate::metro::Metro::new(crate::metro::parse(sample));
+        let mut p = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Scheme);
+        let _ = p.update(Msg::SchemeLoaded(Ok(Box::new(first.clone()))));
+        let stamp = p.metro.as_ref().unwrap().stamp;
+        let _ = p.update(Msg::SchemeLoaded(Ok(Box::new(first.clone()))));
+        assert_eq!(p.metro.as_ref().unwrap().stamp, stamp);
+
+        let mut traffic = crate::metro::Metro::new(first.scheme.clone());
+        traffic.scheme.rows[0].out_bytes += 500;
+        traffic.scheme.rows[0].in_bytes += 300;
+        traffic.scheme.rows[0].count += 1;
+        let bytes = (
+            traffic.scheme.rows[0].out_bytes,
+            traffic.scheme.rows[0].in_bytes,
+        );
+        let _ = p.update(Msg::SchemeLoaded(Ok(Box::new(traffic))));
+        let current = p.metro.as_ref().unwrap();
+        assert_eq!(current.stamp, stamp);
+        assert_eq!(
+            (
+                current.scheme.rows[0].out_bytes,
+                current.scheme.rows[0].in_bytes
+            ),
+            bytes
+        );
+
+        let mut changed = crate::metro::Metro::new(first.scheme.clone());
+        changed.scheme.rows[0].hops[0].sees = "stranger".into();
+        let _ = p.update(Msg::SchemeLoaded(Ok(Box::new(changed))));
+        assert_ne!(p.metro.as_ref().unwrap().stamp, stamp);
     }
 
     #[test]

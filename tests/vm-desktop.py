@@ -1314,6 +1314,11 @@ if wanted(SCHEME):
         pointer("move", 900, 900)
         machine.sleep(2)
         shot("scheme-chosen")
+        # A nested route has separate inner and outer tunnel columns, then
+        # their servers from outside in; no backward host-network shortcut.
+        machine.copy_from_host(SCHEME_CHAIN_LINES, "/tmp/scheme.lines")
+        machine.sleep(5)
+        shot("scheme-nested")
         # Read again while shown, a few seconds apart, not every second.
         machine.sleep(8)
         asked = int(machine.succeed("wc -l < /tmp/scheme.asked").strip())

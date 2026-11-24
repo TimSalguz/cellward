@@ -3,7 +3,9 @@
 //! line from its source to its end through the stations it crosses.
 //!
 //! The layout: columns, the layers a packet crosses outside in; each row a
-//! lane straight across its zone's band, every column on the same lanes.
+//! lane straight across its zone's band, every column on the same lanes. A
+//! nested VPN advances through another encryptor/uplink pair, then reaches
+//! the servers from the outermost one inward.
 //! The host's one cable (the interface, the gateway, the unknown beyond)
 //! packs the zones' lanes together and lets them go again — the only bends
 //! there are, gentle, in the room left before it and after it. Frames: the
@@ -120,21 +122,6 @@ pub fn parse(text: &str) -> Scheme {
     s
 }
 
-/// The columns: the layers a packet crosses, outside in.
-const COLS: [&str; 11] = [
-    "Программа",
-    "Сеть контейнера",
-    "Привратник",
-    "Вход в зону",
-    "Шифратор",
-    "Выход зоны",
-    "Интерфейс хоста",
-    "Шлюз · сеть",
-    "⋯ дальше ⋯",
-    "Сервер VPN",
-    "Куда",
-];
-const LAST: usize = COLS.len() - 1;
 const COLW: f32 = 172.0;
 const BOXW: f32 = 136.0;
 const LEFT: f32 = 18.0;
@@ -149,33 +136,138 @@ const ROWH: f32 = 17.0;
 /// out of it there, not on top of each other.
 const JOIN: f32 = 150.0;
 
-/// The host's one cable: where the zones' lines meet, packed together.
-fn cable(col: usize) -> bool {
-    (6..=8).contains(&col)
+/// The columns, with two more for each carrier around an inner tunnel.
+#[derive(Debug, Clone)]
+struct Columns {
+    labels: Vec<String>,
+    carrier: HashMap<String, String>,
+    outward: HashMap<String, usize>,
+    host: usize,
+    last: usize,
+    depth: usize,
 }
 
-fn col_of(id: &str) -> usize {
-    match id.split(':').next().unwrap_or("") {
-        "prog" => 0,
-        "tap" | "wall" => 1,
-        "relay" => 2,
-        "passt" => 3,
-        "tun" | "leak" => 4,
-        "out" | "hostdns" | "hostapps" | "hostkernel" => 5,
-        "if" => 6,
-        "lan" | "link" => 7,
-        "isp" | "peer" => 8,
-        "vpn" => 9,
-        _ => LAST,
+impl Columns {
+    fn new(scheme: &Scheme) -> Self {
+        let mut carrier = HashMap::new();
+        for r in &scheme.rows {
+            let ids = std::iter::once(r.from.as_str()).chain(r.hops.iter().map(|h| h.to.as_str()));
+            fn zone<'a>(id: &'a str, kind: &str) -> Option<&'a str> {
+                let mut parts = id.split(':');
+                if parts.next() != Some(kind) {
+                    return None;
+                }
+                parts.next().filter(|z| !z.is_empty())
+            }
+            for pair in ids.collect::<Vec<_>>().windows(2) {
+                if let (Some(inner), Some(outer)) = (zone(pair[0], "out"), zone(pair[1], "tun")) {
+                    if inner != outer {
+                        carrier.insert(inner.to_owned(), outer.to_owned());
+                    }
+                }
+            }
+        }
+        let mut outward = HashMap::new();
+        for inner in carrier.keys() {
+            let mut n = 0;
+            let mut at = inner.as_str();
+            let mut seen = vec![at];
+            while let Some(outer) = carrier.get(at) {
+                n += 1;
+                at = outer;
+                if seen.contains(&at) {
+                    break;
+                }
+                seen.push(at);
+            }
+            outward.insert(inner.clone(), n);
+        }
+        for outer in carrier.values() {
+            outward.entry(outer.clone()).or_insert(0);
+        }
+        let depth = outward.values().copied().max().unwrap_or(0);
+        let host = 6 + 2 * depth;
+        let last = host + 4 + depth;
+        let mut labels = vec![
+            "Программа".to_owned(),
+            "Сеть контейнера".to_owned(),
+            "Привратник".to_owned(),
+            "Вход в зону".to_owned(),
+        ];
+        for level in 0..=depth {
+            let suffix = if depth > 0 {
+                format!(" · слой {}", level + 1)
+            } else {
+                String::new()
+            };
+            labels.push(format!("Шифратор{suffix}"));
+            labels.push(format!("Выход зоны{suffix}"));
+        }
+        labels.extend([
+            "Интерфейс хоста".to_owned(),
+            "Шлюз · сеть".to_owned(),
+            "⋯ дальше ⋯".to_owned(),
+        ]);
+        for distance in 0..=depth {
+            let suffix = if depth > 0 {
+                format!(" · слой {}", depth - distance + 1)
+            } else {
+                String::new()
+            };
+            labels.push(format!("Сервер VPN{suffix}"));
+        }
+        labels.push("Куда".to_owned());
+        Self {
+            labels,
+            carrier,
+            outward,
+            host,
+            last,
+            depth,
+        }
     }
-}
 
-fn x_of(col: usize) -> f32 {
-    if col > LAST {
-        return x_of(LAST) + COLW;
+    fn of(&self, id: &str) -> usize {
+        let mut parts = id.split(':');
+        let kind = parts.next().unwrap_or("");
+        let zone = parts.next().unwrap_or("");
+        match kind {
+            "prog" => 0,
+            "tap" | "wall" => 1,
+            "relay" => 2,
+            "passt" => 3,
+            "tun" | "leak" => {
+                4 + 2 * self
+                    .outward
+                    .get(zone)
+                    .map_or(0, |distance| self.depth - distance)
+            }
+            "out" if !host_start(id) => {
+                5 + 2 * self
+                    .outward
+                    .get(zone)
+                    .map_or(0, |distance| self.depth - distance)
+            }
+            "out" | "hostdns" | "hostapps" | "hostkernel" => 5,
+            "if" => self.host,
+            "lan" | "link" => self.host + 1,
+            "isp" | "peer" => self.host + 2,
+            "vpn" => self.host + 3 + self.outward.get(zone).copied().unwrap_or(0),
+            _ => self.last,
+        }
     }
-    let c = col as f32;
-    LEFT + c * COLW + if col >= 6 { JOIN } else { 0.0 } + if col >= 9 { JOIN } else { 0.0 }
+
+    fn x(&self, col: usize) -> f32 {
+        let col = col.min(self.last + 1);
+        let c = col as f32;
+        LEFT + c * COLW
+            + if col >= self.host { JOIN } else { 0.0 }
+            + if col >= self.host + 3 { JOIN } else { 0.0 }
+    }
+
+    fn cable(&self, col: usize) -> bool {
+        (self.host..=self.host + 2).contains(&col)
+    }
 }
 
 fn host_start(id: &str) -> bool {
@@ -231,19 +323,21 @@ struct Band {
 /// The scheme, laid out.
 #[derive(Debug, Clone)]
 pub struct Metro {
-    /// Which reading this is: the window's drawing is kept until another.
+    /// The drawing's cache key; traffic-only readings keep it.
     pub stamp: u64,
     pub scheme: Scheme,
     pub stations: Vec<Station>,
     /// Drawn top down.
     pub lanes: Vec<Lane>,
     bands: Vec<Band>,
+    columns: Columns,
     pub width: f32,
     pub height: f32,
 }
 
 impl Metro {
     pub fn new(scheme: Scheme) -> Metro {
+        let columns = Columns::new(&scheme);
         // The rows, by zone (the host's last); in a zone its own rows
         // first (its tunnel's handshake, what comes in), then its
         // instances', by group, those that go furthest first, the seen
@@ -296,7 +390,13 @@ impl Metro {
                 .chain(r.hops.iter().map(|h| h.to.clone()))
                 .collect()
         };
-        let reach = |r: &Row| path_of(r).iter().map(|id| col_of(id)).max().unwrap_or(0);
+        let reach = |r: &Row| {
+            path_of(r)
+                .iter()
+                .map(|id| columns.of(id))
+                .max()
+                .unwrap_or(0)
+        };
         let key = |i: usize, first: usize| {
             let r = &scheme.rows[i];
             (
@@ -316,8 +416,8 @@ impl Metro {
         // DHCP drawn by design, through the container's network, after the
         // wall's counters). A row goes by the station it shares first.
         let boxed = |id: &str| {
-            let col = col_of(id);
-            !(col == 0 || col == LAST || host_start(id) || cable(col))
+            let col = columns.of(id);
+            !(col == 0 || col == columns.last || host_start(id) || columns.cable(col))
         };
         let mut seen: HashMap<String, usize> = HashMap::new();
         for (n, &i) in order.iter().enumerate() {
@@ -343,18 +443,19 @@ impl Metro {
         fn station(
             stations: &mut Vec<Station>,
             by_id: &mut HashMap<String, usize>,
+            columns: &Columns,
             place: Place,
         ) -> usize {
             if let Some(&at) = by_id.get(&place.id) {
                 return at;
             }
-            let col = col_of(&place.id);
-            let end = col == 0 || col == LAST || host_start(&place.id);
+            let col = columns.of(&place.id);
+            let end = col == 0 || col == columns.last || host_start(&place.id);
             by_id.insert(place.id.clone(), stations.len());
             stations.push(Station {
                 place,
                 col,
-                x: x_of(col) + (COLW - BOXW) / 2.0,
+                x: columns.x(col) + (COLW - BOXW) / 2.0,
                 y: 0.0,
                 h: 0.0,
                 idle: false,
@@ -364,7 +465,7 @@ impl Metro {
             stations.len() - 1
         }
         for p in &scheme.places {
-            station(&mut stations, &mut by_id, p.clone());
+            station(&mut stations, &mut by_id, &columns, p.clone());
         }
         let mut lanes: Vec<Lane> = Vec::new();
         for &i in &order {
@@ -375,7 +476,7 @@ impl Metro {
                     id,
                     ..Place::default()
                 };
-                let at = station(&mut stations, &mut by_id, place);
+                let at = station(&mut stations, &mut by_id, &columns, place);
                 let lane = lanes.len();
                 if !stations[at].lanes.contains(&lane) {
                     stations[at].lanes.push(lane);
@@ -407,7 +508,7 @@ impl Metro {
                     bottom: y,
                 });
             }
-            let packed = |s: &Station| s.end || cable(s.col);
+            let packed = |s: &Station| s.end || columns.cable(s.col);
             for &at in &lane.path {
                 let s = &stations[at];
                 if packed(s) {
@@ -445,11 +546,11 @@ impl Metro {
             if s.end {
                 s.y = top - ROWH / 2.0;
                 s.h = low - top + ROWH;
-            } else if !cable(s.col) {
+            } else if !columns.cable(s.col) {
                 s.y = top - HEAD - 4.0;
                 s.h = low - s.y + 9.0;
             }
-            if s.end || !cable(s.col) {
+            if s.end || !columns.cable(s.col) {
                 for &l in &s.lanes {
                     at_station.insert((at, l), lane_y[l]);
                 }
@@ -457,7 +558,7 @@ impl Metro {
         }
         // The cable: each station's lines packed, zone by zone, at the
         // middle of its lanes; its column's stations pushed apart.
-        for c in 6..=8 {
+        for c in columns.host..=columns.host + 2 {
             let mut col: Vec<(usize, f32, Vec<f32>)> = Vec::new();
             for (at, s) in stations.iter_mut().enumerate() {
                 if s.col != c || s.idle {
@@ -510,9 +611,35 @@ impl Metro {
             stations,
             lanes,
             bands,
-            width: LEFT * 2.0 + COLS.len() as f32 * COLW + 2.0 * JOIN + 30.0,
+            width: columns.x(columns.last) + COLW + LEFT + 30.0,
+            columns,
             height: bottom.max(idle) + 24.0,
         }
+    }
+
+    /// Whether a new reading needs either canvas cache cleared. Byte totals
+    /// change the list, not the drawing; a zero counter becoming nonzero does.
+    pub fn same_drawing(&self, other: &Metro) -> bool {
+        self.scheme.places == other.scheme.places
+            && self.scheme.groups == other.scheme.groups
+            && self.scheme.rows.len() == other.scheme.rows.len()
+            && self
+                .scheme
+                .rows
+                .iter()
+                .zip(&other.scheme.rows)
+                .all(|(a, b)| {
+                    a.id == b.id
+                        && a.group == b.group
+                        && a.name == b.name
+                        && a.kind == b.kind
+                        && a.from == b.from
+                        && a.end == b.end
+                        && a.end_text == b.end_text
+                        && a.observed == b.observed
+                        && a.hops == b.hops
+                        && (a.count == 0) == (b.count == 0)
+                })
     }
 
     pub fn row(&self, id: &str) -> Option<&Row> {
@@ -678,8 +805,8 @@ impl Ink {
 }
 
 /// How a row ends, for a person: its mark and its colour.
-fn end_mark(r: &Row, ink: &Ink) -> (&'static str, Color) {
-    let clear = r.hops.iter().any(|h| h.sees == "stranger");
+fn end_mark(r: &Row, ink: &Ink, with_hops: bool) -> (&'static str, Color) {
+    let clear = with_hops && r.hops.iter().any(|h| h.sees == "stranger");
     if (r.end_text.starts_with('⚠') || (clear && r.end == "arrives")) && r.end != "leak" {
         return ("⚠", ink.gate);
     }
@@ -694,13 +821,7 @@ fn end_mark(r: &Row, ink: &Ink) -> (&'static str, Color) {
 
 /// The mark of a row in the list beside the scheme.
 pub fn list_mark(r: &Row, theme: &Theme) -> (&'static str, Color) {
-    let ink = Ink::of(theme);
-    if r.end_text.starts_with('⚠') && r.end != "leak" {
-        return ("⚠", ink.gate);
-    }
-    let mut plain = r.clone();
-    plain.hops.clear();
-    end_mark(&plain, &ink)
+    end_mark(r, &Ink::of(theme), false)
 }
 
 /// A row's kind, for a person.
@@ -945,15 +1066,15 @@ impl<M> View<'_, M> {
                 frame: &mut *frame,
                 at,
             };
-            let machine_r = x_of(6) + COLW / 2.0;
-            let lan_r = x_of(8);
+            let machine_r = m.columns.x(m.columns.host) + COLW / 2.0;
+            let lan_r = m.columns.x(m.columns.host + 2);
             let h = m.height;
             // The machine, each network of the host its own frame, the
             // unknown beyond.
             let frame = pen.rect(
-                x_of(0) + 2.0,
+                m.columns.x(0) + 2.0,
                 8.0,
-                machine_r - x_of(0) - 4.0,
+                machine_r - m.columns.x(0) - 4.0,
                 h - 16.0,
                 12.0,
             );
@@ -995,10 +1116,16 @@ impl<M> View<'_, M> {
                     left,
                 );
             }
-            let beyond = pen.rect(lan_r + 2.0, 8.0, x_of(11) - lan_r - 4.0, h - 16.0, 12.0);
+            let beyond = pen.rect(
+                lan_r + 2.0,
+                8.0,
+                m.columns.x(m.columns.last + 1) - lan_r - 4.0,
+                h - 16.0,
+                12.0,
+            );
             pen.stroke(&beyond, ink.unknown, 1.5, &[6.0, 5.0]);
             pen.text(
-                x_of(0) + 14.0,
+                m.columns.x(0) + 14.0,
                 28.0,
                 "Твоя машина",
                 13.0,
@@ -1029,15 +1156,24 @@ impl<M> View<'_, M> {
                 (3, "зона · программ"),
                 (5, "зона · выход"),
             ] {
-                pen.text(x_of(a) + 14.0, 46.0, label, 11.0, ink.muted, normal, left);
+                pen.text(
+                    m.columns.x(a) + 14.0,
+                    46.0,
+                    label,
+                    11.0,
+                    ink.muted,
+                    normal,
+                    left,
+                );
                 if a != 0 {
-                    let line = Path::line(pen.p(x_of(a), 38.0), pen.p(x_of(a), h - 14.0));
+                    let line =
+                        Path::line(pen.p(m.columns.x(a), 38.0), pen.p(m.columns.x(a), h - 14.0));
                     pen.stroke(&line, ink.line, 1.0, &[2.0, 4.0]);
                 }
             }
-            for (c, name) in COLS.iter().enumerate() {
+            for (c, name) in m.columns.labels.iter().enumerate() {
                 pen.text(
-                    x_of(c) + COLW / 2.0,
+                    m.columns.x(c) + COLW / 2.0,
                     66.0,
                     name,
                     11.0,
@@ -1049,20 +1185,22 @@ impl<M> View<'_, M> {
             // Each zone's band, named at its left.
             for b in &m.bands {
                 let r = pen.rect(
-                    x_of(0) + 8.0,
+                    m.columns.x(0) + 8.0,
                     b.top - HEAD - 8.0,
-                    x_of(11) - x_of(0) - 16.0,
+                    m.columns.x(m.columns.last + 1) - m.columns.x(0) - 16.0,
                     b.bottom - b.top + HEAD + 18.0,
                     8.0,
                 );
                 pen.stroke(&r, ink.line, 1.0, &[1.0, 4.0]);
                 let title = if b.zone == "~host" {
                     "сам хост — вне cellward".to_owned()
+                } else if let Some(outer) = m.columns.carrier.get(&b.zone) {
+                    format!("зона {} · этот VPN вложен в VPN {}", b.zone, outer)
                 } else {
                     format!("зона {}", b.zone)
                 };
                 pen.text(
-                    x_of(0) + 16.0,
+                    m.columns.x(0) + 16.0,
                     b.top - HEAD + 6.0,
                     &title,
                     11.0,
@@ -1096,7 +1234,7 @@ impl<M> View<'_, M> {
                         // A shared start (the container's programs and
                         // kernel, for each counter of its wall) says the
                         // row's own name.
-                        let name = if s.col == LAST {
+                        let name = if s.col == m.columns.last {
                             if s.place.tech.is_empty() {
                                 &s.place.name
                             } else {
@@ -1254,10 +1392,10 @@ impl<M> View<'_, M> {
                 continue;
             };
             let last = &m.stations[last_at];
-            let (mark, color) = end_mark(r, &ink);
+            let (mark, color) = end_mark(r, &ink, true);
             let back =
                 lane.path.len() > 1 && m.stations[lane.path[lane.path.len() - 2]].col > last.col;
-            let nth = if cable(last.col) {
+            let nth = if m.columns.cable(last.col) {
                 let n = ended.entry(last_at).or_insert(0);
                 *n += 1;
                 *n - 1
@@ -1308,6 +1446,13 @@ impl<M> View<'_, M> {
         }
         for ((_, a, b), rows, sees) in segs {
             let tunnel = sees == "nobody";
+            let nested = m.stations[a]
+                .place
+                .id
+                .strip_prefix("out:")
+                .zip(m.stations[b].place.id.strip_prefix("tun:"))
+                .filter(|(inner, outer)| inner != outer)
+                .map(|(_, outer)| outer);
             if !tunnel && rows.len() < 2 {
                 continue;
             }
@@ -1332,9 +1477,36 @@ impl<M> View<'_, M> {
                 p.close();
             });
             let c = if tunnel { ink.nobody } else { ink.machine };
-            pen.frame
-                .fill(&tube, faded(c, if tunnel { 0.16 } else { 0.09 }));
-            pen.stroke(&tube, faded(c, if tunnel { 0.5 } else { 0.25 }), 1.0, &[]);
+            pen.frame.fill(
+                &tube,
+                faded(
+                    c,
+                    if nested.is_some() {
+                        0.24
+                    } else if tunnel {
+                        0.16
+                    } else {
+                        0.09
+                    },
+                ),
+            );
+            pen.stroke(
+                &tube,
+                faded(c, if tunnel { 0.5 } else { 0.25 }),
+                if nested.is_some() { 1.8 } else { 1.0 },
+                &[],
+            );
+            if let Some(outer) = nested {
+                pen.text(
+                    mid,
+                    (ta + tb) / 2.0 - 9.0,
+                    &format!("внутри VPN {outer}"),
+                    10.0,
+                    ink.nobody,
+                    font::Weight::Semibold,
+                    Horizontal::Center,
+                );
+            }
         }
     }
 }
@@ -1344,6 +1516,7 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = include_str!("../tests/scheme.lines");
+    const CHAIN: &str = include_str!("../tests/scheme-chain.lines");
 
     #[test]
     fn the_lines_read_back_whole() {
@@ -1423,5 +1596,63 @@ mod tests {
         let mid = curve_at(a, b, 0.5);
         assert!(m.hit(mid).is_some(), "nothing under the stretch's middle");
         assert!(m.hit(Point::new(1.0, 1.0)).is_none());
+    }
+
+    #[test]
+    fn nested_tunnels_advance_through_their_own_columns() {
+        let m = Metro::new(parse(CHAIN));
+        let lane = m
+            .lanes
+            .iter()
+            .find(|lane| m.scheme.rows[lane.row].id == "i:Firefox:data")
+            .unwrap();
+        let ids: Vec<&str> = lane
+            .path
+            .iter()
+            .map(|at| m.stations[*at].place.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "prog:i:Firefox",
+                "tap:i",
+                "relay:i",
+                "passt:i",
+                "tun:inner",
+                "out:inner",
+                "tun:outer",
+                "out:outer",
+                "if:eth1",
+                "lan:eth1",
+                "isp:eth1",
+                "vpn:outer",
+                "vpn:inner",
+                "dst:i:Firefox",
+            ]
+        );
+        let cols: Vec<usize> = lane.path.iter().map(|at| m.stations[*at].col).collect();
+        assert!(cols.windows(2).all(|pair| pair[0] < pair[1]), "{cols:?}");
+        assert_eq!(
+            m.columns.carrier.get("inner").map(String::as_str),
+            Some("outer")
+        );
+        assert_eq!(m.columns.labels[4], "Шифратор · слой 1");
+        assert_eq!(m.columns.labels[6], "Шифратор · слой 2");
+        assert_eq!(m.columns.labels[11], "Сервер VPN · слой 2");
+        assert_eq!(m.columns.labels[12], "Сервер VPN · слой 1");
+    }
+
+    #[test]
+    fn byte_totals_do_not_change_the_cached_drawing() {
+        let a = Metro::new(parse(SAMPLE));
+        let mut b = Metro::new(a.scheme.clone());
+        b.scheme.rows[0].out_bytes += 100;
+        b.scheme.rows[0].in_bytes += 100;
+        b.scheme.rows[0].count += 1;
+        assert!(a.same_drawing(&b));
+        b.scheme.rows[0].count = 0;
+        assert_eq!(a.same_drawing(&b), a.scheme.rows[0].count == 0);
+        b.scheme.rows[0].hops[0].sees = "stranger".into();
+        assert!(!a.same_drawing(&b));
     }
 }

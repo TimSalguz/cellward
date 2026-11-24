@@ -1,0 +1,46 @@
+place	prog:i:Firefox	program	Firefox	программа	0	0	0
+place	tap:i	container	Сеть контейнера	tap · 10.254.0.0/16	0	0	0
+place	relay:i	container	Привратник	пересылка: правила, счётчики	1	0	1
+place	passt:i	zone	Вход в зону	passt	0	0	1
+place	tun:inner	zone	Шифратор	awg0 · AmneziaWG	1	0	1
+place	out:inner	uplink	Выход зоны	сокет туннеля + pasta	1	0	1
+place	tun:outer	zone	Шифратор	awg0 · WireGuard	1	0	1
+place	out:outer	uplink	Выход зоны	сокет туннеля + pasta	1	0	1
+place	if:eth1	host	eth1	кабель · 192.168.1.1/24	0	0	0
+place	lan:eth1	outside	Шлюз 192.168.1.254	в сети eth1	0	0	0
+place	isp:eth1	outside	⋯ дальше не известно ⋯	сети за шлюзом	0	1	0
+place	vpn:outer	outside	Сервер VPN outer	198.51.100.1	0	0	0
+place	vpn:inner	outside	Сервер VPN inner	203.0.113.5	0	0	0
+place	dst:i:Firefox	outside	Куда	192.0.2.80:443	0	0	0
+group	instance:i	Контейнер work · сеть inner
+group	zone:outer	Зона outer · WireGuard
+group	zone:inner	Зона inner · AmneziaWG
+row	i:Firefox:data	instance:i	Firefox	data	prog:i:Firefox	arrives	192.0.2.80:443	1	100	200	1
+hop	i:Firefox:data	tap:i	соединение программы	IP-пакет	machine	только контейнер
+hop	i:Firefox:data	relay:i	соединение программы	пакет в кадре Ethernet	machine	только контейнер
+hop	i:Firefox:data	passt:i	соединение программы	кадр по unix-сокету (не сеть)	machine	только машина
+hop	i:Firefox:data	tun:inner	соединение программы	IP-пакет зоны	machine	только машина
+hop	i:Firefox:data	out:inner	соединение программы	зашифровано: UDP к серверу	nobody	никто
+hop	i:Firefox:data	tun:outer	соединение программы — внутри VPN inner	зашифровано: UDP к серверу; вложено в VPN outer	nobody	никто: это уже зашифрованный пакет внутреннего VPN
+hop	i:Firefox:data	out:outer	соединение программы — внутри VPN inner	зашифровано: UDP к серверу	nobody	никто
+hop	i:Firefox:data	if:eth1	соединение программы — внутри VPN inner — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	i:Firefox:data	lan:eth1	соединение программы — внутри VPN inner — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: поток внешнего VPN
+hop	i:Firefox:data	isp:eth1	соединение программы — внутри VPN inner — внутри туннеля	IP	nobody	сети за шлюзом: поток внешнего VPN
+hop	i:Firefox:data	vpn:outer	соединение программы — внутри VPN inner — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+hop	i:Firefox:data	vpn:inner	соединение программы — внутри VPN inner	зашифровано: UDP к серверу	nobody	сервер outer: адрес внутреннего сервера, но не содержимое
+hop	i:Firefox:data	dst:i:Firefox	соединение программы	IP от адреса сервера	server	сервер VPN: куда; сайт — адрес сервера, не твой
+row	outer:handshake	zone:outer	WireGuard · клиент VPN зоны outer	handshake	tun:outer	arrives	сервер VPN	0	0	0	1
+hop	outer:handshake	out:outer	рукопожатие и keepalive	зашифровано: UDP к серверу	nobody	никто
+hop	outer:handshake	if:eth1	рукопожатие и keepalive — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	outer:handshake	lan:eth1	рукопожатие и keepalive — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: поток внешнего VPN
+hop	outer:handshake	isp:eth1	рукопожатие и keepalive — внутри туннеля	IP	nobody	сети за шлюзом: поток внешнего VPN
+hop	outer:handshake	vpn:outer	рукопожатие и keepalive — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+row	inner:handshake	zone:inner	AmneziaWG · клиент VPN зоны inner	handshake	tun:inner	arrives	сервер VPN	0	0	0	1
+hop	inner:handshake	out:inner	рукопожатие и keepalive	зашифровано: UDP к серверу	nobody	никто
+hop	inner:handshake	tun:outer	рукопожатие и keepalive — внутри VPN inner	зашифровано: UDP к серверу; вложено в VPN outer	nobody	никто: это уже зашифрованный пакет внутреннего VPN
+hop	inner:handshake	out:outer	рукопожатие и keepalive — внутри VPN inner	зашифровано: UDP к серверу	nobody	никто
+hop	inner:handshake	if:eth1	рукопожатие и keepalive — внутри VPN inner — внутри туннеля	UDP-сокет хоста от имени зоны	nobody	никто
+hop	inner:handshake	lan:eth1	рукопожатие и keepalive — внутри VPN inner — внутри туннеля	кадр Ethernet	nobody	локальная сеть и шлюз: поток внешнего VPN
+hop	inner:handshake	isp:eth1	рукопожатие и keepalive — внутри VPN inner — внутри туннеля	IP	nobody	сети за шлюзом: поток внешнего VPN
+hop	inner:handshake	vpn:outer	рукопожатие и keepalive — внутри VPN inner — внутри туннеля	зашифровано: UDP к серверу	nobody	сети до сервера: то же
+hop	inner:handshake	vpn:inner	рукопожатие и keepalive — внутри VPN inner	зашифровано: UDP к серверу	nobody	сервер outer: адрес внутреннего сервера, но не содержимое

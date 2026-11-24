@@ -46,6 +46,10 @@ pub struct Zone {
     /// `amneziawg`, `wireguard`, `openconnect`, `host`, `system`
     /// (`crate::netmap::Tunnel`).
     pub kind: &'static str,
+    /// The configured carrier of this tunnel; `route` is `chain` for a system
+    /// VPN and `chain-user` for another user zone.
+    pub upstream: Option<String>,
+    pub route: &'static str,
     pub servers: Vec<Server>,
     /// Its config's `DNS =`, each by its side.
     pub dns: Vec<(IpAddr, Side)>,
@@ -234,6 +238,7 @@ pub fn facts(tools: &Tools) -> Facts {
         .map(|name| {
             let dir = tools.state.join(&name);
             let up = crate::cli::zone_pid(&tools.state, std::ffi::OsStr::new(&name)).is_some();
+            let (upstream, route) = crate::panel::upstream(&tools.state, &name);
             let tunnel = crate::netmap::tunnel_of(&dir);
             let servers = tunnel
                 .as_ref()
@@ -241,13 +246,17 @@ pub fn facts(tools: &Tools) -> Facts {
                     t.servers
                         .iter()
                         .map(|(raw, addr, named)| {
-                            let route = addr.and_then(|a| crate::netmap::route_to(&tools.ip, a));
+                            // A nested tunnel's endpoint has no host route: its
+                            // transport lives in the carrier zone instead.
+                            let host_route = (!matches!(route, "chain" | "chain-user"))
+                                .then(|| addr.and_then(|a| crate::netmap::route_to(&tools.ip, a)))
+                                .flatten();
                             Server {
                                 raw: raw.clone(),
                                 addr: *addr,
                                 named: *named,
-                                dev: route.as_ref().map(|(d, _)| d.clone()),
-                                via: route.and_then(|(_, v)| v),
+                                dev: host_route.as_ref().map(|(d, _)| d.clone()),
+                                via: host_route.and_then(|(_, v)| v),
                             }
                         })
                         .collect()
@@ -272,6 +281,8 @@ pub fn facts(tools: &Tools) -> Facts {
                 });
             Zone {
                 kind,
+                upstream: (!upstream.is_empty()).then_some(upstream),
+                route,
                 dns,
                 name,
                 up,
@@ -770,7 +781,25 @@ fn leak_of(s: &mut Scheme, zone: &Zone, dns: bool, what: &str) -> Option<(Hop, E
 }
 
 fn zone_way(s: &mut Scheme, facts: &Facts, zone: &Zone, what: &str) -> Way {
+    zone_way_inner(s, facts, zone, what, &mut Vec::new())
+}
+
+fn zone_way_inner(
+    s: &mut Scheme,
+    facts: &Facts,
+    zone: &Zone,
+    what: &str,
+    seen: &mut Vec<String>,
+) -> Way {
     let z = &zone.name;
+    if seen.contains(z) {
+        return Way {
+            hops: Vec::new(),
+            server: None,
+            cut: Some(format!("цепочка VPN замкнулась на {z} — наружу не уходит")),
+        };
+    }
+    seen.push(z.clone());
     let server = zone
         .servers
         .iter()
@@ -908,6 +937,112 @@ fn zone_way(s: &mut Scheme, facts: &Facts, zone: &Zone, what: &str) -> Way {
             cut: Some(format!("адрес {} ещё не известен", server.raw)),
         };
     };
+    if let Some(upstream) = zone.upstream.as_deref() {
+        if zone.route == "chain-user" {
+            let Some(carrier) = facts.zones.iter().find(|other| other.name == upstream) else {
+                return Way {
+                    hops,
+                    server: None,
+                    cut: Some(format!(
+                        "внешняя зона {upstream} не найдена — мимо неё наружу не уходит"
+                    )),
+                };
+            };
+            if !matches!(carrier.kind, "amneziawg" | "wireguard" | "openconnect") {
+                return Way {
+                    hops,
+                    server: None,
+                    cut: Some(format!("внешняя зона {upstream} не является VPN-туннелем")),
+                };
+            }
+            let nested = format!("{what} — внутри VPN {z}");
+            let mut way = zone_way_inner(s, facts, carrier, &nested, seen);
+            if let Some(first) = way.hops.first_mut() {
+                first.wrap = format!("{wrap}; вложено в VPN {upstream}");
+                first.sees = Sees::Nobody;
+                first.seen_by = "никто: это уже зашифрованный пакет внутреннего VPN".into();
+            }
+            hops.extend(way.hops);
+            if let Some(cut) = way.cut {
+                return Way {
+                    hops,
+                    server: None,
+                    cut: Some(cut),
+                };
+            }
+            if way.server.is_none() {
+                return Way {
+                    hops,
+                    server: None,
+                    cut: Some(format!("внешний VPN {upstream} не дошёл до своего сервера")),
+                };
+            }
+            let vpn = s.place(
+                &format!("vpn:{z}"),
+                Layer::Outside,
+                &format!("Сервер VPN {z}"),
+                &addr.to_string(),
+            );
+            hops.push(hop(
+                &vpn,
+                &nested,
+                wrap,
+                Sees::Nobody,
+                &format!("сервер {upstream}: адрес {addr}, но не содержимое"),
+            ));
+            return Way {
+                hops,
+                server: Some(vpn),
+                cut: None,
+            };
+        }
+        if zone.route == "chain" {
+            let outer = s.gate(
+                &format!("tun:{upstream}"),
+                Layer::Zone,
+                "Внешний системный VPN",
+                upstream,
+            );
+            hops.push(hop(
+                &outer,
+                &format!("{what} — внутри VPN {z}"),
+                &format!("{wrap}; вложено в системный VPN {upstream}"),
+                Sees::Nobody,
+                "никто: это уже зашифрованный пакет внутреннего VPN",
+            ));
+            let outer_server = s.place(
+                &format!("vpn:{upstream}"),
+                Layer::Outside,
+                &format!("Сервер системного VPN {upstream}"),
+                "маршрут системной зоны, вне пользовательских зон",
+            );
+            hops.push(hop(
+                &outer_server,
+                &format!("{what} — внутри VPN {z}"),
+                "внутри системного VPN",
+                Sees::Nobody,
+                "системный VPN: адрес внутреннего сервера, не содержимое",
+            ));
+            let vpn = s.place(
+                &format!("vpn:{z}"),
+                Layer::Outside,
+                &format!("Сервер VPN {z}"),
+                &addr.to_string(),
+            );
+            hops.push(hop(
+                &vpn,
+                &format!("{what} — внутри VPN {z}"),
+                wrap,
+                Sees::Nobody,
+                &format!("сервер {upstream}: адрес {addr}, но не содержимое"),
+            ));
+            return Way {
+                hops,
+                server: Some(vpn),
+                cut: None,
+            };
+        }
+    }
     let Some(dev) = server.dev.clone() else {
         return Way {
             hops,
@@ -1963,6 +2098,8 @@ mod tests {
             name: "nl".into(),
             up: true,
             kind,
+            upstream: None,
+            route: "",
             servers: vec![Server {
                 raw: if named {
                     "vpn.example.org:51820".into()
@@ -2218,6 +2355,132 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A nested VPN crosses its carrier's encryptor and uplink, not the host
+    /// directly; the servers then remove their layers from outside in.
+    #[test]
+    fn a_nested_tunnel_keeps_every_carrier_hop_and_server() {
+        let mut inner = zone("amneziawg", "10.8.1.1", false);
+        inner.upstream = Some("outer".into());
+        inner.route = "chain-user";
+        inner.servers[0].dev = None;
+        inner.servers[0].via = None;
+        let mut outer = zone("wireguard", "10.9.1.1", false);
+        outer.name = "outer".into();
+        let mut f = facts(
+            inner,
+            vec![flow(
+                TCP,
+                "198.51.100.1",
+                443,
+                "Firefox",
+                Some(Verdict::Allow),
+            )],
+        );
+        f.zones.push(outer);
+        let s = build(&f);
+        let r = row(&s, "work-1:Firefox:data");
+        let to: Vec<&str> = r.hops.iter().map(|h| h.to.as_str()).collect();
+        assert_eq!(
+            to,
+            [
+                "tap:work-1",
+                "relay:work-1",
+                "passt:work-1",
+                "tun:nl",
+                "out:nl",
+                "tun:outer",
+                "out:outer",
+                "if:wlp2s0",
+                "lan:wlp2s0",
+                "isp:wlp2s0",
+                "vpn:outer",
+                "vpn:nl",
+                "dst:work-1:Firefox",
+            ]
+        );
+        assert_eq!(
+            r.hops[5].wrap,
+            "зашифровано: UDP к серверу; вложено в VPN outer"
+        );
+        assert!(r.hops[4..12].iter().all(|h| h.sees == Sees::Nobody));
+        assert!(matches!(r.end, End::Arrives(_)));
+        let handshake = row(&s, "nl:handshake");
+        assert!(handshake.hops.iter().any(|h| h.to == "tun:outer"));
+        assert_eq!(handshake.hops.last().unwrap().to, "vpn:nl");
+    }
+
+    #[test]
+    fn a_system_carrier_is_named_without_inventing_host_hops() {
+        let mut inner = zone("wireguard", "10.8.1.1", false);
+        inner.upstream = Some("home".into());
+        inner.route = "chain";
+        inner.servers[0].dev = None;
+        inner.servers[0].via = None;
+        let s = build(&facts(
+            inner,
+            vec![flow(TCP, "198.51.100.1", 443, "Firefox", None)],
+        ));
+        let to: Vec<&str> = row(&s, "work-1:Firefox:data")
+            .hops
+            .iter()
+            .map(|h| h.to.as_str())
+            .collect();
+        assert_eq!(
+            &to[3..],
+            [
+                "tun:nl",
+                "out:nl",
+                "tun:home",
+                "vpn:home",
+                "vpn:nl",
+                "dst:work-1:Firefox"
+            ]
+        );
+        assert!(!to.iter().any(|id| id.starts_with("if:")));
+    }
+
+    /// A broken or cyclic carrier chain is cut, never rerouted through the host.
+    #[test]
+    fn a_nested_tunnel_fails_closed_when_its_carrier_is_not_usable() {
+        let mut inner = zone("wireguard", "10.8.1.1", false);
+        inner.upstream = Some("missing".into());
+        inner.route = "chain-user";
+        inner.servers[0].dev = None;
+        let s = build(&facts(
+            inner.clone(),
+            vec![flow(TCP, "198.51.100.1", 443, "Firefox", None)],
+        ));
+        let r = row(&s, "work-1:Firefox:data");
+        assert_eq!(r.hops.last().unwrap().to, "out:nl");
+        assert!(matches!(&r.end, End::Cut(t) if t.contains("не найдена")));
+
+        let mut outer = zone("wireguard", "10.9.1.1", false);
+        outer.name = "outer".into();
+        outer.up = false;
+        inner.upstream = Some("outer".into());
+        let mut f = facts(
+            inner.clone(),
+            vec![flow(TCP, "198.51.100.1", 443, "Firefox", None)],
+        );
+        f.zones.push(outer.clone());
+        let s = build(&f);
+        let r = row(&s, "work-1:Firefox:data");
+        assert_eq!(r.hops.last().unwrap().to, "tun:outer");
+        assert!(matches!(r.end, End::Cut(_)));
+        assert!(!r.hops.iter().any(|h| h.to.starts_with("if:")));
+
+        outer.up = true;
+        outer.upstream = Some("nl".into());
+        outer.route = "chain-user";
+        inner.upstream = Some("outer".into());
+        let mut f = facts(inner, vec![flow(TCP, "198.51.100.1", 443, "Firefox", None)]);
+        f.zones.push(outer);
+        let s = build(&f);
+        let r = row(&s, "work-1:Firefox:data");
+        assert!(matches!(&r.end, End::Cut(t) if t.contains("замкнулась")));
+        assert!(!r.hops.iter().any(|h| h.to.starts_with("if:")));
     }
 
     /// A zone that is down cuts its rows at its tunnel: nothing past it.

@@ -4,11 +4,13 @@
 # Two VMs on the test's private VLAN, no internet:
 #   - `server`, a WireGuard peer of two zones, with a TCP responder and a DNS
 #     server on its tunnel address;
-#   - `machine`, alice's user tier, two zones to that server: `nl`, its
+#   - `machine`, alice's user tier, direct zones to that server: `nl`, its
 #     server by a name (the address kept in the zone's directory) and its
-#     resolver on the VPN's side; `pub`, its resolver a public address.
+#     resolver on the VPN's side; `pub`, its resolver a public address;
+#     `inner`, a second VPN tunnel carried by `nl`.
 #
-# A program of the main home connects, asks a name and pings in `nl`; curl
+# A program of the main home connects in `nl` and nested `inner`, asks a name
+# and pings in `nl`; curl
 # is denied the network and tries; `pub` asks a name. The scheme says each:
 # through the tunnel to the server, names answered on the VPN's side or in
 # clear past the server, curl stopped at the gate. Its text and JSON are
@@ -57,6 +59,12 @@ let
           ];
         };
         programs.cellward.enable = true;
+        # User-to-user chains require the broker's system-zone exclusion check.
+        services.cellward.system = {
+          enable = true;
+          users = [ "alice" ];
+          directRoutes = [ ];
+        };
         # No screen to ask on: a program has the network without a question,
         # but for the one denied it.
         home-manager.users.alice.programs.cellward.defaults.permissions.network = "yes";
@@ -101,14 +109,14 @@ let
       server.wait_for_unit("multi-user.target")
       machine.wait_for_unit("user@1000.service")
 
-      with subtest("two zones to one server: nl by name, pub with a public resolver"):
+      with subtest("direct zones and an inner tunnel nested in nl"):
           server.succeed("wg genkey > /root/wg.key && wg pubkey < /root/wg.key > /root/wg.pub")
           spub = server.succeed("cat /root/wg.pub").strip()
           server_ip = server.succeed(
               "ip -4 -o addr show eth1 | head -1 | tr -s ' ' | cut -d' ' -f4 | cut -d/ -f1"
           ).strip()
           keys = {}
-          for zone in ("nl", "pub", "lan"):
+          for zone in ("nl", "pub", "lan", "inner"):
               priv = machine.succeed("wg genkey").strip()
               keys[zone] = (priv, machine.succeed(f"printf %s '{priv}' | wg pubkey").strip())
           server.succeed(
@@ -116,7 +124,8 @@ let
               "wg set wg0 listen-port 51820 private-key /root/wg.key "
               f"peer '{keys['nl'][1]}' allowed-ips 10.99.0.2/32 "
               f"peer '{keys['pub'][1]}' allowed-ips 10.99.0.3/32 "
-              f"peer '{keys['lan'][1]}' allowed-ips 10.99.0.4/32 && ip link set wg0 up"
+              f"peer '{keys['lan'][1]}' allowed-ips 10.99.0.4/32 "
+              f"peer '{keys['inner'][1]}' allowed-ips 10.99.0.5/32 && ip link set wg0 up"
           )
           server.succeed(
               "systemd-run --unit=hello socat TCP-LISTEN:8080,bind=10.99.0.1,fork,reuseaddr "
@@ -139,14 +148,23 @@ let
                   f"AllowedIPs = 0.0.0.0/0\\nEndpoint = {endpoint}\\n' > /tmp/{zone}.conf"
               )
               alice(f"cellward add {zone} /tmp/{zone}.conf")
+          # A real inner tunnel: its encrypted endpoint traffic can leave only
+          # through nl, never through a host route of its own.
+          alice(
+              f"printf '[Interface]\\nPrivateKey = {keys['inner'][0]}\\nAddress = 10.99.0.5/32\\n"
+              f"DNS = 10.99.0.1\\n\\n[Peer]\\nPublicKey = {spub}\\n"
+              f"AllowedIPs = 0.0.0.0/0\\nEndpoint = {server_ip}:51820\\n\\n"
+              "[Chain]\\nViaUser = nl\\n' > /tmp/inner.conf"
+          )
+          alice("cellward add inner /tmp/inner.conf")
           # nl's server by a name no resolver here knows: its address kept.
           alice(f"printf 'vmvpn.test\\t{server_ip}\\n' > {STATE}/nl/endpoints")
-          alice("cellward up nl && cellward up pub && cellward up lan")
+          alice("cellward up nl && cellward up pub && cellward up lan && cellward up inner")
 
       with subtest("traffic: a connection, a name, a ping; curl denied"):
           # An instance lives while a program of it does: one held in each
           # zone, as a browser left open is, keeps its table of flows.
-          for zone in ("nl", "pub", "lan"):
+          for zone in ("nl", "pub", "lan", "inner"):
               alice(f"systemd-run --user --unit=hold-{zone} cellward run {zone} -- sleep 3600")
               machine.wait_until_succeeds(
                   "su -l alice -c " + shlex.quote(
@@ -157,6 +175,8 @@ let
               )
           out = alice("cellward run nl -- socat -T10 - TCP:10.99.0.1:8080")
           assert "peer=10.99.0.2" in out, out
+          out = alice("cellward run inner -- socat -T10 - TCP:10.99.0.1:8080")
+          assert "peer=10.99.0.5" in out, out
           out = alice("cellward run nl -- getent ahostsv4 leaktest.internal")
           assert "10.99.0.9" in out, out
           # As from the desktop — through the user's manager, into its
@@ -222,8 +242,17 @@ let
           assert pub_dns and pub_dns[0]["hops"][-1]["to"] == "dns:1.1.1.1", pub_dns
           assert pub_dns[0]["hops"][-1]["sees"] == "stranger", pub_dns
           # Each zone's tunnel, and nl's server's name through the host.
-          assert {r["id"] for r in rows if r["kind"] == "handshake"} == {"nl:handshake", "pub:handshake", "lan:handshake"}, rows
+          assert {r["id"] for r in rows if r["kind"] == "handshake"} == {"nl:handshake", "pub:handshake", "lan:handshake", "inner:handshake"}, rows
           assert any(r["kind"] == "server-name" and "vmvpn.test" in r["name"] for r in rows), rows
+          # The inner VPN crosses nl's encryptor and uplink before the host;
+          # the servers then appear from the outermost one inward.
+          nested = of("data", "inner")
+          assert nested, rows
+          nested_hops = [h["to"] for h in nested[0]["hops"]]
+          assert nested_hops.index("out:inner") + 1 == nested_hops.index("tun:nl"), nested_hops
+          assert nested_hops.index("out:nl") + 1 == nested_hops.index("if:eth1"), nested_hops
+          assert nested_hops[-3] == "vpn:nl" and nested_hops[-2] == "vpn:inner", nested_hops
+          assert "вложено в VPN nl" in nested[0]["hops"][nested_hops.index("tun:nl")]["wrap"], nested
           # Every flow of a container's has its program: the ping too (its
           # socket, ping or raw); the kernel's own talk with passt is the
           # kernel's.
