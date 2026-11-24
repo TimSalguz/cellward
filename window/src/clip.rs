@@ -2229,14 +2229,16 @@ impl Clip {
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             );
         }
-        page = page.push(
-            row![
-                text("Копировать в:"),
-                pick_list(self.targets.as_slice(), Some(&self.target), Msg::Target),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        );
+        if self.secrets {
+            page = page.push(
+                row![
+                    text("Копировать в:"),
+                    pick_list(self.targets.as_slice(), Some(&self.target), Msg::Target),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
         if !self.target_available {
             page = page.push(text(ui(UiKey::TargetUnavailable)).size(13).style(danger));
         }
@@ -2851,12 +2853,18 @@ impl Clip {
         let mut line = row![].spacing(8).align_y(Alignment::Center);
         if !self.secrets {
             line = line.push(
-                button(text("Скопировать в выбранный буфер").size(13))
-                    .style(crate::appearance::primary_button)
-                    .on_press_maybe(
-                        self.can_copy_for_paste(e.id)
-                            .then_some(Msg::CopyForPaste(e.id)),
-                    ),
+                row![
+                    text("В:").size(13),
+                    pick_list(self.targets.as_slice(), Some(&self.target), Msg::Target),
+                    button(text("Скопировать в выбранный буфер").size(13))
+                        .style(crate::appearance::primary_button)
+                        .on_press_maybe(
+                            self.can_copy_for_paste(e.id)
+                                .then_some(Msg::CopyForPaste(e.id)),
+                        ),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
             );
         }
         if self.can_paste || self.type_enabled {
@@ -4198,6 +4206,45 @@ mod tests {
             } else {
                 assert!(second.x > first.x, "wide panes are not side by side");
             }
+        }
+    }
+
+    #[test]
+    fn default_destination_and_copy_action_stay_together_when_actions_wrap() {
+        let mut c = clip();
+        c.targets = vec![
+            ClipboardTarget::Host,
+            ClipboardTarget::Instance("chosen-instance".into()),
+        ];
+        c.target = ClipboardTarget::Instance("chosen-instance".into());
+        let e = entry(1, 10);
+        for width in [1200.0, 560.0] {
+            let mut actions = c.actions(&e);
+            let mut tree = iced::advanced::widget::Tree::new(&actions);
+            let renderer = iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+            let limits =
+                iced::advanced::layout::Limits::new(Size::ZERO, Size::new(width, f32::INFINITY));
+            let node = actions
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            let children = node.children();
+            assert!(children.len() > 1);
+            if width < 900.0 {
+                assert!(
+                    children[1].bounds().y > children[0].bounds().y,
+                    "narrow actions did not wrap"
+                );
+            }
+            let copy_group = children[0].children();
+            assert_eq!(copy_group.len(), 3);
+            let destination = copy_group[1].bounds();
+            let copy = copy_group[2].bounds();
+            assert!(destination.x + destination.width <= copy.x);
+            assert!(
+                ((destination.y + destination.height / 2.0) - (copy.y + copy.height / 2.0)).abs()
+                    < 0.01,
+                "destination and copy action split at width {width}"
+            );
         }
     }
 

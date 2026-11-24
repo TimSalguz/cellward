@@ -127,6 +127,14 @@ def main():
         at = (y * width + x) * 3
         return body[at:at + 3]
 
+    def action_pixels():
+        return subprocess.check_output([
+            args.grim, '-g', f'0,{output_height - 110} {output_width}x110', '-t', 'ppm', '-'
+        ], env=env, timeout=5)
+
+    def actions_match(before, after):
+        return len(before) == len(after) and all(abs(a - b) <= 2 for a, b in zip(before, after))
+
     try:
         config = root / 'sway.conf'
         config.write_text(f'output * mode {args.width}x{args.height}\nseat seat0 fallback true\ndefault_border none\n')
@@ -152,12 +160,31 @@ def main():
         width, _, small = wire.wait_for(lambda: (p if (p := pixels())[2] else None))
         subprocess.run([args.grim, str(root / 'live-image.png')], env=env, check=True)
         if args.destination_shot:
-            destination_x = width * (.835 if width >= 900 else .4)
             with open(fifo, 'w') as pointer:
-                pointer.write(f'move {int(destination_x)} {output_height - 72}\npress\nrelease\n')
+                pointer.write('move 0 0\n')
+            time.sleep(.2)
+            before_actions = action_pixels()
+            default_x = width * (.56 if width >= 900 else .27)
+            with open(fifo, 'w') as pointer:
+                pointer.write(f'move {int(default_x)} {output_height - 74}\npress\nrelease\n')
+            time.sleep(.3)
+            subprocess.run([args.grim, str(root / 'default-target-picker.png')], env=env, check=True)
+            with open(fifo, 'w') as pointer:
+                pointer.write(f'move {int(default_x)} {output_height - 104}\npress\nrelease\nmove 0 0\n')
+            time.sleep(.2)
+            subprocess.run([args.grim, str(root / 'default-target-closed.png')], env=env, check=True)
+            assert actions_match(before_actions, action_pixels()), 'default target picker left stale action pixels'
+            destination_x = width * (.68 if width >= 900 else .255)
+            with open(fifo, 'w') as pointer:
+                pointer.write(f'move {int(destination_x)} {output_height - 38}\npress\nrelease\n')
             time.sleep(.3)
             subprocess.run([args.grim, str(root / 'entry-destination.png')], env=env, check=True)
             subprocess.run([args.wtype, '-s', '400', '-k', 'Escape'], env=env, check=True, timeout=5)
+            with open(fifo, 'w') as pointer:
+                pointer.write('move 0 0\n')
+            time.sleep(.2)
+            subprocess.run([args.grim, str(root / 'entry-destination-closed.png')], env=env, check=True)
+            assert actions_match(before_actions, action_pixels()), 'entry destination left stale action pixels'
         middle = small[len(small) // 2]
         with open(fifo, 'w') as pointer:
             pointer.write(f'move {middle % width} {middle // width}\npress\nrelease\n')
