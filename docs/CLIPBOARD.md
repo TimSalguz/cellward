@@ -107,20 +107,32 @@ disabled colors. Wide windows put a compact entry list beside full selected text
 or a large image; narrow windows stack the list and details. Buffer tabs wrap,
 and search stays attached to the feed. Long text wraps and its bounded preview
 remains Unicode-safe. Every entry's destination picker can override the default
-without silently using a stopped target. Reopening the current full-size image
-reuses its decoded original pixels rather than fetching and decoding them again.
+without silently using a stopped target. The current entry retains one decoded
+source buffer and window-sized fit levels; full RGBA pixels are allocated only
+for actual-size inspection, not for fit. Reopening or changing levels fetches
+and decodes nothing again. Opaque fit/native images use direct nearest blits of
+only visible pixels instead of a full transformed offscreen image each frame.
 Background replies from an old search or history are ignored. Confirmation,
 password editing and image inspection pause entry refresh until they are closed.
 
 Click a PNG thumbnail to inspect the original pixels across the window. The
 viewer supports zoom with the wheel, drag to pan, fit/actual size and maximizing
 the resizable window. Escape returns to the same history instead of closing it.
-Only the explicitly opened image is decoded at full resolution, off-thread and
-under the existing PNG size/allocation limits. Other image types remain copyable
-but currently have no large preview. Secret shelves never reveal image contents.
-`tests/clipboard-window-live-smoke.py` verifies automatic entry, tab and target
-arrival, destination loss and the large preview in the actual GUI on a private
-compositor, without clipboard mutation.
+Actual-size RGBA pixels are created only on an explicit native request,
+off-thread and under the existing PNG size/allocation limits. Other image types
+remain copyable but currently have no large preview. Secret shelves never reveal
+image contents. `tests/clipboard-window-live-smoke.py` verifies automatic entry,
+tab and target arrival, destination loss and the large preview in the actual GUI
+on a private compositor, without clipboard mutation.
+
+For a release build on private sway with a synthetic 3840×2160 PNG at 1280×900,
+the measured raster/whole-renderer times changed as follows: expanded 36 ms →
+1–2 ms, zoom 31 ms → 1–2 ms, native pan 85 ms → about 4 ms, and cached reopen
+36 ms → 1–2 ms. Native RGBA conversion fell from 195 ms to 54 ms after removing
+the redundant box filter. Inline detail remains about 12 ms on its linear path.
+An 8K run also renders visible pixels in 1–2 ms. The repeatable coverage is
+`tests/clipboard-image-performance-smoke.py`; these are measurements on that
+fixture, not a promise for every machine.
 
 ## Legacy proxies (programs started before this update)
 
