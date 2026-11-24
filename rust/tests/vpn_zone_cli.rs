@@ -1118,7 +1118,8 @@ fn only_a_throwaway_container_of_ours_can_be_joined() {
 /// instance's either way.
 #[test]
 fn a_launch_into_a_zone_runs_in_its_containers_instance() {
-    let home = Home::new("into-instance");
+    // A short tag: the zone's bridge socket is made below it (SUN_LEN).
+    let home = Home::new("into");
     home.zone_is_up("nl");
     fs::write(home.state().join("nl/config.conf"), "[Interface]\n").unwrap();
     let key = vpn_zone::instance::key("main:nl");
