@@ -1637,10 +1637,11 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
 }
 
 /// Where a container's network may be switched live to from `current`
-/// (the frame's ⇄, [`switch_network`]): `offline` and every published zone,
-/// never `unconfined` — the host's network is no instance's way out, only a
-/// restart takes a container there — nor the network it is in. An unreadable
-/// or invalid route policy offers no zone rather than falling back to all.
+/// (the frame's ⇄, [`switch_network`]): `offline`, the host network with an
+/// instance's containment, and every published zone; never `unconfined` — no
+/// instance has that network, only a restart takes a container there — nor the
+/// network it is in. An unreadable or invalid route policy offers no VPN zone
+/// rather than falling back to all.
 pub fn switch_targets(state: &Path, current: &str) -> Vec<String> {
     let mut out = vec![crate::launch::OFFLINE.to_owned()];
     for dir in crate::cli::visible_entries(state) {
@@ -1652,7 +1653,8 @@ pub fn switch_targets(state: &Path, current: &str) -> Vec<String> {
         };
         if name == crate::launch::OFFLINE
             || crate::launch::is_unconfined_name(name)
-            || !crate::chain::published_zone(state, name).unwrap_or(false)
+            || (name != crate::launch::HOST
+                && !crate::chain::published_zone(state, name).unwrap_or(false))
         {
             continue;
         }
@@ -1704,8 +1706,9 @@ pub fn switchable(
 
 /// The frame's ⇄ for a launch whose container's network can be switched
 /// live (stage 5 of the container design, 2026-09-28; the switch is stage
-/// 4's): the network chosen in the launch window's menu — `offline` and the
-/// zones, never the one it is in ([`switch_targets`]) —, then, after what a
+/// 4's): the network chosen in the launch window's menu — `offline`, `host`
+/// and the published zones, never the one it is in ([`switch_targets`]) —,
+/// then, after what a
 /// switch breaks and what it cannot (`switch::warning`), how: now, with its
 /// programs restarted — the other programs it takes along named (step 5 of
 /// `docs/PERMISSIONS.md` §11.16) —, or only this one, into another
@@ -2449,8 +2452,8 @@ mod tests {
 
     /// The frame's ⇄ (stage 5): switched live only for a named container
     /// whose own instance runs — by the instance's id, the container's name
-    /// —, to `offline` or a zone there is, never `unconfined` nor the
-    /// network it is in.
+    /// —, to `offline`, `host` or a published zone, never `unconfined` nor
+    /// the network it is in.
     #[test]
     fn the_network_button_switches_a_named_containers_instance() {
         let live_dir = std::env::temp_dir().join(format!("vz-switchable-{}", std::process::id()));
@@ -2494,28 +2497,31 @@ mod tests {
 
         let state = std::env::temp_dir().join(format!("vz-switch-targets-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
-        for zone in ["nl", "de", "unconfined", "offline", "noconf"] {
+        for zone in ["nl", "de", "host", "unconfined", "offline", "noconf"] {
             fs::create_dir_all(state.join(zone)).unwrap();
         }
-        for zone in ["nl", "de", "unconfined"] {
+        for zone in ["nl", "de", "host", "unconfined"] {
             fs::write(state.join(zone).join("config.conf"), "").unwrap();
         }
         fs::create_dir_all(state.join(".instances")).unwrap();
         let mut from_nl = switch_targets(&state, "nl");
         from_nl.sort();
-        assert_eq!(from_nl, ["de", "offline"]);
+        assert_eq!(from_nl, ["de", "host", "offline"]);
         let mut from_offline = switch_targets(&state, "offline");
         from_offline.sort();
-        assert_eq!(from_offline, ["de", "nl"]);
+        assert_eq!(from_offline, ["de", "host", "nl"]);
+        let mut from_host = switch_targets(&state, "host");
+        from_host.sort();
+        assert_eq!(from_host, ["de", "nl", "offline"]);
 
         fs::create_dir_all(state.join("unpublished")).unwrap();
         fs::write(state.join("unpublished/config.conf"), "").unwrap();
         fs::write(state.join(crate::chain::ROUTES), "de\nnl\n").unwrap();
         let mut strict = switch_targets(&state, "offline");
         strict.sort();
-        assert_eq!(strict, ["de", "nl"]);
+        assert_eq!(strict, ["de", "host", "nl"]);
         fs::write(state.join(crate::chain::ROUTES), "not a valid route\n").unwrap();
-        assert!(switch_targets(&state, "offline").is_empty());
+        assert_eq!(switch_targets(&state, "offline"), ["host"]);
         let _ = fs::remove_dir_all(&state);
         let _ = fs::remove_dir_all(&live_dir);
     }
