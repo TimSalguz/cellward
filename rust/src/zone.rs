@@ -2675,6 +2675,7 @@ fn keep(
                     eprintln!("instance {}: strict network closed: {e}", transport.id);
                 }
             }
+            transport.heard_news();
         }
         transport.handle(&fds[way..first_member], wake_r.as_raw_fd());
         let mut look = false;
@@ -4295,8 +4296,8 @@ impl Transport {
         out
     }
 
-    /// A relay said it saw new flows: its words emptied, and the new flows'
-    /// owners looked up while their sockets are fresh (`crate::owners`).
+    /// A relay or the strict controller noted new flows: any relay words emptied,
+    /// and the owners looked up while their sockets are fresh (`crate::owners`).
     fn heard_news(&mut self) {
         if let Some((news, _)) = &self.news {
             let mut buf = [0u8; 256];
@@ -4306,8 +4307,23 @@ impl Transport {
         }
         let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
         let registry = self.state.join(".running").join(container);
-        let fresh = self.owners.fresh(&self.dir);
+        let mut fresh = self.owners.fresh(&self.dir);
         if self.strict_requested {
+            self.count_launches();
+            if let Some(strict) = &mut self.strict {
+                fresh.extend(strict.take_denied());
+                self.owners.resolve_strict(
+                    &self.dir,
+                    self.space,
+                    &registry,
+                    &fresh,
+                    strict.launch_owners(),
+                );
+                strict.note_launch_owners(&fresh);
+            } else {
+                self.owners
+                    .resolve(&self.dir, self.space, &registry, &fresh);
+            }
             return;
         }
         if fresh.is_empty() {

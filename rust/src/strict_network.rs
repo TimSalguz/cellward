@@ -49,6 +49,9 @@ pub struct Runtime {
     archive: Arc<archive::Archive>,
     asker: crate::netask::Asker<Ticket>,
     pending: HashMap<Ticket, (Held, crate::flows::Key, Option<String>)>,
+    decisions: Option<crate::verdicts::Table>,
+    denied: Vec<crate::flows::Key>,
+    launch_owners: HashMap<crate::flows::Key, crate::owners::Registered>,
     config: PathBuf,
     dir: PathBuf,
     record: Option<String>,
@@ -95,6 +98,9 @@ impl Runtime {
             archive,
             asker,
             pending: HashMap::new(),
+            decisions: crate::verdicts::open_writer(dir).ok(),
+            denied: Vec::new(),
+            launch_owners: HashMap::new(),
             config: config.into(),
             dir: dir.into(),
             record,
@@ -122,6 +128,31 @@ impl Runtime {
     }
     pub fn ready(&self) -> bool {
         self.driver.has_ready() || self.driver.rotation_due()
+    }
+
+    pub fn launch_owners(&self) -> &HashMap<crate::flows::Key, crate::owners::Registered> {
+        &self.launch_owners
+    }
+
+    pub fn note_launch_owners(&mut self, flows: &[crate::flows::Flow]) {
+        for flow in flows {
+            self.launch_owners.remove(&flow.key);
+        }
+    }
+
+    pub fn take_denied(&mut self) -> Vec<crate::flows::Flow> {
+        std::mem::take(&mut self.denied)
+            .into_iter()
+            .map(|key| crate::flows::Flow {
+                key,
+                first: 0,
+                last: 0,
+                out_bytes: 0,
+                in_bytes: 0,
+                out_packets: 1,
+                in_packets: 0,
+            })
+            .collect()
     }
 
     /// Does not acquire the instance LOCK: enter holds it shared while
@@ -273,15 +304,30 @@ impl Runtime {
                 let permitted =
                     packet_verdict(&current, &key, name.as_deref(), &held.launch.program)
                         != Some(Verdict::Deny);
+                let allowed = verdict == Verdict::Allow && permitted;
                 self.driver
-                    .decide(ticket, verdict == Verdict::Allow && permitted)
+                    .decide(ticket, allowed)
                     .map_err(|e| e.to_string())?;
+                if let Some(table) = &mut self.decisions {
+                    table.put(
+                        key,
+                        if allowed {
+                            Verdict::Allow
+                        } else {
+                            Verdict::Deny
+                        },
+                    );
+                }
+                if !allowed {
+                    self.denied.push(key);
+                }
             }
         }
         let names = crate::flows::read(&self.dir)
             .map(|(_, names)| names)
             .unwrap_or_default();
         let mut decisions = Vec::new();
+        let mut completed = Vec::new();
         for held in self.driver.receive_round().map_err(|e| e.to_string())? {
             let Some(destination) = held.destination else {
                 decisions.push((held.ticket, false));
@@ -293,6 +339,8 @@ impl Runtime {
                 remote: destination.address,
                 rport: destination.port,
             };
+            self.launch_owners
+                .insert(key, (held.launch.program.clone(), None));
             let name = crate::flows::name_of(&names, &key.remote).map(str::to_owned);
             let verdict = packet_verdict(&current, &key, name.as_deref(), &held.launch.program);
             let verdict = if verdict.is_some() {
@@ -308,6 +356,8 @@ impl Runtime {
                 {
                     return Err("held packet archive identity changed".into());
                 }
+                self.launch_owners
+                    .insert(key, (mapping.program.clone(), mapping.panel));
                 self.asker.ask_held(
                     &held,
                     mapping.panel,
@@ -316,6 +366,7 @@ impl Runtime {
             };
             if let Some(verdict) = verdict {
                 decisions.push((held.ticket, verdict == Verdict::Allow));
+                completed.push((key, verdict));
             } else {
                 self.pending.insert(held.ticket, (held, key, name));
             }
@@ -323,6 +374,14 @@ impl Runtime {
         self.driver
             .decide_round(decisions)
             .map_err(|e| e.to_string())?;
+        for (key, verdict) in completed {
+            if let Some(table) = &mut self.decisions {
+                table.put(key, verdict);
+            }
+            if verdict == Verdict::Deny {
+                self.denied.push(key);
+            }
+        }
         Ok(())
     }
 

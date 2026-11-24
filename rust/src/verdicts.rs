@@ -245,6 +245,11 @@ impl Table {
             .map(|(_, v)| v)
     }
 
+    /// Every currently kept decision, for strict flows a relay never saw.
+    pub fn entries(&self) -> Vec<(Key, Verdict)> {
+        (0..SLOTS).filter_map(|i| self.read_slot(i)).collect()
+    }
+
     /// Decide `key` (the keeper's): its slot, or the oldest.
     pub fn put(&mut self, key: Key, verdict: Verdict) {
         let i = match self.index.get(&key) {
@@ -335,6 +340,8 @@ mod tests {
         assert_eq!(reader.get(&c), Some(Verdict::Deny));
         w.put(a, Verdict::Deny);
         assert_eq!(reader.get(&a), Some(Verdict::Deny));
+        assert_eq!(reader.entries().len(), 2);
+        assert!(reader.entries().contains(&(c, Verdict::Deny)));
         w.close();
         let mut again = open_writer(&dir).unwrap();
         assert_eq!(again.index.len(), 2, "taken over");

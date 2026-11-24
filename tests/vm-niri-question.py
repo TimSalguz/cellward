@@ -173,7 +173,7 @@ def allow_network_panel(name):
     # colour than the one the buttons are found by.
     pointer("move", 5, 5)
     buttons, row = settled(name, panel_buttons)
-    left, right = buttons[1]
+    left, right = buttons[0]
     pointer("move", (left + right) // 2, row)
     machine.sleep(3.5)
     pointer("press")

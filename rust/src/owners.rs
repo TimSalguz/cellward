@@ -21,8 +21,9 @@
 //! here decides — the wall is the instance's rules.
 //!
 //! **At the first packet** ([`Keeper`]). The relay says a word on a pipe
-//! for every new flow it notes (`frame-relay --news-fd`); the instance's
-//! keeper wakes on it, looks the new flows' owners up while their sockets
+//! for every new flow it notes (`frame-relay --news-fd`); the strict controller
+//! also reports its denied flows and supplies the registered launch identity.
+//! The instance's keeper looks the new flows' owners up while their sockets
 //! are fresh — a short connection too, gone a moment later —, and appends
 //! them to the instance's [`FILE`]. A reader takes an owner from there
 //! first, and looks up now only the flows it has none for.
@@ -466,6 +467,17 @@ fn archived_owner(found: &HashMap<Seen, Owner>, flow: &Flow) -> Option<Owner> {
     Some(owner)
 }
 
+fn registered_owner(registered: &Registered) -> Owner {
+    let (program, panel) = registered;
+    Owner {
+        pid: 0,
+        process: String::new(),
+        program: Some(program.clone()),
+        launch: panel
+            .and_then(|(pid, start)| (crate::sys::start_time(pid) == Some(start)).then_some(pid)),
+    }
+}
+
 struct Origin {
     owner: Owner,
     waiter: i32,
@@ -494,6 +506,8 @@ pub const STATUS: &str = "owner-status";
 /// A flow as the owners' file names it: its key, and when it was first seen
 /// (ports are used again).
 pub type Seen = (Key, u32);
+/// A strict launch's registry key and its panel's generation-checked address.
+pub type Registered = (String, Option<(i32, u64)>);
 
 fn line_of(seen: &Seen, o: &Owner) -> String {
     let (k, first) = seen;
@@ -606,6 +620,29 @@ impl Keeper {
         registry: &Path,
         fresh: &[Flow],
     ) -> Vec<Option<Owner>> {
+        self.resolve_with(dir, space, registry, fresh, None)
+    }
+
+    /// Strict NFQUEUE registration is evidence even after a short process exits.
+    pub fn resolve_strict(
+        &mut self,
+        dir: &Path,
+        space: i32,
+        registry: &Path,
+        fresh: &[Flow],
+        registered: &HashMap<Key, Registered>,
+    ) -> Vec<Option<Owner>> {
+        self.resolve_with(dir, space, registry, fresh, Some(registered))
+    }
+
+    fn resolve_with(
+        &mut self,
+        dir: &Path,
+        space: i32,
+        registry: &Path,
+        fresh: &[Flow],
+        registered: Option<&HashMap<Key, Registered>>,
+    ) -> Vec<Option<Owner>> {
         if fresh.is_empty() {
             return Vec::new();
         }
@@ -667,7 +704,10 @@ impl Keeper {
             .iter()
             .zip(observed)
             .map(|(f, observed)| {
-                archived_owner(&self.found, f)
+                registered
+                    .and_then(|registered| registered.get(&f.key))
+                    .map(registered_owner)
+                    .or_else(|| archived_owner(&self.found, f))
                     .or_else(|| {
                         socket_of(&socks, f)
                             .and_then(|s| made_in.get(&s.inode))
@@ -774,6 +814,35 @@ mod tests {
             program: Some("helium".into()),
             launch: Some(42),
         }
+    }
+
+    #[test]
+    fn strict_registration_attributes_a_flow_after_its_process_exits() {
+        let root = std::env::temp_dir().join(format!("cw-strict-owner-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let flow = sample_flow(5000);
+        let registered = HashMap::from([(flow.key, ("helium".to_owned(), None))]);
+        let mut keeper = Keeper::default();
+        let owners = keeper.resolve_strict(
+            &root,
+            0,
+            &root.join("registry"),
+            std::slice::from_ref(&flow),
+            &registered,
+        );
+        assert_eq!(
+            owners[0].as_ref().unwrap().program.as_deref(),
+            Some("helium")
+        );
+        assert_eq!(
+            read(&root)
+                .get(&(flow.key, flow.first))
+                .unwrap()
+                .program
+                .as_deref(),
+            Some("helium")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
