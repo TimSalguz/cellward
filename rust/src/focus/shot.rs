@@ -12,11 +12,153 @@ fn label(key: Key) -> &'static str {
     i18n::text(Language::default(), key)
 }
 
-/// Return only the focused supervisor's visible rectangle. Unknown compositor
-/// geometry needs explicit region selection; never guess from titles or order.
-fn window_geometry(target: paste::Target) -> Option<String> {
-    if target.compositor != Compositor::Sway {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rect {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl Rect {
+    fn overlaps(self, other: Self) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+
+    fn grim(self) -> Option<String> {
+        if self.w == 0.0
+            || self.h == 0.0
+            || self.w > 16384.0
+            || self.h > 16384.0
+            || self.x.fract() != 0.0
+            || self.y.fract() != 0.0
+        {
+            return None;
+        }
+        Some(format!("{},{} {}x{}", self.x, self.y, self.w, self.h))
+    }
+}
+
+fn number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn pair(value: Option<&Value>) -> Option<(f64, f64)> {
+    let [x, y] = value?.as_array()? else {
         return None;
+    };
+    Some((number(x)?, number(y)?))
+}
+
+fn niri_rect(window: &Value, workspace: &Value, outputs: &Value) -> Option<Rect> {
+    if window.get("workspace_id")?.as_i64()? != workspace.get("id")?.as_i64()?
+        || !workspace.get("is_active")?.as_bool()?
+    {
+        return None;
+    }
+    let output = outputs
+        .get(workspace.get("output")?.as_str()?)?
+        .get("logical")?;
+    let output_x = output.get("x")?.as_i64()? as f64;
+    let output_y = output.get("y")?.as_i64()? as f64;
+    let layout = window.get("layout")?;
+    let (tile_x, tile_y) = pair(layout.get("tile_pos_in_workspace_view"))?;
+    let (offset_x, offset_y) = pair(layout.get("window_offset_in_tile"))?;
+    let (w, h) = pair(layout.get("window_size"))?;
+    (w > 0.0 && h > 0.0).then_some(Rect {
+        x: output_x + tile_x + offset_x,
+        y: output_y + tile_y + offset_y,
+        w,
+        h,
+    })
+}
+
+fn niri_geometry(
+    target: paste::Target,
+    focused: &Value,
+    windows: &Value,
+    workspaces: &Value,
+    outputs: &Value,
+) -> Option<String> {
+    if focused.get("id")?.as_i64()? != target.id
+        || focused.get("pid")?.as_i64()? != i64::from(target.pid)
+        || !focused.get("is_focused")?.as_bool()?
+    {
+        return None;
+    }
+    let workspace_id = focused.get("workspace_id")?.as_i64()?;
+    let workspace = workspaces
+        .as_array()?
+        .iter()
+        .find(|w| w.get("id").and_then(Value::as_i64) == Some(workspace_id))?;
+    let output = outputs
+        .get(workspace.get("output")?.as_str()?)?
+        .get("logical")?;
+    let output_rect = Rect {
+        x: output.get("x")?.as_i64()? as f64,
+        y: output.get("y")?.as_i64()? as f64,
+        w: output.get("width")?.as_i64()? as f64,
+        h: output.get("height")?.as_i64()? as f64,
+    };
+    let rect = niri_rect(focused, workspace, outputs)?;
+    let within = output_rect.x <= rect.x
+        && output_rect.y <= rect.y
+        && rect.x + rect.w <= output_rect.x + output_rect.w
+        && rect.y + rect.h <= output_rect.y + output_rect.h;
+    if !within {
+        return None;
+    }
+    let floating = focused.get("is_floating")?.as_bool()?;
+    let mut seen_target = false;
+    for other in windows.as_array()? {
+        let id = other.get("id")?.as_i64()?;
+        if id == target.id {
+            if seen_target {
+                return None;
+            }
+            seen_target = true;
+            continue;
+        }
+        if other.get("workspace_id").and_then(Value::as_i64) != Some(workspace_id) {
+            continue;
+        }
+        let other_floating = other.get("is_floating")?.as_bool()?;
+        match niri_rect(other, workspace, outputs) {
+            Some(other) if rect.overlaps(other) => return None,
+            Some(_) => {}
+            // A floating tile is above the scrolling layout. Any other unknown
+            // rectangle, and every unknown rectangle for a tiled target, makes
+            // the absence of foreign pixels unprovable.
+            None if other_floating || !floating => return None,
+            None => {}
+        }
+    }
+    if !seen_target {
+        return None;
+    }
+    rect.grim()
+}
+
+fn niri_window_geometry(target: paste::Target) -> Option<String> {
+    let focused = run_json("niri", &["msg", "--json", "focused-window"]).ok()?;
+    let windows = run_json("niri", &["msg", "--json", "windows"]).ok()?;
+    let workspaces = run_json("niri", &["msg", "--json", "workspaces"]).ok()?;
+    let outputs = run_json("niri", &["msg", "--json", "outputs"]).ok()?;
+    niri_geometry(target, &focused, &windows, &workspaces, &outputs)
+}
+
+/// Return only the focused supervisor's visible rectangle. Unknown compositor
+/// geometry is an error; never guess from titles or order.
+fn window_geometry(target: paste::Target) -> Option<String> {
+    match target.compositor {
+        Compositor::Niri => return niri_window_geometry(target),
+        Compositor::Sway => {}
     }
     let value = run_json("swaymsg", &["-t", "get_tree", "-r"]).ok()?;
     let node = paste::sway_focused(&value)?;
@@ -33,6 +175,45 @@ fn window_geometry(target: paste::Target) -> Option<String> {
         return None;
     }
     Some(format!("{x},{y} {w}x{h}"))
+}
+
+fn window_command(
+    grim: &Path,
+    target: paste::Target,
+    geometry: Option<&str>,
+    toplevel: bool,
+) -> Result<Command, ()> {
+    let mut command = Command::new(grim);
+    match (target.compositor, toplevel, geometry) {
+        (Compositor::Niri, true, _) => {
+            command.arg("-T").arg(target.id.to_string());
+        }
+        (_, false, Some(geometry)) => {
+            command.args(["-g", geometry]);
+        }
+        _ => return Err(()),
+    }
+    command.args(["-t", "png", "-"]);
+    Ok(command)
+}
+
+fn capture_window(
+    grim: &Path,
+    target: paste::Target,
+    geometry: Option<&str>,
+    owner: BorrowedFd<'_>,
+) -> Result<Vec<u8>, ()> {
+    if target.compositor == Compositor::Niri {
+        let direct = window_command(grim, target, geometry, true)?;
+        if let Ok(Some(png)) = image_command(direct, None, Duration::from_secs(5), owner) {
+            return Ok(png);
+        }
+        if window_geometry(target).as_deref() != geometry {
+            return Err(());
+        }
+    }
+    let region = window_command(grim, target, geometry, false)?;
+    image_command(region, None, Duration::from_secs(5), owner)?.ok_or(())
 }
 
 /// Bounded stdout and lifetime, with simultaneous stdin so neither pipe can
@@ -150,17 +331,18 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
         let geometry = (mode == "window")
             .then(|| window_geometry(target))
             .flatten();
-        let mut capture = Command::new(grim);
-        if let Some(geometry) = &geometry {
-            capture.args(["-g", geometry]);
-        }
-        capture.args(["-t", "png", "-"]);
-        let png = image_command(capture, None, Duration::from_secs(5), owner.as_fd())?.ok_or(())?;
+        let png = if mode == "window" {
+            capture_window(grim, target, geometry.as_deref(), owner.as_fd())?
+        } else {
+            let mut capture = Command::new(grim);
+            capture.args(["-t", "png", "-"]);
+            image_command(capture, None, Duration::from_secs(5), owner.as_fd())?.ok_or(())?
+        };
         // Capture finishes before the editor exists. Crop only these pixels.
         let png = {
             let mut editor = Command::new(&tools.window);
             editor.arg("screenshot");
-            if mode == "window" && geometry.is_some() {
+            if mode == "window" {
                 editor.arg("--whole");
             }
             match image_command(editor, Some(png), Duration::from_secs(90), owner.as_fd())? {
@@ -214,5 +396,195 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
             );
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(compositor: Compositor) -> paste::Target {
+        paste::Target {
+            compositor,
+            id: 42,
+            pid: 77,
+        }
+    }
+
+    fn fixture() -> (Value, Value, Value, Value) {
+        let focused = json::parse(
+            r#"{"id":42,"pid":77,"title":"chosen","is_focused":true,"is_floating":true,
+                "workspace_id":9,"layout":{"tile_pos_in_workspace_view":[20.0,30.0],
+                "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}"#,
+        )
+        .unwrap();
+        let windows = json::parse(
+            r#"[{"id":7,"pid":78,"title":"chosen","is_floating":true,"workspace_id":9,
+                 "layout":{"tile_pos_in_workspace_view":[800.0,30.0],
+                 "window_offset_in_tile":[4.0,4.0],"window_size":[100,100]}},
+                {"id":42,"pid":77,"title":"chosen","is_floating":true,"workspace_id":9,
+                 "layout":{"tile_pos_in_workspace_view":[20.0,30.0],
+                 "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}]"#,
+        )
+        .unwrap();
+        let workspaces =
+            json::parse(r#"[{"id":9,"output":"test-output","is_active":true,"is_focused":true}]"#)
+                .unwrap();
+        let outputs = json::parse(
+            r#"{"test-output":{"logical":{"x":-1920,"y":100,"width":1920,"height":1080}}}"#,
+        )
+        .unwrap();
+        (focused, windows, workspaces, outputs)
+    }
+
+    #[test]
+    fn niri_geometry_uses_the_focused_id_and_output_not_title_or_order() {
+        let (focused, windows, workspaces, outputs) = fixture();
+        assert_eq!(
+            niri_geometry(
+                target(Compositor::Niri),
+                &focused,
+                &windows,
+                &workspaces,
+                &outputs,
+            )
+            .as_deref(),
+            Some("-1896,134 640x480")
+        );
+        assert_eq!(
+            niri_geometry(
+                paste::Target {
+                    pid: 78,
+                    ..target(Compositor::Niri)
+                },
+                &focused,
+                &windows,
+                &workspaces,
+                &outputs,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn niri_does_not_guess_scrolling_fractional_or_clipped_geometry() {
+        let (_, windows, workspaces, outputs) = fixture();
+        for (name, focused) in [
+            (
+                "scrolling position unavailable",
+                r#"{"id":42,"pid":77,"is_focused":true,"is_floating":false,
+                    "workspace_id":9,"layout":{"tile_pos_in_workspace_view":null,
+                    "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}"#,
+            ),
+            (
+                "fractional coordinates",
+                r#"{"id":42,"pid":77,"is_focused":true,"is_floating":true,
+                    "workspace_id":9,"layout":{"tile_pos_in_workspace_view":[20.5,30.0],
+                    "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}"#,
+            ),
+            (
+                "partially offscreen",
+                r#"{"id":42,"pid":77,"is_focused":true,"is_floating":true,
+                    "workspace_id":9,"layout":{"tile_pos_in_workspace_view":[-3000.0,30.0],
+                    "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}"#,
+            ),
+        ] {
+            let focused = json::parse(focused).unwrap();
+            assert_eq!(
+                niri_geometry(
+                    target(Compositor::Niri),
+                    &focused,
+                    &windows,
+                    &workspaces,
+                    &outputs,
+                ),
+                None,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn niri_rejects_overlap_and_unprovable_neighbours() {
+        let (focused, _, workspaces, outputs) = fixture();
+        let overlapping = json::parse(
+            r#"[{"id":7,"is_floating":true,"workspace_id":9,
+                 "layout":{"tile_pos_in_workspace_view":[600.0,30.0],
+                 "window_offset_in_tile":[4.0,4.0],"window_size":[100,100]}},
+                {"id":42,"is_floating":true,"workspace_id":9,
+                 "layout":{"tile_pos_in_workspace_view":[20.0,30.0],
+                 "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            niri_geometry(
+                target(Compositor::Niri),
+                &focused,
+                &overlapping,
+                &workspaces,
+                &outputs,
+            ),
+            None
+        );
+
+        let unknown_tiled = json::parse(
+            r#"[{"id":7,"is_floating":false,"workspace_id":9,
+                 "layout":{"tile_pos_in_workspace_view":null,
+                 "window_offset_in_tile":[4.0,4.0],"window_size":[100,100]}},
+                {"id":42,"is_floating":true,"workspace_id":9,
+                 "layout":{"tile_pos_in_workspace_view":[20.0,30.0],
+                 "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}]"#,
+        )
+        .unwrap();
+        assert!(niri_geometry(
+            target(Compositor::Niri),
+            &focused,
+            &unknown_tiled,
+            &workspaces,
+            &outputs,
+        )
+        .is_some());
+        let tiled = json::parse(
+            r#"{"id":42,"pid":77,"is_focused":true,"is_floating":false,
+                "workspace_id":9,"layout":{"tile_pos_in_workspace_view":[20.0,30.0],
+                "window_offset_in_tile":[4.0,4.0],"window_size":[640,480]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            niri_geometry(
+                target(Compositor::Niri),
+                &tiled,
+                &unknown_tiled,
+                &workspaces,
+                &outputs,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn window_capture_never_degrades_to_an_unbounded_grim() {
+        let niri = target(Compositor::Niri);
+        let args = |command: &Command| {
+            command
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            args(&window_command(Path::new("/grim"), niri, None, true).unwrap()),
+            ["-T", "42", "-t", "png", "-"]
+        );
+        assert_eq!(
+            args(&window_command(Path::new("/grim"), niri, Some("1,2 3x4"), false).unwrap()),
+            ["-g", "1,2 3x4", "-t", "png", "-"]
+        );
+        assert!(window_command(Path::new("/grim"), niri, None, false).is_err());
+        let sway = target(Compositor::Sway);
+        assert!(window_command(Path::new("/grim"), sway, None, true).is_err());
+        assert_eq!(
+            args(&window_command(Path::new("/grim"), sway, Some("1,2 3x4"), false).unwrap()),
+            ["-g", "1,2 3x4", "-t", "png", "-"]
+        );
     }
 }
