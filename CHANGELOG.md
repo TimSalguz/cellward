@@ -13,8 +13,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and swallows the freezing click. A trusted editor confirms the private PNG
   copy; Escape or source exit preserves the previous selection. Captures stay
   in memory and never write the desktop clipboard. Window geometry is supported
-  through Sway; niri and unknown geometry use explicit selection on a frozen
-  full frame. The host manifest pins `grim`, without granting capture to apps.
+  through Sway and niri: direct toplevel capture where available, otherwise only
+  an exact, fully visible and unoccluded IPC rectangle. Unsupported niri layouts
+  fail instead of silently capturing a full frame. The host manifest pins `grim`,
+  without granting capture to apps.
 
 ### Fixed
 - Cross-network application warnings compare the actual container selector.
