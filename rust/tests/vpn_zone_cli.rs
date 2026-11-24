@@ -1,10 +1,12 @@
 //! End-to-end checks of the `vpn-zone` command line.
 //!
 //! Everything here runs against a state directory of its own and a manifest
-//! whose tool paths point nowhere: not one of these cases may start a tool, and
-//! a test that suddenly does would be a test that touches the developer's real
-//! zones. The paths that DO need `systemctl`, `nsenter` or `kdialog` are the
-//! ones the smoke test covers on a runner (`tests/integration/smoke.sh`).
+//! whose external tool paths point nowhere: not one of these cases may start a
+//! system tool, and a test that suddenly does would be a test that touches the
+//! developer's real zones. Only the local delegation doubles run the real CLI
+//! and core, handing the launch back to the manifest's nonexistent core. The
+//! paths that DO need `systemctl`, `nsenter` or `kdialog` are the ones the
+//! smoke test covers on a runner (`tests/integration/smoke.sh`).
 //!
 //! `VPN_ZONE_CURRENT` is scrubbed for the same reason as the compositor
 //! variables in `wl_sandbox_cli.rs`: the developer's shell may well be running
@@ -17,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const BIN: &str = env!("CARGO_BIN_EXE_vpn-zone");
+const CORE: &str = env!("CARGO_BIN_EXE_vpn-zone-core");
 
 /// A state directory, a profile directory and a manifest naming them, removed
 /// on drop.
@@ -29,17 +32,60 @@ impl Home {
         let root =
             std::env::temp_dir().join(format!("vpn-zone-cli-test-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        for sub in ["state", "profiles", "sandboxes", "config"] {
+        for sub in ["state", "profiles", "sandboxes", "config", "bin"] {
             fs::create_dir_all(root.join(sub)).unwrap();
         }
         let home = Self { root };
+        home.write_delegation_stubs();
         home.write_manifest();
         home
     }
 
-    /// The manifest the wrapper would normally hand over. Every tool points at
-    /// a path that does not exist: if a test ever starts one, it fails loudly
-    /// instead of poking the real system.
+    fn write_delegation_stubs(&self) {
+        let bin = self.root.join("bin");
+        let runner = bin.join("vpn-zone");
+        // A real user service is already in user@UID.service, so its runner
+        // does not delegate again. This double stays in the caller's cgroup:
+        // emulate that branch without changing the production launch path.
+        fs::write(
+            &runner,
+            format!(
+                r#"#!/bin/sh
+if [ "${{CELLWARD_USER_SERVICE+x}}" = x ]; then
+  unset CELLWARD_USER_SERVICE
+  VPN_ZONE_CURRENT=${{VPN_ZONE_CURRENT:-user-service}}
+  VPN_ZONE_DELEGATED=1
+  export VPN_ZONE_CURRENT VPN_ZONE_DELEGATED
+fi
+exec "{BIN}" "$@"
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let systemd_run = bin.join("systemd-run");
+        // Execute only the private handoff, with the real core. The manifest's
+        // core stays nonexistent for the launch itself, as do all system tools.
+        fs::write(
+            &systemd_run,
+            format!(
+                r#"#!/bin/sh
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+if [ "$#" -ne 4 ] || [ "$2" != "/nonexistent/vpn-zone-core" ] || [ "$3" != "user-launch-handoff" ]; then
+  exit 125
+fi
+exec "{CORE}" user-launch-handoff "$4"
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&systemd_run, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The manifest the wrapper would normally hand over. Every external tool
+    /// points at a path that does not exist; the two delegation paths are local
+    /// doubles that never contact the host's service manager or zones.
     fn write_manifest(&self) {
         let r = self.root.display();
         let mut json = String::from("{\n");
@@ -53,7 +99,7 @@ impl Home {
             ("picker", format!("{r}/bin/vpn-zone-pick")),
             ("core", "/nonexistent/vpn-zone-core".to_owned()),
             ("systemctl", "/nonexistent/systemctl".to_owned()),
-            ("systemd-run", "/nonexistent/systemd-run".to_owned()),
+            ("systemd-run", format!("{r}/bin/systemd-run")),
             ("nsenter", "/nonexistent/nsenter".to_owned()),
             ("unshare", "/nonexistent/unshare".to_owned()),
             ("ip", "/nonexistent/ip".to_owned()),
@@ -902,6 +948,7 @@ fn two_entries_for_one_binary_see_each_other() {
     // nsenter it went to until then.)
     let home = Home::new("by-binary");
     home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
     let _instance = home.instance_is_up("main:nl", "nl");
     let index = home.state().join(".running/__main__/.by-binary");
     fs::create_dir_all(&index).unwrap();
@@ -975,14 +1022,21 @@ fn a_launch_asked_for_from_a_zone_is_marked_and_its_id_is_a_file_name() {
     // not the user's own (the picker does not follow it without asking).
     let home = Home::new("from-zone");
     home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
     // Into the main home's instance, faked up, as far as the exec (stage 5).
     let _instance = home.instance_is_up("main:nl", "nl");
-    let _ = home.run_with(
+    let out = home.run_with(
         &["run", "nl", "--", "true"],
         &[
             ("VPN_ZONE_DELEGATED", "1"),
             ("VPN_ZONE_APPID", "/tmp/../x/firefox"),
         ],
+    );
+    assert_eq!(out.status.code(), Some(127), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("/nonexistent/vpn-zone-core"),
+        "{}",
+        stderr(&out)
     );
     let main = home.state().join(".running/__main__");
     assert!(main.join("_tmp_.._x_firefox").is_file());
@@ -1121,6 +1175,7 @@ fn a_zone_whose_process_is_in_our_network_is_not_entered() {
     // serves none: refused before anything is started.
     let home = Home::new("zone-is-host");
     home.zone_is_up("nl");
+    fs::write(home.state().join("nl/config.conf"), crlf_config()).unwrap();
     let out = home.run(&["run", "nl", "--", "true"]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert!(
@@ -3074,7 +3129,8 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     // launch knows it.
     assert!(
         line.contains(&format!(
-            "wl-sandbox foot --zone {} --frame {}:4:always --frame-title nl · настоящий дом \
+            "wl-sandbox foot --zone {} --frame {}:4:always \
+             --frame-title Сеть: nl · Контейнер: настоящий дом \
              --frame-switch {} --frame-state {} --frame-zone nl ",
             // The sockets by the instance's key (stage 5: nothing by the
             // zone's name); the title still names the zone.
@@ -3089,7 +3145,10 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     // the fly; the program after it.
     assert!(line.contains(" -- foot"), "{line}");
     let line = stdout(&home.run_with(&["run", "nl", "--fs-sandbox", "--", "foot"], &dry));
-    assert!(line.contains("--frame-title nl · разовый "), "{line}");
+    assert!(
+        line.contains("--frame-title Сеть: nl · Контейнер: разовый "),
+        "{line}"
+    );
     // No border for the host's own session: it is no zone.
     let line = stdout(&home.run_with(&["run", "unconfined", "--", "foot"], &dry));
     assert!(!line.contains("--frame"), "{line}");
@@ -3117,7 +3176,8 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
         "{json}"
     );
 
-    // Nix wins, and the command does not pretend to change what Nix set.
+    // Nix wins over an ordinary local setting; an explicit frame preview is
+    // local and wins over Nix until `default` removes it.
     let declared = home.root.join("config/declared");
     fs::create_dir_all(&declared).unwrap();
     declare(&declared.join("frame-colors"), "nl #ff0000\n");
@@ -3125,11 +3185,19 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     declare(&declared.join("frame-title"), "off");
     let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
     assert!(line.contains("--frame ff0000:3:off "), "{line}");
-    for change in [&["frame", "width", "8"][..], &["frame", "title", "default"]] {
-        let out = home.run(change);
-        assert!(!out.status.success(), "{change:?}");
-        assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
-    }
+    let out = home.run(&["frame", "width", "8"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
+    assert!(line.contains("--frame ff0000:8:off "), "{line}");
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frame_width\":{\"value\":8,\"source\":\"local\"}"),
+        "{json}"
+    );
+    let out = home.run(&["frame", "width", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = home.run(&["frame", "title", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
     let json = stdout(&home.run(&["status", "--json"]));
     assert!(
         json.contains("\"frame_color\":{\"value\":\"#ff0000\",\"source\":\"nix\"}"),
@@ -3137,6 +3205,10 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
     );
     assert!(
         json.contains("\"frame_title\":{\"value\":\"off\",\"source\":\"nix\"}"),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"frame_width\":{\"value\":3,\"source\":\"nix\"}"),
         "{json}"
     );
     fs::remove_file(declared.join("frame-title")).unwrap();
@@ -3272,7 +3344,8 @@ fn the_frames_look_goes_to_the_launch_and_the_status() {
         "{summary}"
     );
 
-    // Nix wins, and the command does not pretend to change what Nix set.
+    // Nix wins until an explicit local preview; resetting the preview brings
+    // Nix's value back.
     let declared = home.root.join("config/declared");
     fs::create_dir_all(&declared).unwrap();
     declare(&declared.join("frame-style"), "full");
@@ -3297,8 +3370,26 @@ fn the_frames_look_goes_to_the_launch_and_the_status() {
         &["frame", "radius", "4"],
     ] {
         let out = home.run(change);
-        assert!(!out.status.success(), "{change:?}");
-        assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+        assert!(out.status.success(), "{change:?}: {}", stderr(&out));
+    }
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_buttons\":{\"value\":\"windows\",\"source\":\"nix\"}",
+        "\"frame_style\":{\"value\":\"soft\",\"source\":\"local\"}",
+        "\"frame_radius\":{\"value\":4,\"source\":\"local\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    for setting in ["style", "radius"] {
+        let out = home.run(&["frame", setting, "default"]);
+        assert!(out.status.success(), "{setting}: {}", stderr(&out));
+    }
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_style\":{\"value\":\"full\",\"source\":\"nix\"}",
+        "\"frame_radius\":{\"value\":8,\"source\":\"nix\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
     }
     for name in ["frame-style", "frame-buttons", "frame-radius"] {
         fs::remove_file(declared.join(name)).unwrap();
@@ -3392,7 +3483,7 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
     let json = stdout(&home.run(&["status", "--json"]));
     for field in [
         "\"frame_fullscreen_width\":{\"value\":\"same\",\"source\":\"default\"}",
-        "\"frame_fullscreen_title\":{\"value\":\"off\",\"source\":\"default\"}",
+        "\"frame_fullscreen_title\":{\"value\":\"hover\",\"source\":\"default\"}",
         "\"frame_fullscreen_notice\":{\"value\":3,\"source\":\"default\"}",
         "\"frame_fullscreen_button\":{\"value\":\"one\",\"source\":\"default\"}",
         "\"frame_double_click\":{\"value\":\"maximize\",\"source\":\"default\"}",
@@ -3437,7 +3528,8 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
     let out = home.run(&["frame", "fullscreen", "notice", "10"]);
     assert!(stdout(&out).contains("10 с"), "{}", stdout(&out));
 
-    // Nix wins, and the command does not pretend to change what Nix set.
+    // As for the ordinary frame settings, a local preview may win over Nix;
+    // `default` removes that preview, not Nix's declaration.
     let declared = home.root.join("config/declared");
     fs::create_dir_all(&declared).unwrap();
     declare(&declared.join("frame-fullscreen-width"), "same");
@@ -3454,9 +3546,22 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
         &["frame", "double-click", "default"],
     ] {
         let out = home.run(change);
-        assert!(!out.status.success(), "{change:?}");
-        assert!(stderr(&out).contains("Nix"), "{}", stderr(&out));
+        assert!(out.status.success(), "{change:?}: {}", stderr(&out));
     }
+    let json = stdout(&home.run(&["status", "--json"]));
+    for field in [
+        "\"frame_fullscreen_width\":{\"value\":2,\"source\":\"local\"}",
+        "\"frame_double_click\":{\"value\":\"maximize\",\"source\":\"nix\"}",
+    ] {
+        assert!(json.contains(field), "{field}: {json}");
+    }
+    let out = home.run(&["frame", "fullscreen", "width", "default"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let json = stdout(&home.run(&["status", "--json"]));
+    assert!(
+        json.contains("\"frame_fullscreen_width\":{\"value\":\"same\",\"source\":\"nix\"}"),
+        "{json}"
+    );
     for name in ["frame-fullscreen-width", "frame-double-click"] {
         fs::remove_file(declared.join(name)).unwrap();
     }
