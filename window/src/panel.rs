@@ -807,7 +807,7 @@ fn container_network_choices(data: &Data) -> Vec<(String, String)> {
     choices
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Tab {
     Network,
     Scheme,
@@ -1050,7 +1050,6 @@ enum Pending {
 #[derive(Debug, Clone)]
 enum Msg {
     Tab(Tab),
-    Tick,
     Loaded(Result<String, String>),
     Select(String),
     Explained(String, Result<String, String>),
@@ -1204,9 +1203,6 @@ struct Panel {
     /// The scheme as last read, laid out; why not, when reading failed.
     metro: Option<crate::metro::Metro>,
     metro_trouble: Option<String>,
-    /// Being read now; when it was read last.
-    metro_busy: bool,
-    metro_at: Option<Instant>,
     scheme_pin: Option<String>,
     scheme_hover: Option<(String, usize)>,
     scheme_focus: Option<String>,
@@ -1296,21 +1292,64 @@ fn load(path: PathBuf) -> Task<Msg> {
     Task::perform(cellward(path, vec!["_panel".to_owned()]), Msg::Loaded)
 }
 
-/// `Msg::Tick` a second from now: slept on a thread of its own, as the
-/// launch window's guard is (`arm_after`) — never on the executor's pool,
-/// which carries the input.
-fn tick_later() -> Task<Msg> {
-    Task::perform(
-        async {
-            let (done, over) = iced::futures::channel::oneshot::channel();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                let _ = done.send(());
-            });
-            let _ = over.await;
-        },
-        |()| Msg::Tick,
-    )
+/// Polling off the UI thread. The scheme sends only changed readings; the
+/// other tabs keep their once-a-second clock for rates and relative times.
+#[derive(Default)]
+struct Readings {
+    panel: Option<Result<String, String>>,
+    scheme: Option<Result<String, String>>,
+}
+
+impl Readings {
+    fn panel(&mut self, tab: Tab, said: Result<String, String>) -> Option<Msg> {
+        let changed = self.panel.as_ref() != Some(&said);
+        self.panel = Some(said.clone());
+        (tab != Tab::Scheme || changed).then_some(Msg::Loaded(said))
+    }
+
+    fn scheme(&mut self, said: Result<String, String>) -> Option<Msg> {
+        if self.scheme.as_ref() == Some(&said) {
+            return None;
+        }
+        self.scheme = Some(said.clone());
+        let result =
+            said.map(|lines| Box::new(crate::metro::Metro::new(crate::metro::parse(&lines))));
+        Some(Msg::SchemeLoaded(result))
+    }
+}
+
+fn polling(data: &(PathBuf, Tab)) -> impl iced::futures::Stream<Item = Msg> {
+    let (path, tab) = data.clone();
+    let (sender, receiver) = iced::futures::channel::mpsc::unbounded();
+    std::thread::spawn(move || {
+        let mut readings = Readings::default();
+        let mut scheme_at: Option<Instant> = None;
+        loop {
+            if sender.is_closed() {
+                return;
+            }
+            let said = cellward_read(&path, &["_panel".to_owned()]);
+            if let Some(msg) = readings.panel(tab, said) {
+                if sender.unbounded_send(msg).is_err() {
+                    return;
+                }
+            }
+
+            if tab == Tab::Scheme
+                && scheme_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(3))
+            {
+                let said = cellward_read(&path, &["scheme".to_owned(), "--lines".to_owned()]);
+                if let Some(msg) = readings.scheme(said) {
+                    if sender.unbounded_send(msg).is_err() {
+                        return;
+                    }
+                }
+                scheme_at = Some(Instant::now());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    });
+    receiver
 }
 
 /// A directory to grant, chosen in the file dialog of `dirs` (kdialog);
@@ -1433,8 +1472,6 @@ impl Panel {
             ctrl: false,
             metro: None,
             metro_trouble: None,
-            metro_busy: false,
-            metro_at: None,
             scheme_pin: None,
             scheme_hover: None,
             scheme_focus: None,
@@ -1561,7 +1598,7 @@ impl Panel {
                 if matches!(self.pending, Some(Pending::Block { .. })) {
                     self.pending = None;
                 }
-                self.read_scheme()
+                Task::none()
             }
             Msg::Fold(key) => {
                 if !self.folded.remove(&key) {
@@ -1611,7 +1648,6 @@ impl Panel {
                 "unblock".into(),
                 target,
             ]),
-            Msg::Tick => Task::batch([load(self.cellward.clone()), self.read_scheme()]),
             Msg::Loaded(Ok(text)) => {
                 let now = Instant::now();
                 let data = parse(&text);
@@ -1641,11 +1677,11 @@ impl Panel {
                 if self.chosen().is_none() {
                     self.selected = None;
                 }
-                tick_later()
+                Task::none()
             }
             Msg::Loaded(Err(why)) => {
                 self.trouble = Some(why);
-                tick_later()
+                Task::none()
             }
             Msg::Select(name) => {
                 self.selected = Some(name.clone());
@@ -1979,8 +2015,6 @@ impl Panel {
             }
             Msg::ZoneDo(zone, verb) => self.act(vec![verb.to_owned(), zone]),
             Msg::SchemeLoaded(said) => {
-                self.metro_busy = false;
-                self.metro_at = Some(Instant::now());
                 match said {
                     Ok(metro) => {
                         let mut metro = *metro;
@@ -3530,34 +3564,6 @@ impl Panel {
         )
     }
 
-    /// `cellward scheme --lines` while the scheme is shown: each few
-    /// seconds, one reading at a time — it looks into every zone.
-    fn read_scheme(&mut self) -> Task<Msg> {
-        let due = self
-            .metro_at
-            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(3));
-        if self.tab != Tab::Scheme || self.metro_busy || !due {
-            return Task::none();
-        }
-        self.metro_busy = true;
-        let path = self.cellward.clone();
-        Task::perform(
-            async move {
-                let (done, over) = iced::futures::channel::oneshot::channel();
-                std::thread::spawn(move || {
-                    let args = vec!["scheme".to_owned(), "--lines".to_owned()];
-                    let result = cellward_read(&path, &args).map(|lines| {
-                        Box::new(crate::metro::Metro::new(crate::metro::parse(&lines)))
-                    });
-                    let _ = done.send(result);
-                });
-                over.await
-                    .unwrap_or_else(|_| Err("cellward не ответил".to_owned()))
-            },
-            Msg::SchemeLoaded,
-        )
-    }
-
     /// **Схема**: every flow and every kind of packet, each a line from its
     /// source to its end (`crate::metro`); the rows listed beside it, the
     /// one chosen or pointed at told in full under it.
@@ -4475,27 +4481,32 @@ impl Panel {
     }
 
     fn subscription(&self) -> Subscription<Msg> {
-        iced::event::listen_with(|event, status, _window| match event {
-            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => Some(Msg::Modifiers(m)),
-            iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                key: Key::Named(named),
-                ..
-            }) => {
-                // An arrow a field took (a name being typed) is the field's.
-                let free = status == iced::event::Status::Ignored;
-                match named {
-                    key::Named::Escape => Some(Msg::Escape),
-                    key::Named::ArrowLeft if free => Some(Msg::TabStep(-1)),
-                    key::Named::ArrowRight if free => Some(Msg::TabStep(1)),
-                    key::Named::ArrowUp if free => Some(Msg::Step(-1)),
-                    key::Named::ArrowDown if free => Some(Msg::Step(1)),
-                    key::Named::Space if free => Some(Msg::TasksSpace),
-                    key::Named::Delete if free => Some(Msg::TasksDelete),
-                    _ => None,
+        Subscription::batch([
+            Subscription::run_with((self.cellward.clone(), self.tab), polling),
+            iced::event::listen_with(|event, status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
+                    Some(Msg::Modifiers(m))
                 }
-            }
-            _ => None,
-        })
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: Key::Named(named),
+                    ..
+                }) => {
+                    // An arrow a field took (a name being typed) is the field's.
+                    let free = status == iced::event::Status::Ignored;
+                    match named {
+                        key::Named::Escape => Some(Msg::Escape),
+                        key::Named::ArrowLeft if free => Some(Msg::TabStep(-1)),
+                        key::Named::ArrowRight if free => Some(Msg::TabStep(1)),
+                        key::Named::ArrowUp if free => Some(Msg::Step(-1)),
+                        key::Named::ArrowDown if free => Some(Msg::Step(1)),
+                        key::Named::Space if free => Some(Msg::TasksSpace),
+                        key::Named::Delete if free => Some(Msg::TasksDelete),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }),
+        ])
     }
 }
 
@@ -4527,8 +4538,7 @@ pub fn run(args: &[String]) -> iced::Result {
     iced::application(
         move || {
             let panel = Panel::new(cellward.clone(), dirs.clone(), tab);
-            let first = load(panel.cellward.clone());
-            (panel, first)
+            (panel, Task::none())
         },
         Panel::update,
         Panel::view,
@@ -5145,6 +5155,27 @@ mod tests {
     }
 
     #[test]
+    fn identical_scheme_readings_do_not_enter_the_ui() {
+        let mut readings = Readings::default();
+        assert!(matches!(
+            readings.panel(Tab::Scheme, Ok("same".into())),
+            Some(Msg::Loaded(_))
+        ));
+        assert!(readings.panel(Tab::Scheme, Ok("same".into())).is_none());
+        assert!(matches!(
+            readings.panel(Tab::Scheme, Ok("changed".into())),
+            Some(Msg::Loaded(_))
+        ));
+        assert!(matches!(
+            readings.panel(Tab::Network, Ok("changed".into())),
+            Some(Msg::Loaded(_))
+        ));
+        assert!(readings.scheme(Ok(String::new())).is_some());
+        assert!(readings.scheme(Ok(String::new())).is_none());
+        assert!(readings.scheme(Ok("\n".into())).is_some());
+    }
+
+    #[test]
     fn unchanged_and_traffic_only_readings_keep_the_canvas_cache() {
         let sample = include_str!("../tests/scheme.lines");
         let first = crate::metro::Metro::new(crate::metro::parse(sample));
@@ -5186,5 +5217,55 @@ mod tests {
         assert_eq!(rate(-5.0), "0 Б/с");
         assert_eq!(ago(59), "59 с назад");
         assert_eq!(ago(3600), "1 ч назад");
+    }
+
+    #[test]
+    #[ignore = "performance measurement; run explicitly with --nocapture"]
+    fn scheme_performance_panel() {
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+
+        let sample = include_str!("../tests/scheme.lines");
+        let scheme = crate::metro::many_flows(crate::metro::parse(sample), 500);
+        let mut panel = Panel::new(PathBuf::from("/nonexistent"), None, Tab::Scheme);
+        let _ = panel.update(Msg::SchemeLoaded(Ok(Box::new(crate::metro::Metro::new(
+            scheme,
+        )))));
+        let renderer = iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+        let limits = iced::advanced::layout::Limits::new(Size::ZERO, Size::new(1600.0, 1000.0));
+        let mut cached = None;
+        let mut views = Vec::new();
+        let mut layouts = Vec::new();
+        for n in 0..15 {
+            let started = Instant::now();
+            let mut page = panel.view();
+            views.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            let mut tree = cached
+                .take()
+                .unwrap_or_else(|| iced::advanced::widget::Tree::new(&page));
+            if n > 0 {
+                tree.diff(page.as_widget());
+            }
+            std::hint::black_box(
+                page.as_widget_mut()
+                    .layout(&mut tree, &renderer, &limits)
+                    .size(),
+            );
+            layouts.push(started.elapsed().as_secs_f64() * 1000.0);
+            cached = Some(tree);
+            drop(page);
+            let id = panel.metro.as_ref().unwrap().scheme.rows[n % 500]
+                .id
+                .clone();
+            let _ = panel.update(Msg::SchemeHover(Some((id, 0))));
+        }
+        println!("panel view / hover: {:.3} ms", median(views));
+        println!(
+            "panel tree diff + layout / hover: {:.3} ms",
+            median(layouts)
+        );
     }
 }
