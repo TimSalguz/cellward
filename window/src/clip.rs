@@ -414,14 +414,9 @@ fn times(n: u32) -> &'static str {
 
 /// An entry's line of when: copied, how many times, pasted.
 fn meta_line(e: &Entry, now: i64) -> String {
-    let mut words = vec![days::hour_label(e.copied_at)];
+    let mut words = vec![days::hour_label(e.last_copied)];
     if e.copies > 1 {
-        words.push(format!(
-            "скопировано {} {}, последний — {}",
-            e.copies,
-            times(e.copies),
-            days::when_label(e.last_copied, now)
-        ));
+        words.push(format!("скопировано {} {}", e.copies, times(e.copies)));
     }
     if e.pastes > 0 {
         let last = if e.last_pasted > 0 {
@@ -2251,12 +2246,12 @@ impl Clip {
         }
         let mut day = None;
         for (i, e) in self.entries.iter().enumerate() {
-            let this = days::day_start(e.copied_at);
+            let this = days::day_start(e.last_copied);
             if day != Some(this) {
                 day = Some(this);
                 feed = feed.push(
                     container(
-                        container(text(days::day_label(e.copied_at, self.now)).size(12))
+                        container(text(days::day_label(e.last_copied, self.now)).size(12))
                             .padding([3, 12])
                             .style(pill),
                     )
@@ -3754,7 +3749,7 @@ mod tests {
         e.last_pasted = days::at(2026, 10, 11, 18, 30);
         assert_eq!(
             meta_line(&e, now),
-            "09:05 · скопировано 3 раза, последний — 10:00 · вставлено 2 раза, последний — вчера в 18:30"
+            "10:00 · скопировано 3 раза · вставлено 2 раза, последний — вчера в 18:30"
         );
         assert_eq!(paste_line("main", 7), "paste\tmain\t7\n");
         assert_eq!(size_words(812), "812 Б");
