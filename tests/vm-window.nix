@@ -464,14 +464,17 @@ let
           """The frame on all four sides of the view (x, y, w, h) at `scale`,
           starting at the view's edge: `width` wide at the sides and the
           bottom, `top` at the top (the border and the title strip under it,
-          measured right of the title's text), and not a pixel of it across
-          the middle: that is foot's, (w - 2 width) wide."""
+          measured in the blank run between the title's text and its buttons),
+          and not a pixel of it across the middle: that is foot's,
+          (w - 2 width) wide."""
           d = lambda v: int(round(v * scale))
           b = width / 2
           sides = [
               (d(x + b), d(y + h / 2), 1, 0, (d(x), d(y + h / 2)), width),
               (d(x + w - b), d(y + h / 2), -1, 0, (d(x + w) - 1, d(y + h / 2)), width),
-              (d(x + w * 3 / 4), d(y + top / 2), 0, 1, (d(x + w * 3 / 4), d(y)), top),
+              # At three quarters a half-screen window's network button is
+              # measured, not the blank strip: its glyph is not the border.
+              (d(x + w / 2), d(y + top / 2), 0, 1, (d(x + w / 2), d(y)), top),
               (d(x + w / 2), d(y + h - b), 0, -1, (d(x + w / 2), d(y + h) - 1), width),
           ]
           for sx, sy, dx, dy, edge, want in sides:
