@@ -33,12 +33,15 @@ libc = "0.2"
 png = "0.18"
 serde_json = "1"
 
+[dev-dependencies]
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
+
 [profile.release]
 opt-level = "s"
 lto = "thin"
 strip = true
 
-# The renderer's damage of a text, fixed here until iced does (vendor/
-# README.md): a text that changed left its glyphs' edges behind.
+# Renderer damage fixes carried here until iced has them (vendor/README.md):
+# changed text edges and structural layer changes left pixels behind.
 [patch.crates-io]
 iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
