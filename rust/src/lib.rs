@@ -149,6 +149,7 @@ pub mod i18n;
 pub mod init;
 pub mod instance;
 pub mod journal;
+#[path = "../../shared/json.rs"]
 pub mod json;
 pub mod kill;
 pub mod launch;

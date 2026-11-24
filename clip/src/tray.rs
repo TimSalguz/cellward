@@ -15,7 +15,7 @@ use zbus::zvariant::{ObjectPath, OwnedValue, Value};
 #[path = "../../shared/i18n.rs"]
 mod i18n;
 #[allow(dead_code)]
-#[path = "../../rust/src/json.rs"]
+#[path = "../../shared/json.rs"]
 mod json;
 
 type Properties = HashMap<String, OwnedValue>;
