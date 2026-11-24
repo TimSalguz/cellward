@@ -565,10 +565,19 @@ impl State {
                         });
                     }
                 }
-                (
-                    Some(Operation::Set(which, _, local) | Operation::Clear(which, local)),
-                    Reply::Rejected(_),
-                ) => {
+                (Some(Operation::Set(which, _, local)), Reply::Rejected(_)) => {
+                    eprintln!(
+                        "wl-sandbox: private {} capture: broker-reject",
+                        if matches!(which, Selection::Clipboard) {
+                            "CLIPBOARD"
+                        } else {
+                            "PRIMARY"
+                        }
+                    );
+                    self.release_local(which, local, true);
+                    self.refresh[index(which)] = true;
+                }
+                (Some(Operation::Clear(which, local)), Reply::Rejected(_)) => {
                     self.release_local(which, local, true);
                     self.refresh[index(which)] = true;
                 }
@@ -584,7 +593,10 @@ impl State {
             let end = w.bytes.as_slice().len().min(w.written + budget);
             if end > w.written {
                 match w.file.write(&w.bytes.as_slice()[w.written..end]) {
-                    Ok(0) => return false,
+                    Ok(0) => {
+                        eprintln!("wl-sandbox: private clipboard transfer: write-failed");
+                        return false;
+                    }
                     Ok(n) => {
                         w.written += n;
                         w.deadline = now + Duration::from_secs(3);
@@ -597,10 +609,14 @@ impl State {
                         ) =>
                     {
                         if now >= w.deadline {
+                            eprintln!("wl-sandbox: private clipboard transfer: write-failed");
                             return false;
                         }
                     }
-                    Err(_) => return false,
+                    Err(_) => {
+                        eprintln!("wl-sandbox: private clipboard transfer: write-failed");
+                        return false;
+                    }
                 }
             }
             w.written < w.bytes.as_slice().len()
@@ -640,10 +656,10 @@ impl State {
                 ) {
                     let c = self.capture[at].take().unwrap();
                     if c.data.failures() != 0 {
-                        // Counts only: no MIME strings or clipboard contents.
-                        eprintln!("wl-sandbox: private {} capture: {} completed formats, {} failed formats",
+                        // Counts and fixed reasons only: no MIME strings or clipboard contents.
+                        eprintln!("wl-sandbox: private {} capture: {} completed formats, {} failed formats; reasons={:?}",
                             if at == 0 { "CLIPBOARD" } else { "PRIMARY" },
-                            c.data.contents.len(), c.data.failures());
+                            c.data.contents.len(), c.data.failures(), c.data.failure_reasons());
                     }
                     if !c.data.contents.is_empty() {
                         self.publish.push_back(Publication {

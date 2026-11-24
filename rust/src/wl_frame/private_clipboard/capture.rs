@@ -43,6 +43,7 @@ pub(super) struct CaptureData {
     pipe: Option<Pending>,
     deadline: Instant,
     failures: usize,
+    reasons: Vec<&'static str>,
 }
 
 // Read portable payloads before legacy aliases such as TEXT. Firefox/GTK can
@@ -63,12 +64,16 @@ fn priority(mime: &str) -> u8 {
 impl CaptureData {
     pub fn new(mut types: Vec<String>, now: Instant) -> Self {
         let mut failures = 0;
+        let mut reasons = Vec::new();
         // The source handler already bounds length/count and removes private
         // marks. A control character is also forbidden by the broker wire;
         // do not let one malformed format poison otherwise usable payloads.
         types.retain(|mime| {
             let valid = !mime.chars().any(char::is_control);
             failures += usize::from(!valid);
+            if !valid {
+                reasons.push("invalid-format");
+            }
             valid
         });
         types.sort_by_key(|t| priority(t));
@@ -84,6 +89,7 @@ impl CaptureData {
             pipe: None,
             deadline: now + TOTAL_TIMEOUT,
             failures,
+            reasons,
         }
     }
 
@@ -107,8 +113,20 @@ impl CaptureData {
         self.failures
     }
 
-    fn finish(&mut self) -> bool {
+    pub fn failure_reasons(&self) -> &[&'static str] {
+        &self.reasons
+    }
+
+    fn fail(&mut self, reason: &'static str) {
+        self.failures += 1;
+        self.reasons.push(reason);
+    }
+
+    fn finish(&mut self, reason: Option<&'static str>) -> bool {
         self.failures += self.types.len() + usize::from(self.pipe.is_some());
+        if let Some(reason) = reason {
+            self.reasons.push(reason);
+        }
         self.types.clear();
         self.pipe = None;
         // Retain policy even if the source disappeared before delivering its
@@ -136,15 +154,19 @@ impl CaptureData {
         mut send: impl FnMut(&str, &Rc<OwnedFd>),
     ) -> bool {
         if now >= self.deadline || !alive {
-            return self.finish();
+            return self.finish(Some(if !alive {
+                "source-ended"
+            } else {
+                "total-timeout"
+            }));
         }
         while *budget > 0 {
             if self.pipe.is_none() {
                 let Some(mime) = self.types.pop_front() else {
-                    return self.finish();
+                    return self.finish(None);
                 };
                 if self.allocated().saturating_add(mime.capacity()) > limit {
-                    self.failures += 1;
+                    self.fail("size-limit");
                     continue;
                 }
                 let pipes = crate::sys::pipe().and_then(|(read, write)| {
@@ -152,7 +174,7 @@ impl CaptureData {
                     Ok((read, write))
                 });
                 let Ok((read, write)) = pipes else {
-                    self.failures += 1;
+                    self.fail("pipe-create");
                     continue;
                 };
                 send(&mime, &Rc::new(write));
@@ -180,7 +202,7 @@ impl CaptureData {
                     // before deciding the producer stopped making progress.
                     if now >= pending.idle {
                         self.pipe = None;
-                        self.failures += 1;
+                        self.fail("idle-timeout");
                         continue;
                     }
                     return false;
@@ -189,7 +211,7 @@ impl CaptureData {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => return false,
                 Err(_) => {
                     self.pipe = None;
-                    self.failures += 1;
+                    self.fail("source-read");
                     continue;
                 }
             };
@@ -202,7 +224,7 @@ impl CaptureData {
             erase_slice(&mut buffer);
             if result.is_err() {
                 self.pipe = None;
-                self.failures += 1;
+                self.fail("size-limit");
             } else {
                 pending.idle = now + IDLE_TIMEOUT;
             }
@@ -262,6 +284,7 @@ mod tests {
         assert_eq!(payload(&c, "application/x-later"), None);
         assert_eq!(payload(&c, "TEXT"), Some(b"legacy text".to_vec()));
         assert_eq!(c.failures(), 1);
+        assert_eq!(c.failure_reasons(), ["idle-timeout"]);
         drop(held);
     }
 
@@ -315,6 +338,14 @@ mod tests {
                 assert_eq!(payload(&c, hint), Some(Vec::new()));
             }
             assert_eq!(c.failures(), 2);
+            assert_eq!(
+                c.failure_reasons(),
+                [if alive {
+                    "total-timeout"
+                } else {
+                    "source-ended"
+                }]
+            );
             assert!(c.fd().is_none());
             drop(held);
         }
