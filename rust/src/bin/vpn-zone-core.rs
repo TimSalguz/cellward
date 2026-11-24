@@ -60,6 +60,10 @@ Usage:
         The config is /var/lib/vpn-zones/system/<name>/config.conf unless
         --config names another file.
 
+  vpn-zone-core system-service <zone> -- <command> [args…]
+        Bind the zone's resolv.conf on /etc/resolv.conf itself in this service's
+        mount namespace, then exec the command here. The Nix daemon's ExecStart.
+
   vpn-zone-core system-run <zone> [--] <command> [args…]
         A console program in a system zone, as the calling user (docs/SYSTEM.md
         §7); what `vpn-zone-sys` runs. The program gets the zone's network and
@@ -227,6 +231,14 @@ fn main() -> ExitCode {
             Ok(parsed) => ExitCode::from(vpn_zone::enter::run(&parsed)),
             Err(e) => {
                 eprintln!("vpn-zone-core container-enter: {e}");
+                eprint!("{USAGE}");
+                ExitCode::from(EXIT_USAGE)
+            }
+        },
+        Some("system-service") => match system::service_exec(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("vpn-zone-core system-service: {e}");
                 eprint!("{USAGE}");
                 ExitCode::from(EXIT_USAGE)
             }

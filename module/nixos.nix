@@ -93,6 +93,13 @@ let
   holderUnit = zone: "vpn-zone-system@${zone}";
   netnsPath = zone: "/run/netns/vz-${zone}";
   resolvPath = zone: "/etc/netns/vz-${zone}/resolv.conf";
+  nixDaemonExecStart =
+    let
+      command =
+        config.systemd.services.nix-daemon.serviceConfig.ExecStart
+          or "${config.nix.package}/bin/nix-daemon --daemon";
+    in
+    if builtins.isList command then lib.last command else command;
 
   # То же правило, что system::check_name в крейте: vz-<имя> — это ещё и имя
   # интерфейса в сети хоста, а их длина кончается на 15.
@@ -151,6 +158,13 @@ let
         # Не ждать выхода зоны: пространство уже есть, сеть в нём появится
         # вместе с туннелем, а локальная сборка VPN не ждёт никогда.
         afterHolder = false;
+        extra = ''
+          # BindReadOnlyPaths выше следует симлинкам /etc/resolv.conf. В том же
+          # ExecStart кладём файл на само имя и входим в демон: замена resolved
+          # stub по rename не отцепляет его, resolver зоны меняется на том же inode.
+          ExecStart=
+          ExecStart=${core} system-service ${cfg.host.nix} -- ${nixDaemonExecStart}
+        '';
       };
     }
     // lib.optionalAttrs (cfg.host.dns != null) {

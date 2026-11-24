@@ -205,7 +205,13 @@ host's network with no rebuild. The drop-in sets:
 
 - `NetworkNamespacePath=/run/netns/vz-<zone>`;
 - `BindReadOnlyPaths=/etc/netns/vz-<zone>/resolv.conf:/etc/resolv.conf` — without the `-`:
-  no resolv.conf, and the unit fails instead of resolving through the host;
+  no resolv.conf, and the unit fails instead of resolving through the host. For `host.nix`,
+  `ExecStart=vpn-zone-core system-service <zone> -- <original command>` lays the file on
+  `/etc/resolv.conf` itself without following its symlink chain, then execs the daemon in that
+  same mount namespace. systemd otherwise mounts it at
+  resolved's stub target; a later atomic replacement of that target detaches the running daemon's
+  mount and exposes the host's `127.0.0.53` stub, where the zone has no listener. The zone writes
+  resolver changes in place, so the same daemon sees them without a restart;
 - `InaccessiblePaths=-/run/nscd -/run/systemd/resolve/io.systemd.Resolve` — both are unix
   sockets and cross namespaces: glibc asks nscd first, nss-resolve asks resolved over
   varlink, and either would resolve names through the host around the tunnel. The `-`
@@ -816,6 +822,10 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   already-attached Nix daemon has neither DNS nor egress. Once the private resolver answers the
   in-zone probe, a retry brings the zone up and the same daemon resolves the test name and
   downloads through it.
+- **VM `tests/vm-daemon-dns.nix`:** the daemon first downloads by name through the router's
+  resolver. After both the zone and daemon are ready, that resolver stops, NetworkManager's source
+  names another one, and resolved's stub is replaced by rename. The same daemon PID still sees the
+  zone's resolver and completes another real fixed-output download by a new name.
 - **VM `tests/vm-host.nix`:** the strict policy. `server` has a LAN address and one outside
   every private range (198.51.100.1) that stands for the internet, with a TCP responder, an
   HTTP file and an NTP server (chrony) there; `machine` runs `strict` with a plain zone `pl`

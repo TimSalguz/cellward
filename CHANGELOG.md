@@ -19,6 +19,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   without granting capture to apps.
 
 ### Fixed
+- Keep the Nix daemon's resolver bound on `/etc/resolv.conf` itself rather than at
+  the end of its symlink chain. Atomic resolved-stub replacement no longer exposes
+  the host loopback stub inside the daemon; plain-zone resolver changes reach the
+  running daemon without a restart.
 - Cross-network application warnings compare the actual container selector.
   Fresh throwaway containers no longer conflict with home or other throwaway
   launches sharing a legacy registry directory; same-container and real-home

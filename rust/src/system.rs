@@ -491,6 +491,26 @@ pub fn run(args: &Args) -> u8 {
     }
 }
 
+/// Bind the zone's resolver on `/etc/resolv.conf` itself and exec the attached
+/// service in that same mount namespace. systemd's BindReadOnlyPaths follows
+/// the symlink chain; on NixOS it ends at resolved's stub, whose replacement by
+/// rename otherwise detaches the mount in the running service.
+pub fn service_exec(argv: &[std::ffi::OsString]) -> Result<(), String> {
+    let (zone, rest) = argv.split_first().ok_or("need a zone name")?;
+    let zone = zone.to_str().ok_or("the zone name has to be UTF-8")?;
+    check_name(zone)?;
+    if rest.first().and_then(|a| a.to_str()) != Some("--") || rest.len() < 2 {
+        return Err("need -- followed by the service's command".to_owned());
+    }
+    let path = resolv_path(zone);
+    let own = crate::rebind::Own::open(&path, Path::new("/etc/resolv.conf"))
+        .map_err(|e| format!("cannot open the service resolver {}: {e}", path.display()))?;
+    own.lay_on_name()
+        .map_err(|e| format!("cannot bind the service resolver on /etc/resolv.conf: {e}"))?;
+    let e = Command::new(&rest[1]).args(&rest[2..]).exec();
+    Err(format!("cannot exec the attached service: {e}"))
+}
+
 // --- THE NAMESPACE -----------------------------------------------------------
 
 fn ns_up(args: &Args) -> Result<(), String> {

@@ -125,8 +125,15 @@ impl Own {
         if self.laid() {
             return Ok(false);
         }
-        sys::attach_tree(&sys::clone_file(&self.file)?, &self.name)?;
+        self.lay_on_name()?;
         Ok(true)
+    }
+
+    /// Lay on the name even when following its links already reaches this
+    /// file. That distinction matters when another mounter followed the links:
+    /// replacing a target further down the chain must not take the file away.
+    pub fn lay_on_name(&self) -> io::Result<()> {
+        sys::attach_tree(&sys::clone_file(&self.file)?, &self.name)
     }
 }
 
