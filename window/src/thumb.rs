@@ -227,7 +227,7 @@ mod tests {
         let full = full_png(&png).unwrap();
         assert_eq!(small.width, MAX_WIDTH);
         assert_eq!((full.width, full.height), (800, 1));
-        for (pixel, value) in full.rgba.chunks_exact(4).zip(data) {
+        for (pixel, value) in full.rgba.as_chunks::<4>().0.iter().zip(data) {
             assert_eq!(pixel, &[value, value, value, 255]);
         }
     }
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(source.scaled(60, 80).unwrap().width, 80);
         let full = source.full().unwrap();
         assert_eq!((full.width, full.height), (800, 1));
-        for (pixel, value) in full.rgba.chunks_exact(4).zip(data) {
+        for (pixel, value) in full.rgba.as_chunks::<4>().0.iter().zip(data) {
             assert_eq!(pixel, &[value, value, value, 255]);
         }
     }

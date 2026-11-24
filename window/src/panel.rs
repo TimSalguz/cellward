@@ -5130,7 +5130,7 @@ mod tests {
             upstream: "missing".into(),
             ..Net::default()
         };
-        assert!(route_diagram(&broken, &[broken.clone()])[0].starts_with("⚠"));
+        assert!(route_diagram(&broken, std::slice::from_ref(&broken))[0].starts_with("⚠"));
         let mut cycle = broken;
         cycle.upstream = "inner".into();
         assert!(route_servers(&cycle, &[cycle.clone()]).is_err());

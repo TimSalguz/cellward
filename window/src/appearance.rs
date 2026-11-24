@@ -261,8 +261,9 @@ fn palette_theme(s: crate::syscolors::SystemColors) -> Theme {
 
 fn theme_cache() -> &'static std::sync::Mutex<Option<(std::time::Instant, Option<Theme>)>> {
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<Option<(Instant, Option<Theme>)>>> = OnceLock::new();
     use std::time::Instant;
+    type CachedTheme = Option<(Instant, Option<Theme>)>;
+    static CACHE: OnceLock<Mutex<CachedTheme>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))
 }
 

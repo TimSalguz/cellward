@@ -837,6 +837,7 @@ impl Window {
                     self.folder_inputs.insert(tag, String::new());
                 }
             }
+            #[allow(clippy::unnecessary_to_owned)]
             Msg::RemoveFolder(i) => {
                 if let Some(paths) = self.folders.get_mut(&self.container_tag().to_owned()) {
                     if i < paths.len() {

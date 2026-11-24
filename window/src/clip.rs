@@ -2030,7 +2030,16 @@ impl Clip {
                     clipd::off_thread(move || {
                         std::thread::sleep(std::time::Duration::from_millis(150));
                         clip_type::type_entry(
-                            target, &socket, &history, id, &mime, timing, mode, lines,
+                            target,
+                            clip_type::Entry {
+                                socket: &socket,
+                                history: &history,
+                                id,
+                                mime: &mime,
+                            },
+                            timing,
+                            mode,
+                            lines,
                         )
                     }),
                     move |r| Msg::Typed(window, r.unwrap_or_else(|| Err("Ввод прерван".into()))),

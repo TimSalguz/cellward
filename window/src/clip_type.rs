@@ -151,14 +151,18 @@ pub fn choose(launch: Option<u32>) -> Result<Target, String> {
     Err("Точка ввода не выбрана".into())
 }
 
+pub struct Entry<'a> {
+    pub socket: &'a Path,
+    pub history: &'a str,
+    pub id: u64,
+    pub mime: &'a str,
+}
+
 /// The entry goes directly from the daemon to the selected launch. No
 /// clipboard selection, process argument or environment value contains it.
 pub fn type_entry(
     target: Target,
-    socket: &Path,
-    history: &str,
-    id: u64,
-    mime: &str,
+    entry: Entry<'_>,
     timing: Timing,
     mode: Mode,
     lines: LineBreaks,
@@ -166,8 +170,11 @@ pub fn type_entry(
     if !timing.valid() {
         return Err("Проверьте задержки ввода".into());
     }
-    let data = crate::clipd::ask(socket, &crate::clipd::get_request(history, id, mime))
-        .map_err(|e| e.text())?;
+    let data = crate::clipd::ask(
+        entry.socket,
+        &crate::clipd::get_request(entry.history, entry.id, entry.mime),
+    )
+    .map_err(|e| e.text())?;
     let bytes = crate::clipd::read_got(data.as_slice())?;
     let text = String::from_utf8(bytes).map_err(|_| "Выбранный текст не в UTF-8")?;
     let text = typing_text(&text, lines)?;
