@@ -19,6 +19,7 @@ rustPlatform.buildRustPackage {
       ./Cargo.lock
       ./src
       ../shared/i18n.rs
+      ../shared/json.rs
       ../shared/clipboard_client.rs
       ../shared/clipboard_endpoint.rs
     ];

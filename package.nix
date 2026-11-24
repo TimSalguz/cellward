@@ -28,6 +28,7 @@ rustPlatform.buildRustPackage {
       ./rust/src
       ./rust/tests
       ./shared/i18n.rs
+      ./shared/json.rs
       ./shared/type_input.rs
       ./shared/clipboard_client.rs
       ./shared/clipboard_endpoint.rs
