@@ -210,7 +210,8 @@ pub fn nsswitch_path(name: &str) -> PathBuf {
 }
 
 /// Whether the zone's way out is up: its holder writes `ready` once the tunnel
-/// (or a plain zone's pasta) is there, and removes it when it goes.
+/// is there, or a plain zone's route and DNS/egress probe have passed, and
+/// removes it when it goes.
 pub fn is_ready(name: &str) -> bool {
     run_dir(name).join(READY).exists()
 }
@@ -383,6 +384,8 @@ pub enum Verb {
     Up,
     /// The tunnel gone, the namespace left with `lo`.
     Down,
+    /// A DNS/egress probe, run by `up` inside a plain zone's namespace.
+    PlainProbe,
 }
 
 impl Verb {
@@ -392,6 +395,7 @@ impl Verb {
             "ns-down" => Some(Self::NsDown),
             "up" => Some(Self::Up),
             "down" => Some(Self::Down),
+            "plain-probe" => Some(Self::PlainProbe),
             _ => None,
         }
     }
@@ -476,6 +480,7 @@ pub fn run(args: &Args) -> u8 {
             down(args);
             Ok(())
         }
+        Verb::PlainProbe => probe_plain(args),
     };
     match result {
         Ok(()) => 0,
@@ -881,6 +886,8 @@ fn watch_uplink(
 /// host has no network of its own (§9).
 fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     let (tools, name) = (&args.tools, args.name.as_str());
+    let core = std::env::current_exe()
+        .map_err(|e| format!("cannot find the current executable for the DNS probe: {e}"))?;
     if !netns_path(name).exists() {
         return Err(format!(
             "{} is missing — vpn-zone-system-ns-{name} has to run first",
@@ -989,6 +996,27 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
     let (mut resolvers, whose) = plain_resolvers(&own_dns);
     println!("system zone {name}: resolvers {whose}");
     write_resolv_text(name, &resolvers, false)?;
+    // A route and a nameserver line are only configuration. Ask the configured
+    // resolver from INSIDE the namespace before calling either readiness. No
+    // answer kills pasta and fails this start for systemd's retry; there is no
+    // probe from, or fallback to, the host's network.
+    // `current_exe`, not `/proc/self/exe`: the latter would re-run `ip`.
+    let probe = exec_in(tools, name, &core)
+        .args(["system-zone", "plain-probe", name])
+        .status();
+    let healthy = match probe {
+        Ok(status) => status.success(),
+        Err(e) => {
+            let _ = pasta.kill();
+            let _ = pasta.wait();
+            return Err(format!("cannot run the plain zone's DNS/egress probe: {e}"));
+        }
+    };
+    if !healthy {
+        let _ = pasta.kill();
+        let _ = pasta.wait();
+        return Err("the configured resolvers did not answer through the zone".to_owned());
+    }
     write_group_readable(&run.join(READY), b"")
         .map_err(|e| format!("cannot write {READY}: {e}"))?;
     println!(
@@ -1022,6 +1050,53 @@ fn up_plain(args: &Args, runas: &str) -> Result<(), String> {
             let _ = fs::rename(&tmp, &status);
         }
         thread::sleep(zone::STATUS_PERIOD);
+    }
+}
+
+/// A query no public Internet name has to answer: every DNS server may answer
+/// it from its own rules, and NXDOMAIN or REFUSED is still a live DNS path.
+fn plain_dns_query() -> Vec<u8> {
+    let mut query = vec![
+        0x56, 0x5a, // Transaction ID: VZ.
+        0x01, 0x00, // Recursion desired; a server need not honour it.
+        0x00, 0x01, // One question.
+        0x00, 0x00, // No answers in the query.
+        0x00, 0x00, // No authority records.
+        0x00, 0x00, // No additional records.
+        0x09, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x00,
+    ];
+    query.extend([0x00, 0x01, 0x00, 0x01]); // A, IN.
+    query
+}
+
+/// A complete answer to our question, not a stray datagram with a guessed ID.
+/// The response code is deliberately not judged: private resolvers are allowed
+/// to refuse or deny names; a matching answer proves DNS and egress are alive.
+fn plain_dns_answer(query: &[u8], reply: &[u8]) -> bool {
+    reply.len() >= query.len()
+        && query.len() >= 12
+        && reply[..2] == query[..2]
+        && reply[2] & 0x80 != 0
+        && reply[4..6] == [0x00, 0x01]
+        && reply[12..query.len()] == query[12..]
+}
+
+/// The child half of the readiness probe. `up_plain` reaches this verb only
+/// through `ip netns exec`, so these sockets can never use the host's network.
+fn probe_plain(args: &Args) -> Result<(), String> {
+    let text = fs::read_to_string(resolv_path(&args.name))
+        .map_err(|e| format!("cannot read the plain zone's resolvers: {e}"))?;
+    let resolvers = crate::dnsfwd::nameservers(&text);
+    if resolvers.is_empty() {
+        return Err("the plain zone has no resolver to probe".to_owned());
+    }
+    let query = plain_dns_query();
+    let reply = crate::dnsfwd::forward_udp(&query, &resolvers)
+        .ok_or("no configured resolver answered through the plain zone")?;
+    if plain_dns_answer(&query, &reply) {
+        Ok(())
+    } else {
+        Err("a configured resolver returned a malformed DNS answer".to_owned())
     }
 }
 
@@ -1755,6 +1830,32 @@ mod tests {
     }
 
     #[test]
+    fn plain_health_accepts_a_real_answer_without_requiring_public_names() {
+        let query = plain_dns_query();
+        let mut answer = query.clone();
+        answer[2] |= 0x80;
+        for rcode in [0x00, 0x02, 0x03, 0x05] {
+            answer[3] = rcode;
+            assert!(plain_dns_answer(&query, &answer), "rcode {rcode}");
+        }
+
+        answer[3] = 0;
+        answer[2] &= !0x80;
+        assert!(!plain_dns_answer(&query, &answer), "not an answer");
+        answer[2] |= 0x80;
+        answer[0] ^= 1;
+        assert!(!plain_dns_answer(&query, &answer), "another transaction");
+        answer[0] ^= 1;
+        answer[4..6].copy_from_slice(&[0, 0]);
+        assert!(!plain_dns_answer(&query, &answer), "no question");
+        answer[4..6].copy_from_slice(&[0, 1]);
+        answer[13] = b'x';
+        assert!(!plain_dns_answer(&query, &answer), "another question");
+        answer[13] = b'l';
+        assert!(!plain_dns_answer(&query, &answer[..12]), "truncated");
+    }
+
+    #[test]
     fn a_zones_own_resolvers_are_addresses_only() {
         assert_eq!(
             parse_dns(
@@ -1844,6 +1945,10 @@ mod tests {
             Verb::NsDown
         );
         assert_eq!(Args::parse(&os(&["down", "nl"])).unwrap().verb, Verb::Down);
+        assert_eq!(
+            Args::parse(&os(&["plain-probe", "pl"])).unwrap().verb,
+            Verb::PlainProbe
+        );
 
         assert!(Args::parse(&os(&[])).is_err());
         assert!(Args::parse(&os(&["start", "nl"])).is_err());

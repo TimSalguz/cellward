@@ -38,6 +38,8 @@ let
 
         services.cellward.system = {
           enable = true;
+          # This test uses none of the polkit-gated switches.
+          switchGroup = null;
           # Not at boot: the configs only exist once the test has written them.
           zones.t2 = {
             autoStart = false;
@@ -50,9 +52,10 @@ let
           zones.p2 = {
             kind = "plain";
             uplink = "eth2";
-            # Its own resolvers, as a plain zone with an uplink must have; the
-            # test looks no name up through it.
-            dns = [ "9.9.9.9" ];
+            # Its own resolver on the second network, as a plain zone with an
+            # uplink must have. Readiness really asks it, even though the test
+            # looks no other name up through the zone.
+            dns = [ "192.168.2.2" ];
           };
           # Strict: the host itself has no way out but the local network, so
           # the uplinks' pasta has to be let out by its owner.
@@ -60,6 +63,7 @@ let
           egress = {
             enable = true;
             mode = "strict";
+            emergency.group = null;
           };
         };
 
@@ -84,9 +88,16 @@ let
         environment.systemPackages = [
           pkgs.wireguard-tools
           pkgs.socat
+          pkgs.dnsmasq
         ];
-        networking.firewall.allowedUDPPorts = [ 51820 ];
-        networking.firewall.allowedTCPPorts = [ 8090 ];
+        networking.firewall.allowedUDPPorts = [
+          53
+          51820
+        ];
+        networking.firewall.allowedTCPPorts = [
+          53
+          8090
+        ];
         networking.firewall.trustedInterfaces = [ "wg0" ];
         virtualisation.memorySize = 768;
       };
@@ -131,6 +142,13 @@ let
               "systemd-run --unit=lan socat TCP-LISTEN:8090,fork,reuseaddr "
               "'SYSTEM:echo peer=$SOCAT_PEERADDR'"
           )
+          # p2's readiness probe asks this private resolver; no public DNS or
+          # Internet service is needed. dnsmasq answers localhost itself.
+          server.succeed(
+              "systemd-run --unit=dns dnsmasq -k --port=53 --bind-interfaces "
+              f"--listen-address={server_ip2} --no-resolv"
+          )
+          server.wait_for_open_port(53, server_ip2)
           # Both tunnels' endpoint is on the second network only.
           for zone, address in [("t2", "10.99.0.2"), ("t1", "10.99.0.3")]:
               machine.succeed(
