@@ -122,6 +122,24 @@ pub fn parse(text: &str) -> Scheme {
     s
 }
 
+#[cfg(test)]
+pub fn many_flows(mut scheme: Scheme, total: usize) -> Scheme {
+    let flow = scheme
+        .rows
+        .iter()
+        .find(|row| row.id == "main:nl:socat:data")
+        .cloned()
+        .expect("the sample's data flow");
+    while scheme.rows.len() < total {
+        let n = scheme.rows.len();
+        let mut row = flow.clone();
+        row.id = format!("synthetic:flow:{n}");
+        row.name = format!("synthetic-{n}");
+        scheme.rows.push(row);
+    }
+    scheme
+}
+
 const COLW: f32 = 172.0;
 const BOXW: f32 = 136.0;
 const LEFT: f32 = 18.0;
@@ -956,6 +974,10 @@ pub struct Under {
     at: Option<(usize, usize)>,
     still: canvas::Cache,
     lines: canvas::Cache,
+    #[cfg(test)]
+    still_draws: std::cell::Cell<usize>,
+    #[cfg(test)]
+    line_draws: std::cell::Cell<usize>,
     #[allow(clippy::type_complexity)]
     drawn: std::cell::RefCell<Option<((u64, bool), (Option<String>, Option<String>))>>,
 }
@@ -1026,12 +1048,16 @@ impl<M> canvas::Program<M> for View<'_, M> {
         }
         let size = bounds.size();
         vec![
-            state
-                .still
-                .draw(renderer, size, |frame| self.still(frame, &ink)),
-            state
-                .lines
-                .draw(renderer, size, |frame| self.lines(frame, &ink)),
+            state.still.draw(renderer, size, |frame| {
+                #[cfg(test)]
+                state.still_draws.set(state.still_draws.get() + 1);
+                self.still(frame, &ink);
+            }),
+            state.lines.draw(renderer, size, |frame| {
+                #[cfg(test)]
+                state.line_draws.set(state.line_draws.get() + 1);
+                self.lines(frame, &ink);
+            }),
         ]
     }
 
@@ -1599,6 +1625,67 @@ mod tests {
     }
 
     #[test]
+    fn repeated_readings_and_hover_reuse_the_canvas_caches() {
+        use iced::widget::canvas::Program as _;
+
+        let renderer = iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+        let metro = Metro::new(parse(SAMPLE));
+        let under = Under::default();
+        let bounds = Rectangle::with_size(Size::new(metro.width, metro.height));
+        let draw = |metro: &Metro, focus: Option<&str>| {
+            let view = View::<()> {
+                metro,
+                focus,
+                pinned: None,
+                hover: |_| (),
+                pin: |_| (),
+            };
+            std::hint::black_box(view.draw(
+                &under,
+                &renderer,
+                &Theme::Light,
+                bounds,
+                mouse::Cursor::Unavailable,
+            ));
+        };
+        let draws = || (under.still_draws.get(), under.line_draws.get());
+
+        draw(&metro, None);
+        assert_eq!(draws(), (1, 1));
+        draw(&metro, None);
+        assert_eq!(draws(), (1, 1));
+
+        let mut traffic = Metro::new(metro.scheme.clone());
+        traffic.stamp = metro.stamp;
+        traffic.scheme.rows[0].out_bytes += 500;
+        traffic.scheme.rows[0].count += 1;
+        draw(&traffic, None);
+        assert_eq!(draws(), (1, 1));
+
+        let focused = metro.scheme.rows[0].id.clone();
+        draw(&metro, Some(&focused));
+        assert_eq!(draws(), (1, 2));
+        draw(&metro, Some(&focused));
+        assert_eq!(draws(), (1, 2));
+
+        let lane = &metro.lanes[0];
+        let (a, b, _) = metro.stretch(lane, 0);
+        let mid = curve_at(a, b, 0.5);
+        let view = View::<()> {
+            metro: &metro,
+            focus: None,
+            pinned: None,
+            hover: |_| (),
+            pin: |_| (),
+        };
+        let mut pointer = Under::default();
+        let event = canvas::Event::Mouse(mouse::Event::CursorMoved { position: mid });
+        let cursor = mouse::Cursor::Available(mid);
+        assert!(view.update(&mut pointer, &event, bounds, cursor).is_some());
+        assert!(view.update(&mut pointer, &event, bounds, cursor).is_none());
+    }
+
+    #[test]
     fn nested_tunnels_advance_through_their_own_columns() {
         let m = Metro::new(parse(CHAIN));
         let lane = m
@@ -1654,5 +1741,136 @@ mod tests {
         assert_eq!(a.same_drawing(&b), a.scheme.rows[0].count == 0);
         b.scheme.rows[0].hops[0].sees = "stranger".into();
         assert!(!a.same_drawing(&b));
+    }
+
+    #[test]
+    #[ignore = "performance measurement; run explicitly with --nocapture"]
+    fn scheme_performance_metro() {
+        use iced::advanced::graphics::geometry::Renderer as _;
+        use iced::advanced::renderer::Headless as _;
+        use iced::advanced::Renderer as _;
+        use iced::widget::canvas::Program as _;
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+
+        let started = std::time::Instant::now();
+        let metro = Metro::new(many_flows(parse(SAMPLE), 500));
+        println!("scheme rows: {}", metro.lanes.len());
+        println!(
+            "metro layout (off UI thread): {:.3} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+
+        let points: Vec<Point> = metro
+            .lanes
+            .iter()
+            .take(100)
+            .flat_map(|lane| {
+                (0..lane.path.len().saturating_sub(1)).map(|i| {
+                    let (a, b, _) = metro.stretch(lane, i);
+                    curve_at(a, b, 0.5)
+                })
+            })
+            .collect();
+        let hits = median(
+            (0..7)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    for point in &points {
+                        std::hint::black_box(metro.hit(*point));
+                    }
+                    started.elapsed().as_secs_f64() * 1000.0 / points.len() as f64
+                })
+                .collect(),
+        );
+        println!(
+            "hit-test / pointer event: {hits:.3} ms ({} curved points)",
+            points.len()
+        );
+
+        let mut renderer = iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+        let under = Under::default();
+        let bounds = Rectangle::with_size(Size::new(metro.width, metro.height));
+        let draw = |focus: Option<&str>, under: &Under, renderer: &iced::Renderer| {
+            let view = View::<()> {
+                metro: &metro,
+                focus,
+                pinned: None,
+                hover: |_| (),
+                pin: |_| (),
+            };
+            view.draw(
+                under,
+                renderer,
+                &Theme::Light,
+                bounds,
+                mouse::Cursor::Unavailable,
+            )
+        };
+        let geometry = |samples: usize, alternate: bool| {
+            median(
+                (0..samples)
+                    .map(|n| {
+                        let focus = alternate
+                            .then_some(metro.scheme.rows[n % metro.scheme.rows.len()].id.as_str());
+                        let started = std::time::Instant::now();
+                        std::hint::black_box(draw(focus, &under, &renderer));
+                        started.elapsed().as_secs_f64() * 1000.0
+                    })
+                    .collect(),
+            )
+        };
+        let cold = median(
+            (0..5)
+                .map(|_| {
+                    let under = Under::default();
+                    let started = std::time::Instant::now();
+                    std::hint::black_box(draw(None, &under, &renderer));
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect(),
+        );
+        println!("canvas geometry cold: {cold:.3} ms");
+        println!("canvas geometry warm cache: {:.3} ms", geometry(15, false));
+        println!(
+            "canvas geometry hover/line invalidation: {:.3} ms",
+            geometry(7, true)
+        );
+
+        let viewport = Rectangle::with_size(Size::new(1280.0, 720.0));
+        let mut raster = |samples: usize, alternate: bool| {
+            let measured: Vec<(f64, u64)> = (0..samples)
+                .map(|n| {
+                    let focus = alternate
+                        .then_some(metro.scheme.rows[n % metro.scheme.rows.len()].id.as_str());
+                    renderer.reset(viewport);
+                    renderer.start_layer(viewport);
+                    for geometry in draw(focus, &under, &renderer) {
+                        renderer.draw_geometry(geometry);
+                    }
+                    renderer.end_layer();
+                    let started = std::time::Instant::now();
+                    let pixels = renderer.screenshot(Size::new(1280, 720), 1.0, Color::WHITE);
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&pixels, &mut hasher);
+                    let hash = std::hash::Hasher::finish(&hasher);
+                    std::hint::black_box(pixels);
+                    (started.elapsed().as_secs_f64() * 1000.0, hash)
+                })
+                .collect();
+            (
+                median(measured.iter().map(|(time, _)| *time).collect()),
+                measured.last().unwrap().1,
+            )
+        };
+        let (warm, warm_hash) = raster(5, false);
+        println!("tiny-skia raster warm cache: {warm:.3} ms");
+        println!("tiny-skia warm RGBA hash: {warm_hash:016x}");
+        let (hover, hover_hash) = raster(5, true);
+        println!("tiny-skia raster hover/line invalidation: {hover:.3} ms");
+        println!("tiny-skia hover RGBA hash: {hover_hash:016x}");
     }
 }

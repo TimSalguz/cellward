@@ -1,6 +1,6 @@
 # Vendored crates
 
-`iced_tiny_skia` 0.14.1, as published, with three changes marked `cellward:`:
+`iced_tiny_skia` 0.14.1, as published, with four changes marked `cellward:`:
 
 - `src/layer.rs`: a text's damage is expanded by `TEXT_OVERHANG` (2 px), as a
   quad's is by one: its glyphs' antialiased edges and overhangs reach past its
@@ -12,5 +12,8 @@
 - `src/window/compositor.rs`: changing the number or bounds of layers damages
   the whole viewport, because translated primitives can extend beyond their
   layer's previous and current clip rectangles.
+- `src/engine.rs`: unwrapped canvas text is culled vertically before shaping,
+  and an infinite local clip does not rebuild the layer's clip mask for every
+  text item.
 
-Drop it when iced has all three.
+Drop it when iced has all four.

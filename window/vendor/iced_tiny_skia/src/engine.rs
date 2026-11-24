@@ -1,4 +1,5 @@
 use crate::Primitive;
+use crate::core::alignment;
 use crate::core::renderer::Quad;
 use crate::core::{
     Background, Color, Gradient, Rectangle, Size, Transformation, Vector,
@@ -415,17 +416,50 @@ impl Engine {
                 shaping,
                 clip_bounds: local_clip_bounds,
             } => {
+                // cellward: infinite-bounds canvas text still has finite glyph
+                // lines. Do not shape lines wholly outside the damage.
+                if bounds.width.is_infinite() && bounds.height.is_infinite() {
+                    let height = f32::from(*line_height)
+                        * content.split('\n').count().max(1) as f32;
+                    let y = match align_y {
+                        alignment::Vertical::Top => bounds.y,
+                        alignment::Vertical::Center => bounds.y - height / 2.0,
+                        alignment::Vertical::Bottom => bounds.y - height,
+                    };
+                    let text_bounds = (Rectangle {
+                        x: bounds.x,
+                        y,
+                        width: 1.0,
+                        height,
+                    })
+                    .expand(2.0)
+                        * transformation;
+                    if text_bounds.y >= clip_bounds.y + clip_bounds.height
+                        || text_bounds.y + text_bounds.height <= clip_bounds.y
+                    {
+                        return;
+                    }
+                }
+
                 let physical_bounds = *local_clip_bounds * transformation;
 
                 if !clip_bounds.intersects(&physical_bounds) {
                     return;
                 }
 
-                let clip_mask = match physical_bounds.is_within(&clip_bounds) {
-                    true => None,
-                    false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
-                        Some(clip_mask as &_)
+                // cellward: the layer mask is already set; an infinite local
+                // clip must not clear and refill it once per text item.
+                let clip_mask = if local_clip_bounds.width.is_infinite()
+                    && local_clip_bounds.height.is_infinite()
+                {
+                    None
+                } else {
+                    match physical_bounds.is_within(&clip_bounds) {
+                        true => None,
+                        false => {
+                            adjust_clip_mask(clip_mask, clip_bounds);
+                            Some(clip_mask as &_)
+                        }
                     }
                 };
 
