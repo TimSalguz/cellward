@@ -886,8 +886,9 @@ in
           ];
           wants = [ "network-online.target" ];
           serviceConfig = {
-            # READY=1 — после настройки туннеля и resolv.conf зоны: всё,
-            # что идёт следом, стартует уже с сетью, а не с одним lo.
+            # READY=1 — после настройки туннеля, а для plain-зоны после
+            # проверки default route и DNS/egress через namespace: всё, что
+            # идёт следом, стартует уже с сетью, а не с одним lo.
             Type = "notify";
             ExecStart = "${core} system-zone up ${tools} %i";
             # После любой остановки, и после неудачного старта тоже:

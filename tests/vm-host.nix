@@ -152,8 +152,9 @@ let
             "--no-resolv --address=/internal/10.66.0.1"
             "--dhcp-range=192.168.1.100,192.168.1.150,1h"
             "--dhcp-option=6,${config.networking.primaryIPAddress}"
-            # No default route: nmhost needs the LAN only.
-            "--dhcp-option=3"
+            # The LAN router is also the default gateway. No public Internet is
+            # needed: direct0's readiness route and private DNS probe stay here.
+            "--dhcp-option=3,${config.networking.primaryIPAddress}"
           ];
         };
         networking.interfaces.eth1.ipv4.addresses = [
