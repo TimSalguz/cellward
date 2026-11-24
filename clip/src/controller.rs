@@ -826,6 +826,67 @@ mod tests {
     }
 
     #[test]
+    fn private_recording_rebinds_a_replaced_scope_with_the_same_id() {
+        let h = Harness::new();
+        let mut first_owner = Lease::new();
+        let mut first = Client::new(
+            endpoint::bind(&h.runtime, "work", "work", first_owner.fd.as_fd())
+                .unwrap()
+                .data,
+        )
+        .unwrap();
+        let recorder = crate::private_history::start(&h.runtime);
+        exchange(
+            &mut first,
+            Request::Set(&[("text/plain", b"before replacement")]),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Ok(entry) = recorder.try_recv() {
+                assert_eq!(entry.contents[0].1.as_slice(), b"before replacement");
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        first_owner.child.kill().unwrap();
+        first_owner.child.wait().unwrap();
+        drop(first_owner);
+        let second_owner = Lease::new();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let second = loop {
+            if let Ok(bound) = endpoint::bind(&h.runtime, "work", "work", second_owner.fd.as_fd()) {
+                break bound;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut second = Client::new(second.data).unwrap();
+        exchange(
+            &mut second,
+            Request::Set(&[("text/plain", b"after replacement")]),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            if let Ok(entry) = recorder.try_recv() {
+                assert_eq!(entry.history, "work");
+                assert_eq!(entry.contents[0].1.as_slice(), b"after replacement");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "private recorder kept the replaced scope's tap"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(recorder.try_recv().is_err());
+    }
+
+    #[test]
     fn preview_and_confirm_bind_the_same_copy_and_both_live_scopes() {
         let h = Harness::new();
         let source = Lease::new();
