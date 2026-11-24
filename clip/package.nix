@@ -22,6 +22,7 @@ rustPlatform.buildRustPackage {
       ../shared/json.rs
       ../shared/clipboard_client.rs
       ../shared/clipboard_endpoint.rs
+      ../shared/clipboard_scope.rs
     ];
   };
   sourceRoot = "source/clip";

@@ -70,6 +70,7 @@ rustPlatform.buildRustPackage {
       ./vendor
       ../shared/i18n.rs
       ../shared/type_input.rs
+      ../shared/clipboard_scope.rs
     ];
   };
   sourceRoot = "source/window";
