@@ -829,14 +829,43 @@ fn listed_one(
     max: Option<usize>,
 ) -> Listed {
     let container = crate::instance::container_of(&i.id).map(str::to_owned);
-    let table = read(&i.dir).map(|(mut flows, names)| {
+    let mut table = read(&i.dir).map(|(mut flows, names)| {
         flows.sort_by(|a, b| {
             (b.last, b.out_bytes.saturating_add(b.in_bytes))
                 .cmp(&(a.last, a.out_bytes.saturating_add(a.in_bytes)))
         });
-        flows.truncate(max.unwrap_or(usize::MAX));
         (flows, names)
     });
+    let denied = std::fs::File::open(i.dir.join(crate::verdicts::FILE))
+        .ok()
+        .and_then(|file| crate::verdicts::Table::map(file.as_fd(), false).ok())
+        .map(|table| {
+            table
+                .entries()
+                .into_iter()
+                .filter(|(_, verdict)| *verdict == crate::verdicts::Verdict::Deny)
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Some((flows, _)) = &mut table {
+        for key in denied {
+            if !flows.iter().any(|flow| flow.key == key) {
+                flows.push(Flow {
+                    key,
+                    first: 0,
+                    last: 0,
+                    out_bytes: 0,
+                    in_bytes: 0,
+                    out_packets: 1,
+                    in_packets: 0,
+                });
+            }
+        }
+    }
+    if let Some((flows, _)) = &mut table {
+        flows.truncate(max.unwrap_or(usize::MAX));
+    }
     let registry = tools
         .state
         .join(".running")
