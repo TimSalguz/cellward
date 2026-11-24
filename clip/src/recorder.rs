@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 pub const MARK_PREFIX: &str = "application/x-cellward-clip-";
 /// Below the runtime directory: the instances' secrets and histories.
 pub const MARKS_DIR: &str = "vpn-zones/clip";
-/// The history of a copy no launch of cellward made.
-pub const HOST: &str = "host";
+/// The history of a copy no launch of cellward made, also used by the real home.
+pub use crate::clipboard_scope::HOST;
 /// A launch's word for "keep none".
 pub const NO_HISTORY: &str = "-";
 /// What a password manager offers beside a secret it copies.
@@ -90,7 +90,10 @@ impl Marks {
                 && secret.bytes().all(|b| b.is_ascii_hexdigit())
                 && valid_history(history)
             {
-                self.by_secret.insert(secret.to_owned(), history.to_owned());
+                self.by_secret.insert(
+                    secret.to_owned(),
+                    crate::clipboard_scope::canonical_history(history).to_owned(),
+                );
             }
         }
     }
@@ -124,6 +127,7 @@ impl Marks {
 
 /// Whether `name` may name a history.
 pub fn valid_history(name: &str) -> bool {
+    let name = crate::clipboard_scope::canonical_history(name);
     name == NO_HISTORY
         || (!name.is_empty()
             && name.len() <= 128
@@ -256,7 +260,45 @@ mod tests {
         fs::write(dir.join("i-4"), format!("{late}\nmain\n")).unwrap();
         assert_eq!(
             marks.whose(&types(&[&mark(late)])),
-            Whose::History("main".to_owned())
+            Whose::History(HOST.to_owned())
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn real_home_network_marks_and_unmarked_desktop_use_one_history() {
+        let base = std::env::temp_dir().join(format!(
+            "clip-main-marks-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = base.join(MARKS_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        let secrets = [
+            ("DE", "11111111111111111111111111111111", "main:DE"),
+            ("NL", "22222222222222222222222222222222", "main:NL"),
+            ("work", "33333333333333333333333333333333", "work"),
+        ];
+        for (id, secret, history) in secrets {
+            fs::write(dir.join(id), format!("{secret}\n{history}\n")).unwrap();
+        }
+        let mut marks = Marks::new(&base);
+        for (_, secret, _) in &secrets[..2] {
+            assert_eq!(
+                marks.whose(&types(&[&format!("{MARK_PREFIX}{secret}")])),
+                Whose::History(HOST.to_owned())
+            );
+        }
+        assert_eq!(
+            marks.whose(&types(&["text/plain"])),
+            Whose::History(HOST.to_owned())
+        );
+        assert_eq!(
+            marks.whose(&types(&[&format!("{MARK_PREFIX}{}", secrets[2].1)])),
+            Whose::History("work".to_owned())
         );
         let _ = fs::remove_dir_all(&base);
     }

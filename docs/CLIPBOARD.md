@@ -205,7 +205,12 @@ launches. See [the broker implementation and validation](PRIVATE-CLIPBOARD-BROKE
 
 With `clipboard.history = true`, the recorder also owns one host tray icon.
 Its click opens `vpn-zone-window clip --manager`: the host and each history
-that has been created appear as tabs. The manager can browse and explicitly
+that has been created appear as tabs. The desktop and built-in real home share
+one canonical **Host** history: `main` and legacy `main:<network>` are aliases,
+not separate tabs. The **Host** copy destination remains the shared desktop
+selection; real-home network holders retain their separate lifetimes and direct
+same-home paste behavior. Other containers keep isolated histories and active
+scopes. The manager can browse and explicitly
 **copy** an entry into another history; switching tabs or copying between
 histories does not set an active selection. The separate **Copy to selected
 clipboard** action replaces the chosen live destination. The source history
@@ -270,6 +275,19 @@ The host daemon stores history in
 - `.favorites/<container>/` — encrypted favourites;
 - `.secrets/<container>/` — encrypted password shelves.
 
+`main` and valid legacy `main:<network>` names map to `host` in endpoint
+registration, recording, daemon requests and manager tabs. At daemon startup,
+ordinary, favourite and password entries in those legacy directories are
+imported into the corresponding `host` shelf in ascending source-id order.
+The source directories and their records are left in place. An exact-content
+match already in the destination is skipped without changing its id, copy/paste
+events or preview, so retries and overlapping old histories create no visible
+duplicates and do not rewrite existing entries. Per-source empty markers below
+`.shared-main-v1/` make completed imports idempotent; an interrupted import is
+safe to resume. Migration logs names and errors only, never clipboard contents.
+Aliases continue to address the merged history, and a migration failure stops
+the updated daemon rather than silently showing an incomplete merge.
+
 The store's top-level directory is 0700. More importantly, the **whole
 `vpn-zones` state directory is covered by the container's mount policy**;
 the allowlist does not bind `.clipboard` back. This applies to real-home
@@ -319,9 +337,10 @@ copied is untrusted on the host; other images are named. A text shows
 preview. Opened from the frame's ≡ («Вставить из истории буфера…») or the
 window menu.
 
-A clipboard manager of cellward's own, by container: each container's copies
-in a history of its own, the host's in one of its own; a copy goes to another
-container only when the person moves it there in the window.
+A clipboard manager of cellward's own, by container: each private container's
+copies in a history of its own, and the desktop plus real home in the shared
+`host` history; a copy goes to another container only when the person moves it
+there in the window.
 
 - **What records.** One daemon on the host, `cellward clipd`, watching the
   compositor's selection through `data-control` (still closed to containers).

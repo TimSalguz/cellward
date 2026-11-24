@@ -81,6 +81,13 @@ select active destinations. Frame history receives the exact supervisor's
 scope. Legacy/unverified isolated windows cannot fall back to host history
 paste. Unconfined launches use the shared host clipboard explicitly.
 
+For persistent history, the desktop and built-in real home use the canonical
+`host` scope. Endpoint labels `main` and legacy `main:<network>` map there;
+private container labels do not. This does not enable host fallback or merge
+other containers' active scopes. Real-home network holders keep their existing
+direct same-home paste behavior, and **Host** remains the explicit desktop
+selection destination.
+
 `tests/private-clipboard-smoke.py` exercises independent launches, CLIPBOARD
 and PRIMARY, text and real PNG larger than a pipe buffer, a late reader, a host
 data-control observer, foreign instances, direct private history recording,

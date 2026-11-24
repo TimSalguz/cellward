@@ -1446,8 +1446,14 @@ impl Clip {
             Msg::Tabs(result) => {
                 self.tabs_loading = false;
                 match result {
-                    Ok(mut names) => {
+                    Ok(names) => {
                         self.tabs_error = None;
+                        let mut names: Vec<String> = names
+                            .into_iter()
+                            .map(|name| crate::clipboard_scope::canonical_history(&name).to_owned())
+                            .collect();
+                        self.history =
+                            crate::clipboard_scope::canonical_history(&self.history).to_owned();
                         names.push("host".to_owned());
                         names.push(self.history.clone());
                         names.sort();
@@ -2223,7 +2229,7 @@ impl Clip {
         }
         if !self.secrets {
             page = page.push(
-                text("Копирование заменяет только выбранный активный буфер. Буфер хоста общий для приложений рабочего стола. Переключение вкладок ничего не копирует.")
+                text("Копирование заменяет только выбранный активный буфер. «Хост» — общая история рабочего стола и настоящего дома (main и всех его сетей). Переключение вкладок ничего не копирует.")
                     .size(12)
                     .style(dim)
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
@@ -3413,6 +3419,7 @@ pub fn run(args: &[String]) -> iced::Result {
         eprintln!("vpn-zone-window clip: needs --history <name>");
         std::process::exit(2);
     };
+    let history = crate::clipboard_scope::canonical_history(&history).to_owned();
     let title = title.unwrap_or_else(|| {
         if manager {
             "Буферы Cellward".to_owned()
@@ -3496,7 +3503,8 @@ mod tests {
             ClipboardTarget::Instance("chosen".into()),
             ClipboardTarget::Instance("new-target".into()),
         ])));
-        assert_eq!(c.tabs, ["host", "main", "new-history"]);
+        assert_eq!(c.tabs, ["host", "new-history"]);
+        assert_eq!(c.history, "host");
         assert_eq!(c.target, ClipboardTarget::Instance("chosen".into()));
         assert!(c.target_available);
         assert_eq!(c.targets.len(), 3);
@@ -3925,6 +3933,25 @@ mod tests {
             Ok("ordinary history".to_owned()),
         ));
         assert!(c.whole.is_empty());
+    }
+
+    #[test]
+    fn real_home_and_legacy_network_histories_form_one_manager_tab() {
+        let mut c = Clip::new("main".to_owned(), false, PathBuf::from("/nonexistent/sock"));
+        c.manager = true;
+        let _ = c.update(Msg::Tabs(Ok(vec![
+            "main".into(),
+            "main:DE".into(),
+            "main:NL".into(),
+            "host".into(),
+            "work".into(),
+        ])));
+        assert_eq!(c.history, "host");
+        assert_eq!(c.tabs, ["host", "work"]);
+        let _ = c.update(Msg::Switch("main:DE".into()));
+        assert_eq!(c.history, "host");
+        let _ = c.update(Msg::Switch("work".into()));
+        assert_eq!(c.history, "work");
     }
 
     #[test]

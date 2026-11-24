@@ -170,23 +170,40 @@ struct Store {
 }
 
 impl Store {
+    fn canonical_name(name: &str) -> String {
+        if let Some(real) = name.strip_prefix("@favorites:") {
+            format!(
+                "@favorites:{}",
+                clipstore::clipboard_scope::canonical_history(real)
+            )
+        } else if let Some(real) = name.strip_prefix("@secrets:") {
+            format!(
+                "@secrets:{}",
+                clipstore::clipboard_scope::canonical_history(real)
+            )
+        } else {
+            clipstore::clipboard_scope::canonical_history(name).to_owned()
+        }
+    }
+
     fn history(&mut self, name: &str) -> Result<&mut History, String> {
+        let name = Self::canonical_name(name);
         let (dir, real) = if let Some(real) = name.strip_prefix("@favorites:") {
             (self.dir.join(".favorites"), real)
         } else if let Some(real) = name.strip_prefix("@secrets:") {
             (self.dir.join(".secrets"), real)
         } else {
-            (self.dir.clone(), name)
+            (self.dir.clone(), name.as_str())
         };
         if !recorder::valid_history(real) || real == recorder::NO_HISTORY {
             return Err(format!("«{name}» — не имя истории"));
         }
-        if !self.open.contains_key(name) {
+        if !self.open.contains_key(&name) {
             let h =
                 History::open(&dir.join(real), &self.key).map_err(|e| format!("{name}: {e}"))?;
-            self.open.insert(name.to_owned(), h);
+            self.open.insert(name.clone(), h);
         }
-        Ok(self.open.get_mut(name).expect("just opened"))
+        Ok(self.open.get_mut(&name).expect("just opened"))
     }
 
     fn names(&self) -> Vec<String> {
@@ -197,9 +214,98 @@ impl Store {
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| recorder::valid_history(n) && n != recorder::NO_HISTORY)
+            .map(|n| clipstore::clipboard_scope::canonical_history(&n).to_owned())
             .collect();
         names.sort();
+        names.dedup();
         names
+    }
+
+    /// Import legacy real-home histories without deleting or rewriting their
+    /// records. Identical contents already in the destination keep their
+    /// original ids and events. A per-source marker makes retries cheap; a
+    /// crash before the marker is safe because importing is idempotent.
+    fn migrate_main_histories(&mut self) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        for (subdirectory, shelf, marker_prefix) in [
+            ("", "", "ordinary:"),
+            (".favorites", "@favorites:", "favorites:"),
+            (".secrets", "@secrets:", "secrets:"),
+        ] {
+            let base = self.dir.join(subdirectory);
+            let entries = match std::fs::read_dir(&base) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("{}: {e}", base.display())),
+            };
+            let mut aliases = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name != recorder::HOST
+                    && clipstore::clipboard_scope::canonical_history(&name) == recorder::HOST
+                    && recorder::valid_history(&name)
+                {
+                    aliases.push(name);
+                }
+            }
+            aliases.sort();
+            for alias in aliases {
+                let markers = self.dir.join(".shared-main-v1");
+                let marker = markers.join(format!("{marker_prefix}{alias}"));
+                match std::fs::symlink_metadata(&marker) {
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(format!("{}: {e}", marker.display())),
+                }
+                let source = History::open(&base.join(&alias), &self.key)
+                    .map_err(|e| format!("{shelf}{alias}: {e}"))?;
+                let mut ids = Vec::new();
+                let mut before = None;
+                loop {
+                    let page = source
+                        .query(&clipstore::Query::default(), before, 200)
+                        .map_err(|e| format!("{shelf}{alias}: {e}"))?;
+                    if page.is_empty() {
+                        break;
+                    }
+                    before = page.iter().copied().min();
+                    ids.extend(page);
+                }
+                ids.sort_unstable();
+                let target_name = format!("{shelf}{}", recorder::HOST);
+                for id in ids {
+                    let entry = source
+                        .get(id)
+                        .map_err(|e| format!("{shelf}{alias}: {e}"))?
+                        .ok_or_else(|| format!("{shelf}{alias}: запись исчезла при миграции"))?;
+                    let target = self.history(&target_name)?;
+                    if !target
+                        .contains_contents(&entry.contents)
+                        .map_err(|e| e.to_string())?
+                    {
+                        target.import(&entry).map_err(|e| e.to_string())?;
+                    }
+                }
+                self.history(&target_name)?
+                    .sync()
+                    .map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(&markers).map_err(|e| e.to_string())?;
+                let marker_file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(&marker)
+                    .map_err(|e| format!("{}: {e}", marker.display()))?;
+                marker_file.sync_all().map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn entry(&mut self, name: &str, id: u64) -> Result<clipstore::Entry, String> {
@@ -212,8 +318,9 @@ impl Store {
     /// Purge matching text even when a favourite kept HTML or a different
     /// text MIME alongside it. Other buffers are not touched implicitly.
     fn clean_password_copies(&mut self, name: &str, content: &Content) -> Result<(), String> {
+        let name = Self::canonical_name(name);
         for shelf in [name.to_owned(), format!("@favorites:{name}")] {
-            if shelf.starts_with('@') && !self.dir.join(".favorites").join(name).is_dir() {
+            if shelf.starts_with('@') && !self.dir.join(".favorites").join(&name).is_dir() {
                 continue;
             }
             let history = self.history(&shelf)?;
@@ -244,6 +351,7 @@ impl Store {
         if name.starts_with('@') {
             return Err("нужно имя буфера, не полки".into());
         }
+        let name = Self::canonical_name(name);
         let preview = secret_preview(label)?;
         let text = clipstore::protocol::decode(text).ok_or("текст пароля не читается")?;
         if text.len() > 32 * 1024 {
@@ -264,18 +372,22 @@ impl Store {
             .replace(id, vec![content.clone()], preview)
             .map_err(|e| e.to_string())?
             .ok_or("записи нет")?;
-        self.clean_password_copies(name, &content)?;
+        self.clean_password_copies(&name, &content)?;
         Ok(new)
     }
 
     fn move_secret(&mut self, from: &str, id: u64, to: &str) -> Result<u64, String> {
-        if from.starts_with('@') || to.starts_with('@') || from == to {
+        if from.starts_with('@') || to.starts_with('@') {
+            return Err("нужны два разных буфера".into());
+        }
+        let (from, to) = (Self::canonical_name(from), Self::canonical_name(to));
+        if from == to {
             return Err("нужны два разных буфера".into());
         }
         // Validate the target before constructing any nested shelf path.
-        if !recorder::valid_history(to)
+        if !recorder::valid_history(&to)
             || to == recorder::NO_HISTORY
-            || !self.names().iter().any(|n| n == to)
+            || !self.names().iter().any(|n| n == &to)
         {
             return Err("буфера назначения нет".into());
         }
@@ -286,7 +398,7 @@ impl Store {
         let target = self.history(&destination)?;
         let added = target.import(&entry).map_err(|e| e.to_string())?.id();
         target.sync().map_err(|e| e.to_string())?;
-        self.clean_password_copies(to, &content)?;
+        self.clean_password_copies(&to, &content)?;
         let source = self.history(&source)?;
         source.delete(id).map_err(|e| e.to_string())?;
         source.sync().map_err(|e| e.to_string())?;
@@ -417,16 +529,17 @@ impl Store {
                 let Ok(id) = id.parse::<u64>() else {
                     return error(&"не номер");
                 };
+                let (from, to) = (Self::canonical_name(from), Self::canonical_name(to));
                 if from == to {
                     return error(&"это та же история");
                 }
-                let entry = match self.history(from).map(|h| h.get(id)) {
+                let entry = match self.history(&from).map(|h| h.get(id)) {
                     Ok(Ok(Some(entry))) => entry,
                     Ok(Ok(None)) => return error(&"записи нет"),
                     Ok(Err(e)) => return error(&e),
                     Err(e) => return error(&e),
                 };
-                match self.history(to).map(|h| h.import(&entry)) {
+                match self.history(&to).map(|h| h.import(&entry)) {
                     Ok(Ok(added)) => Reply::Text(format!("ok\t{}\n", added.id())),
                     Ok(Err(e)) => error(&e),
                     Err(e) => error(&e),
@@ -439,7 +552,8 @@ impl Store {
                 if name.starts_with("@favorites:") || name.starts_with("@secrets:") {
                     return error(&"запись уже из избранного");
                 }
-                let entry = match self.history(name).map(|h| h.get(id)) {
+                let name = Self::canonical_name(name);
+                let entry = match self.history(&name).map(|h| h.get(id)) {
                     Ok(Ok(Some(entry))) => entry,
                     Ok(Ok(None)) => return error(&"записи нет"),
                     Ok(Err(e)) => return error(&e),
@@ -459,11 +573,12 @@ impl Store {
                 if name.starts_with('@') {
                     return error(&"паролем можно отметить только запись истории");
                 }
+                let name = Self::canonical_name(name);
                 let preview = match secret_preview(label) {
                     Ok(p) => p,
                     Err(e) => return error(&e),
                 };
-                let entry = match self.history(name).map(|h| h.get(id)) {
+                let entry = match self.history(&name).map(|h| h.get(id)) {
                     Ok(Ok(Some(entry))) => entry,
                     Ok(Ok(None)) => return error(&"записи нет"),
                     Ok(Err(e)) => return error(&e),
@@ -488,7 +603,7 @@ impl Store {
                     Ok(Err(e)) => return error(&e),
                     Err(e) => return error(&e),
                 };
-                match self.clean_password_copies(name, &content) {
+                match self.clean_password_copies(&name, &content) {
                     Ok(()) => Reply::Text(format!("ok\t{}\n", added.id())),
                     Err(e) => error(&e),
                 }
@@ -548,7 +663,8 @@ impl Store {
     }
 
     fn keep(&mut self, history: &str, entry: NewEntry) {
-        if self.dir.join(".secrets").join(history).is_dir() {
+        let history = Self::canonical_name(history);
+        if self.dir.join(".secrets").join(&history).is_dir() {
             if let Some(content) = password_content(&entry.contents) {
                 let secret = format!("@secrets:{history}");
                 match self
@@ -564,7 +680,7 @@ impl Store {
                 }
             }
         }
-        match self.history(history) {
+        match self.history(&history) {
             Ok(h) => {
                 if let Err(e) = h.append(entry) {
                     eprintln!("cellward-clip: история {history}: {e}");
@@ -1081,6 +1197,10 @@ fn daemon(dir: &Path) -> ExitCode {
         key,
         open: HashMap::new(),
     };
+    if let Err(e) = store.migrate_main_histories() {
+        eprintln!("cellward-clip: не объединить старые истории main в host: {e}; исходные записи не удалены");
+        return ExitCode::from(1);
+    }
     let private_history = clipstore::private_history::start(&runtime);
     tray::start();
     eprintln!("cellward-clip: пишу историю в {}", dir.display());
@@ -1566,6 +1686,197 @@ mod tests {
         };
         assert_eq!(store.entry("@secrets:other", moved).unwrap(), entry);
         assert!(store.entry("@secrets:host", saved).is_err());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_real_home_histories_merge_without_rewrites_duplicates_or_private_leaks() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("cw-shared-main-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = Key::load_or_create(&dir.join("key")).unwrap();
+        let text = |value: &str, copied_at| NewEntry {
+            copied_at,
+            contents: vec![Content {
+                mime: "text/plain".into(),
+                data: value.as_bytes().to_vec(),
+            }],
+            preview: None,
+        };
+        let entries = |history: &History| {
+            let mut entries = Vec::new();
+            let mut before = None;
+            loop {
+                let ids = history
+                    .query(&clipstore::Query::default(), before, 200)
+                    .unwrap();
+                if ids.is_empty() {
+                    break;
+                }
+                before = ids.iter().copied().min();
+                entries.extend(ids.into_iter().map(|id| history.get(id).unwrap().unwrap()));
+            }
+            entries
+        };
+
+        let mut host = History::open(&dir.join("host"), &key).unwrap();
+        let original_id = host.append(text("host shared", 100)).unwrap().id();
+        host.append(text("host only", 110)).unwrap();
+        let original = host.get(original_id).unwrap().unwrap();
+        drop(host);
+        let mut main = History::open(&dir.join("main"), &key).unwrap();
+        main.append(text("host shared", 200)).unwrap();
+        main.append(text("main only", 210)).unwrap();
+        let main_before = entries(&main);
+        drop(main);
+        let mut de = History::open(&dir.join("main:DE"), &key).unwrap();
+        de.append(text("main only", 300)).unwrap();
+        de.append(text("DE only", 310)).unwrap();
+        drop(de);
+        let mut nl = History::open(&dir.join("main:NL"), &key).unwrap();
+        nl.append(text("NL only", 320)).unwrap();
+        drop(nl);
+        let mut work = History::open(&dir.join("work"), &key).unwrap();
+        work.append(text("private work", 400)).unwrap();
+        drop(work);
+        let mut favorite = History::open(&dir.join(".favorites/main"), &key).unwrap();
+        favorite.append(text("main favorite", 120)).unwrap();
+        drop(favorite);
+        let mut secret = History::open(&dir.join(".secrets/main"), &key).unwrap();
+        let mut hidden = text("synthetic password", 130);
+        hidden.preview = Some("Пароль: synthetic".into());
+        secret.append(hidden).unwrap();
+        drop(secret);
+        drop(key);
+
+        let mut store = Store {
+            dir: dir.clone(),
+            key: Key::load_or_create(&dir.join("key")).unwrap(),
+            open: HashMap::new(),
+        };
+        store.migrate_main_histories().unwrap();
+        assert_eq!(store.names(), ["host", "work"]);
+        assert_eq!(store.entry("host", original_id).unwrap(), original);
+        let ids = store
+            .history("main:DE")
+            .unwrap()
+            .query(&clipstore::Query::default(), None, 20)
+            .unwrap();
+        let mut previews: Vec<String> = ids
+            .into_iter()
+            .map(|id| {
+                store
+                    .history("host")
+                    .unwrap()
+                    .summary(id)
+                    .unwrap()
+                    .unwrap()
+                    .preview
+            })
+            .collect();
+        previews.sort();
+        assert_eq!(
+            previews,
+            [
+                "DE only",
+                "NL only",
+                "host only",
+                "host shared",
+                "main only"
+            ]
+        );
+        assert_eq!(
+            store
+                .history("work")
+                .unwrap()
+                .query(&clipstore::Query::default(), None, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .history("@favorites:main:NL")
+                .unwrap()
+                .query(&clipstore::Query::default(), None, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .history("@secrets:main")
+                .unwrap()
+                .query(&clipstore::Query::default(), None, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            store.answer("search\t@secrets:main:DE\tq=synthetic"),
+            Reply::Text(ref answer) if answer.starts_with("error\t")
+        ));
+
+        let main_after = History::open(
+            &dir.join("main"),
+            &Key::load_or_create(&dir.join("key")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(entries(&main_after), main_before);
+        drop(main_after);
+        let count = store
+            .history("host")
+            .unwrap()
+            .query(&clipstore::Query::default(), None, 20)
+            .unwrap()
+            .len();
+        store.migrate_main_histories().unwrap();
+        assert_eq!(
+            store
+                .history("host")
+                .unwrap()
+                .query(&clipstore::Query::default(), None, 20)
+                .unwrap()
+                .len(),
+            count,
+            "a repeated migration must not duplicate entries"
+        );
+        assert_eq!(store.entry("main", original_id).unwrap(), original);
+
+        for (scope, value) in [
+            ("main:DE", "new DE"),
+            ("main:NL", "new NL"),
+            ("host", "new host"),
+        ] {
+            store.keep(scope, text(value, 500));
+        }
+        assert_eq!(
+            store
+                .history("host")
+                .unwrap()
+                .query(&clipstore::Query::default(), None, 20)
+                .unwrap()
+                .len(),
+            count + 3
+        );
+        let Reply::Text(host_list) = store.answer("list\thost\t20") else {
+            panic!()
+        };
+        for alias in ["main", "main:DE", "main:NL"] {
+            let Reply::Text(alias_list) = store.answer(&format!("list\t{alias}\t20")) else {
+                panic!()
+            };
+            assert_eq!(alias_list, host_list);
+        }
+        assert!(matches!(
+            store.answer(&format!("move\tmain:DE\t{original_id}\thost")),
+            Reply::Text(ref answer) if answer.starts_with("error\t")
+        ));
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
     }

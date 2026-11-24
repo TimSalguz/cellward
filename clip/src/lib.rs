@@ -1,6 +1,6 @@
 //! The clipboard history's store and its search (`docs/CLIPBOARD.md`, «The
-//! history»): one [`History`] per directory — one per container, one for
-//! the host. No Wayland and no window here: the daemon that records copies
+//! history»): one [`History`] per directory — one per private container, and
+//! one shared by the desktop and real home. No Wayland and no window here: the daemon that records copies
 //! and the window that shows them are built on this API.
 //!
 //! **What an entry is.** An id (a `u64`, growing, never reused — not even
@@ -99,6 +99,8 @@ pub mod broker_transport;
 pub mod clipboard_client;
 #[path = "../../shared/clipboard_endpoint.rs"]
 pub mod clipboard_endpoint;
+#[path = "../../shared/clipboard_scope.rs"]
+pub mod clipboard_scope;
 pub mod controller;
 pub mod input_authority;
 pub mod private_history;

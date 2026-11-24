@@ -42,6 +42,8 @@ mod appearance;
 mod checklist;
 mod clip;
 mod clip_type;
+#[path = "../../shared/clipboard_scope.rs"]
+mod clipboard_scope;
 mod clipd;
 mod days;
 #[path = "../../shared/i18n.rs"]

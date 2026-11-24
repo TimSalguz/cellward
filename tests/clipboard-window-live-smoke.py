@@ -80,12 +80,14 @@ def main():
                 request = data.decode().strip()
                 requests.append(request)
                 if request == 'histories':
-                    answer = b'host\n'
+                    answer = b'host\nmain\nmain:DE\nmain:NL\nwork\n'
                     if lists_epoch[0]:
                         answer += b'app-one\n'
                         answer += b'work-browser\nnotes\nmail\npasswords\nresearch\nshared\n'
                 elif request == 'instances':
-                    answer = b'app-one\trunning\n' if lists_epoch[0] else b''
+                    answer = b'main:DE\thost\nmain:NL\thost\nwork\twork\n'
+                    if lists_epoch[0]:
+                        answer += b'app-one\trunning\n'
                 elif request.startswith('search\thost\t'):
                     answer = b'1\t1700000000000\t1700000000000\t1\t0\t0\ttext/plain:12\tInitial clip\n'
                     if epoch[0]:
@@ -141,6 +143,7 @@ def main():
         window = start([args.window, 'clip', '--manager', '--clipboard-instance', 'app-one'], 'window')
         wire.wait_for(lambda: any(r.startswith('search\thost\t') for r in requests))
         time.sleep(.3)
+        subprocess.run([args.grim, str(root / 'shared-main-tabs.png')], env=env, check=True)
         before = len(requests)
         epoch[0] = True
         lists_epoch[0] = True
@@ -191,6 +194,7 @@ def main():
         assert window.returncode == 1, f'close control exited with {window.returncode}'
         subprocess.run([args.grim, str(root / 'after-close.png')], env=env, check=True)
         assert not any(r.startswith(('copy\t', 'copy-to\t', 'select\t')) for r in requests)
+        assert not any(r.startswith(('search\tmain\t', 'search\tmain:DE\t', 'search\tmain:NL\t')) for r in requests)
         vk.close()
         print('PASS: live lists and target state update; cached full image; Escape returns to detail; close control exits without clipboard mutation', flush=True)
     finally:
