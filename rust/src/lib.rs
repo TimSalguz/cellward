@@ -176,6 +176,7 @@ pub mod panel;
 pub mod permissions;
 pub mod picker;
 pub mod place;
+pub mod pool;
 pub mod presets;
 pub mod profile;
 pub mod protect;

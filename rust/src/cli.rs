@@ -311,8 +311,15 @@ pub fn started_up(state: &Path, name: &OsStr) -> bool {
 /// desktop once it is taking a while: the wait has no clock of its own, and
 /// a stuck start is the person's to end.
 pub fn start_zone(tools: &Tools, name: &OsStr, notify: bool) -> u8 {
+    let already_up = zone_up(&tools.state, name).is_some();
     if name != launch::HOST {
         let label = name.to_string_lossy();
+        if !already_up {
+            if let Err(e) = crate::pool::prepare_start(tools, &label) {
+                eprintln!("маршрут {label}: {e}");
+                return 1;
+            }
+        }
         match crate::chain::published_zone(&tools.state, &label) {
             Ok(true) => {}
             Ok(false) => {
@@ -332,7 +339,7 @@ pub fn start_zone(tools: &Tools, name: &OsStr, notify: bool) -> u8 {
             return 1;
         }
     }
-    if zone_up(&tools.state, name).is_some() {
+    if already_up {
         return systemctl(tools, "start", name);
     }
     let text = name.to_string_lossy().into_owned();
@@ -362,6 +369,13 @@ pub fn start_zone(tools: &Tools, name: &OsStr, notify: bool) -> u8 {
     drop(done_w);
     if let Some(notice) = notice {
         let _ = notice.join();
+    }
+    if code == 0 && name != launch::HOST && zone_up(&tools.state, name).is_some() {
+        let label = name.to_string_lossy();
+        if let Err(e) = crate::pool::maintain(tools, &label) {
+            eprintln!("маршрут {label}: {e}");
+            return 1;
+        }
     }
     code
 }

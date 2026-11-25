@@ -12,7 +12,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use vpn_zone::{
-    adapter_process, bus_filter, console, desktop, dnsfwd, egress, fs_sandbox, openconnect,
+    adapter_process, bus_filter, console, desktop, dnsfwd, egress, fs_sandbox, openconnect, pool,
     profile, sysrun, system, wl_sandbox, zone,
 };
 
@@ -301,6 +301,7 @@ fn main() -> ExitCode {
             }
         },
         Some("doctor-probe") => ExitCode::from(vpn_zone::doctor::probe_main(&args[1..])),
+        Some("pool-probe") => ExitCode::from(pool::probe_main(&args[1..])),
         Some("user-launch-handoff") => {
             ExitCode::from(vpn_zone::user_launch::handoff_main(&args[1..]))
         }

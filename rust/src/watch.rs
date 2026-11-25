@@ -301,6 +301,16 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
             continue;
         }
         let memory_file = memory_dir.join(&name);
+        if crate::cli::zone_up(&tools.state, name.as_ref()).is_some() {
+            match crate::pool::maintain(tools, &name) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("cellward watch: {e}");
+                    let _ = fs::remove_file(&memory_file);
+                    continue;
+                }
+            }
+        }
         if zone_pid(&tools.state, name.as_ref()).is_none() {
             // A zone that is down is nobody's alarm, and its old counters mean
             // nothing to the next start.

@@ -18,24 +18,41 @@ pub const SECTION: &str = "Chain";
 pub const NODE_SECTION: &str = "Node";
 pub const NODES_DIR: &str = ".nodes";
 
-/// A route config may name one pooled tunnel config. The route contains no
-/// secret; the node file is the single source of its key and endpoint.
-pub fn node_of(ini: &WgConfig) -> Result<Option<String>, String> {
+/// A route config names one or more pooled tunnel configs in preference order.
+/// The route contains no secret; each node file is the single source of its key
+/// and endpoint.
+pub fn nodes_of(ini: &WgConfig) -> Result<Option<Vec<String>>, String> {
     let Some(section) = ini.section(NODE_SECTION) else {
         return Ok(None);
     };
-    let name = section
+    if ini
+        .sections
+        .iter()
+        .filter(|s| s.name.eq_ignore_ascii_case(NODE_SECTION))
+        .count()
+        != 1
+    {
+        return Err("[Node] may occur only once".to_owned());
+    }
+    let names = section
         .get("Name")
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or("[Node] needs Name = <node>")?;
-    if !crate::cli::safe_zone_name(std::ffi::OsStr::new(name)) {
-        return Err("[Node] has an invalid name".to_owned());
-    }
+        .ok_or("[Node] needs Name = <node>[, <node>…]")?;
     if section.entries.len() != 1 {
         return Err("[Node] accepts only Name".to_owned());
     }
-    Ok(Some(name.to_owned()))
+    let mut nodes = Vec::new();
+    for name in names.split(',').map(str::trim) {
+        if !crate::cli::safe_zone_name(std::ffi::OsStr::new(name)) {
+            return Err("[Node] has an invalid or empty name".to_owned());
+        }
+        if nodes.iter().any(|node| node == name) {
+            return Err("[Node] names an alternative twice".to_owned());
+        }
+        nodes.push(name.to_owned());
+    }
+    Ok(Some(nodes))
 }
 
 pub fn validate_node(ini: &WgConfig) -> Result<(), String> {
@@ -70,39 +87,50 @@ pub fn validate_node(ini: &WgConfig) -> Result<(), String> {
 pub fn read_zone_config(state: &Path, zone: &str) -> Result<Vec<u8>, String> {
     let path = state.join(zone).join("config.conf");
     let route = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    resolve_route_config(state, &route).map_err(|e| format!("{}: {e}", path.display()))
+    resolve_route_config_at(state, Some(zone), &route)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Resolve a proposed route, whose first alternative is also its initial one.
 pub fn resolve_route_config(state: &Path, route: &[u8]) -> Result<Vec<u8>, String> {
+    resolve_route_config_at(state, None, route)
+}
+
+fn resolve_route_config_at(
+    state: &Path,
+    zone: Option<&str>,
+    route: &[u8],
+) -> Result<Vec<u8>, String> {
     let route_ini = WgConfig::parse(route).map_err(|e| e.to_string())?;
-    let Some(node) = node_of(&route_ini)? else {
+    let pool = crate::pool::PoolConfig::from_ini(&route_ini)?;
+    let Some(nodes) = nodes_of(&route_ini)? else {
         return Ok(route.to_vec());
     };
-    // No config directives besides Node and Chain may be smuggled into a
+    // No config directives besides Node, Pool and Chain may be smuggled into a
     // reference: the transport identity comes from one node file alone.
     if route_ini.sections.iter().any(|s| {
-        !s.name.eq_ignore_ascii_case(NODE_SECTION) && !s.name.eq_ignore_ascii_case(SECTION)
+        !s.name.eq_ignore_ascii_case(NODE_SECTION)
+            && !s.name.eq_ignore_ascii_case(SECTION)
+            && !s.name.eq_ignore_ascii_case(crate::pool::SECTION)
     }) {
-        return Err("a node route may contain only [Node] and [Chain]".to_owned());
+        return Err("a node route may contain only [Node], [Pool] and [Chain]".to_owned());
     }
     if route_ini
         .sections
         .iter()
-        .filter(|s| s.name.eq_ignore_ascii_case(NODE_SECTION))
+        .filter(|s| s.name.eq_ignore_ascii_case(SECTION))
         .count()
-        != 1
-        || route_ini
-            .sections
-            .iter()
-            .filter(|s| s.name.eq_ignore_ascii_case(SECTION))
-            .count()
-            > 1
+        > 1
         || route_ini
             .section(SECTION)
             .is_some_and(|s| s.entries.len() != 1)
     {
         return Err("a node route needs one [Node] and at most one [Chain] Via".to_owned());
     }
+    let node = match (zone, pool) {
+        (Some(zone), Some(pool)) => crate::pool::active(&state.join(zone), &pool.nodes)?,
+        _ => nodes[0].clone(),
+    };
     let node_path = state.join(NODES_DIR).join(&node).join("config.conf");
     let mut raw =
         fs::read(&node_path).map_err(|e| format!("cannot read pooled node {node}: {e}"))?;
@@ -876,6 +904,35 @@ mod tests {
         assert!(refuse_user_shortcut_with(&state, "inner", &ini, Some(&allow)).is_err());
         fs::remove_file(pool.join("config.conf")).unwrap();
         assert!(read_zone_config(&state, "inner").is_err());
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn ordered_pool_resolves_the_persisted_node_with_the_same_chain() {
+        let state = state("ordered-pool");
+        for (node, key) in [("first", "first-secret"), ("second", "second-secret")] {
+            let dir = state.join(NODES_DIR).join(node);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("config.conf"),
+                format!("[Interface]\nPrivateKey = {key}\n[Peer]\nEndpoint = 192.0.2.7:51820\n"),
+            )
+            .unwrap();
+        }
+        let route = "[Node]\nName = first, second\n[Chain]\nViaUser = outer\n[Pool]\nProbeDNS = probe.test\nProbeEgress = 192.0.2.10:80\n";
+        installed(&state, "pooled", route);
+        let first = read_zone_config(&state, "pooled").unwrap();
+        assert!(String::from_utf8(first).unwrap().contains("first-secret"));
+        fs::write(state.join("pooled").join(crate::pool::ACTIVE), "second\n").unwrap();
+        let second = read_zone_config(&state, "pooled").unwrap();
+        let second = String::from_utf8(second).unwrap();
+        assert!(second.contains("second-secret"));
+        assert!(!second.contains("first-secret"));
+        assert!(second.contains("[Chain]\nViaUser = outer\n"));
+        assert!(!second.contains("[Pool]"));
+        assert!(resolve_route_config(&state, route.as_bytes()).is_ok());
+        fs::write(state.join("pooled/config.conf"), "[Node]\nName = first, second\n[Pool]\nProbeDNS = probe.test\nProbeEgress = localhost:80\n").unwrap();
+        assert!(read_zone_config(&state, "pooled").is_err());
         fs::remove_dir_all(state).unwrap();
     }
 
