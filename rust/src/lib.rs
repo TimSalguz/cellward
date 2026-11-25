@@ -158,6 +158,7 @@ pub mod launch_perms;
 pub mod links;
 pub mod microphone;
 pub mod mime;
+pub mod mtu;
 pub mod netask;
 pub mod netmap;
 pub mod netqueue;

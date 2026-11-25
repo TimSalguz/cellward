@@ -92,6 +92,7 @@ const VERBS: &[&str] = &[
     "status",
     "traffic",
     "transport",
+    "mtu",
     "explain",
     "run",
     "launch",
@@ -333,6 +334,10 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 strs(&mut out, &["--json"]);
             }
             "explain" if pos == 4 => strs(&mut out, &["--json"]),
+            "mtu" => {
+                owned(&mut out, &snap.zones);
+                strs(&mut out, &["--json"]);
+            }
             "transport" if pos == 2 => strs(&mut out, &["list", "check"]),
             "transport" if pos == 3 && word(2) == "check" => return vec![FILES.to_string()],
             "transport" if pos == 3 && word(2) == "list" => strs(&mut out, &["--json"]),

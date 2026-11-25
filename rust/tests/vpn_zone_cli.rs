@@ -283,6 +283,42 @@ fn transport_inventory_and_manifest_check_never_execute_the_adapter() {
 }
 
 #[test]
+fn mtu_reports_each_down_hop_without_calling_external_tools() {
+    let home = Home::new("mtu-report");
+    let outer = home.state().join("outer");
+    let inner = home.state().join("inner");
+    let node = home.state().join(".nodes/inner-tunnel");
+    fs::create_dir_all(&outer).unwrap();
+    fs::create_dir_all(&inner).unwrap();
+    fs::create_dir_all(&node).unwrap();
+    let config = crlf_config().replace(
+        "Address = 10.99.0.2/32",
+        "Address = 10.99.0.2/32\r\nMTU = 1400",
+    );
+    fs::write(outer.join("config.conf"), &config).unwrap();
+    fs::write(
+        node.join("config.conf"),
+        config.replace(
+            "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg=",
+            "MDEyMzQ1Njc4OUFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFk=",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        inner.join("config.conf"),
+        "[Node]\nName = inner-tunnel\n[Chain]\nViaUser = outer\n",
+    )
+    .unwrap();
+    let out = home.run(&["mtu", "inner", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("\"zone\":\"inner\""), "{text}");
+    assert!(text.contains("\"zone\":\"outer\""), "{text}");
+    assert_eq!(text.matches("\"configured_mtu\":1400").count(), 2, "{text}");
+    assert_eq!(text.matches("\"effective_mtu\":null").count(), 2, "{text}");
+}
+
+#[test]
 fn the_help_works_without_a_manifest() {
     // Somebody who ran the binary without the wrapper has to be told what this
     // is, not what is missing.
