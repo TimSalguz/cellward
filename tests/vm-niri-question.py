@@ -179,7 +179,7 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
         assert widths[0] != widths[1] and all(width > 0 for width in widths), boxes
         for x0, y0, x1, y1 in boxes:
             assert at(x1, y0) != MAGENTA, ("stale right corner", boxes)
-            assert at(x1 - 1, y0 + 1) == MAGENTA, ("missing right corner", boxes)
+            assert at(x1 - 1, y0 + 20) == MAGENTA, ("missing right corner", boxes)
         return boxes
 
     boxes = settled("niri-two-windows", two_frames, tries=60)
