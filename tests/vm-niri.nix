@@ -245,7 +245,7 @@ let
 
       feet = (
           "foot --app-id niri-foot & "
-          "while [ ! -e /tmp/niri-second-window ]; do sleep 0.2; done; "
+          "while [ ! -e /home/alice/niri-second-window ]; do sleep 0.2; done; "
           "foot --app-id niri-foot-second & wait"
       )
       alice(

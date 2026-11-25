@@ -136,7 +136,7 @@ with subtest("an unanswered panel stays on its window: no hand-over, no answer b
     alice("systemctl --user stop niri-panel-stays")
 
 with subtest("two windows of one launch resize and keep their hover buttons usable"):
-    alice("touch /tmp/niri-second-window")
+    alice("touch /home/alice/niri-second-window")
     machine.wait_until_succeeds(
         f"su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
         f"{niri_cmd} windows' | grep -F '\"app_id\":\"niri-foot-second\"'",
