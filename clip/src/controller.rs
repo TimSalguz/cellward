@@ -617,7 +617,7 @@ mod tests {
             Self::configured(|_| ()).0
         }
         fn configured<T>(setup: impl FnOnce(&mut Controller) -> T) -> (Self, T) {
-            let runtime = std::env::temp_dir().join(format!(
+            let runtime = PathBuf::from("/tmp").join(format!(
                 "cw-controller-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
