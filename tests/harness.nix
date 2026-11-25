@@ -651,8 +651,8 @@ in
   '';
 
   # То же для экземпляра контейнера (юнит vpn-zone-container@, этап 1
-  # контейнерного дизайна): `container-holder <id>` без systemd — смоук
-  # поднимает экземпляр сам. Имя экземпляра в юните — %I.
+  # контейнерного дизайна): `container-holder <id>` — ExecStart временного
+  # delegated user-service в смоуке. Имя экземпляра в юните — %I.
   containerHolder = pkgs.writeShellScriptBin "container-holder" ''
     exec ${lib.replaceStrings [ " %I" ] [ "" ] containerHolderExecLine} "''${1:?нужен id экземпляра}"
   '';

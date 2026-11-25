@@ -47,14 +47,17 @@
   `runner` / `/home/runner`).
 
 - **`integration/smoke.sh`** — смоук: поднимает настоящую зону в
-  непривилегированном userns и проверяет её изнутри через `nsenter`.
+  непривилегированном userns и проверяет её изнутри через `nsenter`. Для strict
+  network нужен `systemd --user`: экземпляры запускаются временными юнитами с
+  делегированной cgroup; установленный шаблон получает только runtime override,
+  файлы в домашнюю конфигурацию не устанавливаются.
 
 - **`vm.nix`** — VM-тест на фреймворке NixOS-тестов: qemu-машина с настоящим
-  systemd, пользователем и home-manager-модулем. Проверяет ровно то, до чего
-  смоук не дотягивается — на раннере нет сессионного systemd: `cellward
-  up/down` через юнит `vpn-zone@`, автоподъём юнита внутри `cellward run`,
-  offline-ветку пикера (она поднимает экземпляр контейнера,
-  `vpn-zone-container@`, через `systemctl --user`) и сами экземпляры
+  systemd, пользователем и home-manager-модулем. Проверяет установленные юниты и
+  остальное, до чего смоук не дотягивается: `cellward up/down` через юнит
+  `vpn-zone@`, автоподъём юнита внутри `cellward run`, offline-ветку пикера
+  (она поднимает экземпляр контейнера, `vpn-zone-container@`, через
+  `systemctl --user`) и сами экземпляры
   (`tests/vm-instance-offline.py`: зона offline не поднимается вовсе, у двух
   контейнеров разные сети, остановка по последней программе, `container
   kill`, стирание одноразового слоя; `tests/vm-promise-pidns.py`: своё
@@ -186,12 +189,12 @@
    жизни. Поэтому тестам нужен Nix, как и его libseccomp; пути в store
    адресуются содержимым и уходят при сборке мусора.
 4. **integration** — подготовка раннера (снять AppArmor-запрет на userns,
-   `modprobe wireguard`, `uidmap` + диапазоны в `/etc/subuid`/`subgid`) и
-   запуск `tests/integration/smoke.sh`.
+   `modprobe wireguard`, `uidmap` + диапазоны в `/etc/subuid`/`subgid`, запустить
+   `systemd --user`) и запуск `tests/integration/smoke.sh`.
 5. **vm** — VM-тест `tests/vm.nix` (см. выше): правило udev открывает
-   `/dev/kvm` раннеру, `nix-build -A driver` и запуск драйвера. Это
-   единственный job, где есть сессионный systemd, живой WireGuard-сервер и
-   ядерный модуль `amneziawg` (он собирается здесь же, против ядра VM).
+   `/dev/kvm` раннеру, `nix-build -A driver` и запуск драйвера. Здесь есть живой
+   WireGuard-сервер и ядерный модуль `amneziawg` (он собирается здесь же, против
+   ядра VM).
 6. **vm-audio** — `tests/vm-audio.nix`: настоящие PipeWire и WirePlumber
    пользователя в VM с политикой из модуля NixOS — её включает единый вход
    `programs.cellward.enable` (он же ставит модуль home-manager и грузит
@@ -240,11 +243,11 @@
   `WAYLAND_DISPLAY`/`DISPLAY` и обязан взять этот выбор, сказать об этом в
   stderr, записать метку и запустить команду через `cellward run` — в реестре
   запуск записан уже как `unconfined`. Интерактивные ветки
-  здесь проверить нельзя, а ветку offline — нечем: она поднимает экземпляр
-  контейнера через `systemctl --user`, которого на раннере нет;
+  здесь проверить нельзя, а offline остаётся за VM с
+  установленным home-manager-юнитом, а не временным юнитом смоука;
 - offline-зона: только `lo`, default route нет (аплинка и pasta у неё нет вовсе);
-- экземпляр контейнера `smoke-inst` (`vpn-zone-core container-holder`
-  напрямую, без юнита): его корень — ЧЕТВЁРТЫЙ подчинённый id (`subuid+3`),
+- экземпляр контейнера `smoke-inst` (`vpn-zone-core container-holder` в
+  delegated user-service): его корень — ЧЕТВЁРТЫЙ подчинённый id (`subuid+3`),
   а не корень зон; запуск `cellward run offline --container smoke-inst`
   попадает в сеть экземпляра — не хоста, в ней только `lo`; реестр запусков
   `.running` изнутри не виден; `TERM` держателю закрывает и программу, и сам

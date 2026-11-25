@@ -506,6 +506,12 @@ jobs:
           u=$(id -un)
           grep -q "^$u:" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$u"
           grep -q "^$u:" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$u"
+          # Strict smoke запускает контейнеры только в делегированных cgroup.
+          sudo loginctl enable-linger "$u"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          systemctl --user show-environment >/dev/null
           echo "--- итог ---"
           grep "^$u:" /etc/subuid /etc/subgid
       - name: Смоук-тест
@@ -513,4 +519,7 @@ jobs:
         # OpenConnect-зону (ocserv под sudo в сети хоста) обязана отработать, а
         # не пропуститься: без этой переменной смоук на машине без sudo
         # честно её пропускает, а здесь такой пропуск был бы тихой дырой в CI.
-        run: VPN_ZONE_SMOKE_REQUIRE_OC=1 tests/integration/smoke.sh
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          VPN_ZONE_SMOKE_REQUIRE_OC=1 tests/integration/smoke.sh

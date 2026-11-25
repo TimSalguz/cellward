@@ -44,7 +44,7 @@ STATE="$HOME/.local/state/vpn-zones"
 PROFILES="$HOME/.local/state/vpn-profiles"
 TEST_ZONES=(smoke smoke-crlf offsmoke ocsmoke)
 # Экземпляр контейнера без сети (этап 1 контейнерного дизайна): свой
-# контейнер-слой, держатель запускается напрямую, как держатель зоны.
+# контейнер-слой и delegated user-service для strict network.
 INST=smoke-inst
 TEST_PROFILE=smoketest-prof
 # Доверенный сертификат: контейнер, который ему доверяет, и соседний, который нет.
@@ -83,10 +83,22 @@ cleanup() {
   for f in "$WORK"/units/*.pid; do
     [ -f "$f" ] && kill -TERM "$(cat "$f")" 2>/dev/null
   done
+  for f in "$WORK"/units/*.runtime; do
+    [ -f "$f" ] || continue
+    unit=$(basename "$f" .runtime)
+    systemctl --user stop "$unit" 2>/dev/null
+    systemctl --user revert "$unit" 2>/dev/null
+  done
   if [ "$rc" -ne 0 ]; then
+    for f in "$WORK"/units/*.pid; do
+      [ -f "$f" ] || continue
+      unit=$(basename "$f" .pid)
+      printf -- '--- журнал экземпляра %s ---\n' "$unit"
+      journalctl --user -u "$unit" -n 60 --no-pager
+    done
     for f in "$WORK"/units/*.log; do
       [ -s "$f" ] || continue
-      printf -- '--- журнал экземпляра %s ---\n' "$(basename "$f")"
+      printf -- '--- запуск экземпляра %s ---\n' "$(basename "$f")"
       tail -60 "$f"
     done
   fi
@@ -176,17 +188,18 @@ for alias in cw vpn-zone; do
 done
 echo "ok: cw и vpn-zone ведут на cellward"
 
-# --- 1а. systemd --user, которого на раннере нет ------------------------------
-# С этапа 2 контейнерного дизайна (2026-09-27) запуск в зону идёт в экземпляр
-# контейнера — юнит vpn-zone-container@<id>, который запуск поднимает через
-# `systemctl --user start`. Менеджера пользователя на раннере нет, поэтому
-# systemctl в манифесте — подставной: держатель экземпляра запускается в фоне
-# и, как Type=notify, `start` возвращается, когда тот готов (или умер);
-# уходящий держатель сначала дожидается своего конца. Это тестовый код — в
-# продукте не подменено ничего, cellward тот же, другой только манифест.
+# --- 1а. Временные user-services для экземпляров -----------------------------
+# Strict network требует делегированную cgroup: запущенный напрямую держатель
+# не может зарегистрировать программы контейнера. Подставной systemctl создаёт
+# transient service, а при установленном шаблоне использует runtime override;
+# в домашнюю конфигурацию юниты не устанавливаются.
 step "Подставной systemctl для экземпляров контейнеров"
+systemctl --user show-environment >/dev/null \
+  || fail "strict smoke требует работающий systemd --user с делегированием cgroup"
 UNITS="$WORK/units"
 mkdir -p "$UNITS"
+REAL_SYSTEMCTL=$(command -v systemctl)
+REAL_SYSTEMD_RUN=$(command -v systemd-run)
 cat > "$WORK/fake-systemctl" <<EOF
 #!/usr/bin/env bash
 set -u
@@ -199,32 +212,52 @@ esac
 id=\${unit#vpn-zone-container@}
 id=\$(printf '%b' "\${id%.service}")
 pidfile="$UNITS/\$unit.pid"
-alive() { [ -e "/proc/\$1" ] && [ "\$(awk '/^State:/ {print \$2}' "/proc/\$1/status" 2>/dev/null)" != Z ]; }
-old=\$(cat "\$pidfile" 2>/dev/null || true)
 case "\$verb" in
   start)
-    if [ -n "\$old" ]; then
-      for _ in \$(seq 1 600); do alive "\$old" || break; sleep 0.1; done
-    fi
+    if "$REAL_SYSTEMCTL" --user is-active --quiet "\$unit"; then exit 0; fi
     log="$UNITS/\$unit.\$(date +%s%N).log"
-    setsid "$CONTAINER_HOLDER" "\$id" >"\$log" 2>&1 </dev/null &
-    pid=\$!
-    echo "\$pid" > "\$pidfile"
-    for _ in \$(seq 1 600); do
-      grep -q "^instance .*: up, " "\$log" && exit 0
-      alive "\$pid" || { cat "\$log" >&2; exit 1; }
-      sleep 0.1
-    done
-    exit 1 ;;
+    "$REAL_SYSTEMCTL" --user stop "\$unit" >/dev/null 2>&1
+    if [ -n "\$("$REAL_SYSTEMCTL" --user show -p FragmentPath --value "\$unit")" ]; then
+      touch "$UNITS/\$unit.runtime"
+      "$REAL_SYSTEMCTL" --user edit --runtime --stdin "\$unit" <<UNIT
+[Service]
+Type=notify
+TimeoutStartSec=infinity
+Delegate=yes
+DelegateSubgroup=infra
+KillMode=mixed
+Environment=HOME=$HOME
+Environment=TMPDIR=$WORK
+Environment=VPN_ZONE_TOOLS=$WORK/cellward-tools.json
+ExecStart=
+ExecStart=$CONTAINER_HOLDER \$id
+UNIT
+      edit_rc=\$?
+      if [ "\$edit_rc" -ne 0 ]; then
+        echo "не удалось создать runtime override для \$unit" >>"\$log"
+        cat "\$log" >&2
+        exit "\$edit_rc"
+      fi
+      "$REAL_SYSTEMCTL" --user start "\$unit" >"\$log" 2>&1
+    else
+      "$REAL_SYSTEMD_RUN" --user --quiet --unit="\$unit" \
+        --service-type=notify -p Delegate=yes -p DelegateSubgroup=infra \
+        -p KillMode=mixed -p TimeoutStartSec=infinity \
+        --setenv=HOME="$HOME" --setenv=TMPDIR="$WORK" \
+        --setenv=VPN_ZONE_TOOLS="$WORK/cellward-tools.json" \
+        -- "$CONTAINER_HOLDER" "\$id" >"\$log" 2>&1
+    fi
+    rc=\$?
+    if [ "\$rc" -ne 0 ]; then
+      "$REAL_SYSTEMCTL" --user status "\$unit" --no-pager >>"\$log" 2>&1
+      cat "\$log" >&2
+      exit "\$rc"
+    fi
+    "$REAL_SYSTEMCTL" --user show -p MainPID --value "\$unit" > "\$pidfile" ;;
   stop)
-    [ -n "\$old" ] || exit 0
-    kill -TERM "\$old" 2>/dev/null || exit 0
-    for _ in \$(seq 1 600); do alive "\$old" || exit 0; sleep 0.1; done
-    exit 1 ;;
+    "$REAL_SYSTEMCTL" --user stop "\$unit" ;;
   is-active)
-    if [ -n "\$old" ] && alive "\$old"; then echo active; exit 0; fi
-    echo inactive
-    exit 3 ;;
+    "$REAL_SYSTEMCTL" --user is-active "\$unit" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -1021,14 +1054,15 @@ echo "ok: ruleset пуст"
 # Этап 1 контейнерного дизайна (rust/src/instance.rs): у запущенного
 # контейнера свои пространства имён — пользователь, сеть (только lo), точки
 # монтирования, IPC, — а запуск с сетью offline идёт в него через
-# `container-enter`, не через зону offline. Держатель — напрямую (systemd
-# --user на раннере нет); запуск находит экземпляр поднятым и systemctl не
-# зовёт. Экземпляр живёт, пока в нём есть программы: одна держит его, пока
+# `container-enter`, не через зону offline. Держатель поднимается delegated
+# user-service, как и для сетевого контейнера: strict не разрешает legacy-путь
+# без cgroup. Экземпляр живёт, пока в нём есть программы: одна держит его, пока
 # идут проверки.
-step "Экземпляр контейнера $INST: держатель без systemd"
+step "Экземпляр контейнера $INST: delegated holder"
 "$VPN_ZONE" container create "$INST" --home layer >/dev/null
-"$CONTAINER_HOLDER" "$INST" >"$WORK/holder-inst.log" 2>&1 &
-HOLDER_PIDS+=("$!")
+INST_UNIT="vpn-zone-container@$(systemd-escape "$INST").service"
+"$WORK/fake-systemctl" --user start "$INST_UNIT"
+HOLDER_PIDS+=("$("$REAL_SYSTEMCTL" --user show -p MainPID --value "$INST_UNIT")")
 IPID=""
 for _ in $(seq 1 300); do
   IPID=$("$VPN_ZONE" status --json | grep -o "\"id\":\"$INST\",[^}]*\"pid\":[0-9]*" \
@@ -1076,7 +1110,9 @@ echo "ok: сеть экземпляра $ins, только lo"
 # не по номеру: номер хоста в пространстве экземпляра — никто или кто-то другой.
 step "Экземпляр: своё пространство pid, процессов хоста в /proc не видно (X4)"
 x4marker="vpn-smoke-x4-$$"
-bash -c "exec -a $x4marker sleep 300" &
+# Маркер — отдельный argv: Nix coreutils — multicall-бинарь, поэтому exec -a с
+# произвольным именем вместо sleep на нём не работает.
+python3 -c 'import time; time.sleep(300)' "$x4marker" &
 X4HOST=$!
 for _ in $(seq 1 100); do
   grep -q "$x4marker" "/proc/$X4HOST/cmdline" 2>/dev/null && break
