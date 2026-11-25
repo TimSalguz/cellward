@@ -627,6 +627,8 @@ pub struct Layout {
     /// to bind — inside a zone whose resolver directory has just been hidden,
     /// for one.
     pub resolv: Option<PathBuf>,
+    /// The container's IANA timezone; `None` keeps the host's.
+    pub timezone: Option<OsString>,
     /// `/dev/dri` and the `/dev/nvidia*` nodes that exist.
     pub dev_nodes: Vec<PathBuf>,
     /// The compositor's socket — already the restricted one built by
@@ -791,6 +793,20 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
     if let Some(id) = &layout.machine_id {
         bind(&mut a, "--ro-bind", id, Path::new(MACHINE_ID));
     }
+    if let Some(zone) = &layout.timezone {
+        bind(
+            &mut a,
+            "--ro-bind-try",
+            &Path::new("/etc/zoneinfo").join(zone),
+            Path::new("/etc/localtime"),
+        );
+        bind(
+            &mut a,
+            "--ro-bind-try",
+            Path::new("/dev/null"),
+            Path::new("/etc/timezone"),
+        );
+    }
     bind_same(&mut a, "--ro-bind-try", Path::new("/sys"));
     // The FILE behind /etc/resolv.conf, and never the directory it lives in:
     // /run is not passed in, so without this names do not resolve inside — and
@@ -927,6 +943,12 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
             push(&mut a, "--unsetenv");
             push(&mut a, "DISPLAY");
         }
+    }
+
+    if let Some(zone) = &layout.timezone {
+        push(&mut a, "--setenv");
+        push(&mut a, "TZ");
+        a.push(zone.clone());
     }
 
     push(&mut a, "--seccomp");
@@ -1766,6 +1788,7 @@ pub fn run(args: Args) -> u8 {
         mimeapps: home.join(MIMEAPPS).is_file().then(|| home.join(MIMEAPPS)),
         appearance: look,
         resolv: resolv_file(),
+        timezone: Some(OsString::from("UTC")),
         dev_nodes: {
             let mut nodes = dev_nodes(Path::new("/dev"));
             if args.camera {
@@ -2301,6 +2324,7 @@ mod tests {
             mimeapps: None,
             appearance: Vec::new(),
             resolv: Some(PathBuf::from("/run/systemd/resolve/stub-resolv.conf")),
+            timezone: None,
             dev_nodes: Vec::new(),
             wayland: None,
             pipewire: None,
@@ -2499,6 +2523,22 @@ mod tests {
                 "prog",
             ]
         );
+    }
+
+    #[test]
+    fn the_containers_timezone_is_not_the_hosts() {
+        let l = Layout {
+            timezone: Some(OsString::from("UTC")),
+            ..layout()
+        };
+        let got = strs(&bwrap_args(&l, &argv(&["prog"])));
+        assert!(got
+            .windows(3)
+            .any(|words| { words == ["--ro-bind-try", "/etc/zoneinfo/UTC", "/etc/localtime"] }));
+        assert!(got
+            .windows(3)
+            .any(|words| { words == ["--ro-bind-try", "/dev/null", "/etc/timezone"] }));
+        assert!(got.windows(2).any(|words| words == ["TZ", "UTC"]));
     }
 
     /// In its container's instance the sandbox takes the container's /tmp —
