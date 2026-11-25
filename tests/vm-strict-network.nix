@@ -113,6 +113,13 @@ let
           alice("systemd-run --user --unit=strict-keep cellward run host --container strict-test -- sleep infinity")
           machine.wait_until_succeeds("find /home/alice/.local/state/vpn-zones/.instances -mindepth 2 -maxdepth 2 -name strict-network -type f | grep -q .", timeout=90)
           assert "STRICT_OK" in run("curl --noproxy '*' -fsS --max-time 15 http://198.51.100.1:8000/")
+      with subtest("concurrent real-home launches keep their host registration"):
+          alice("systemd-run --user --unit=strict-main-keep cellward run host -- sleep infinity")
+          machine.wait_until_succeeds("for d in /home/alice/.local/state/vpn-zones/.instances/*; do if test -d $d && grep -qx main:host $d/id && test -f $d/strict-network; then exit 0; fi; done; exit 1", timeout=30)
+          for round in range(10):
+              launches = " & ".join(["cellward run host -- sh -c 'sleep 0.05'"] * 8)
+              alice(launches + "; failed=0; for pid in $(jobs -p); do wait $pid || failed=1; done; test $failed -eq 0")
+          alice("systemctl --user stop strict-main-keep.service")
       with subtest("ordinary interactive terminal delegates through a PTY"):
           command = "cellward run host --container strict-test -- curl --noproxy '*' -fsS --max-time 15 http://198.51.100.1:8000/"
           result = alice("${pkgs.util-linux}/bin/script -q -e -c " + shlex.quote(command) + " /dev/null")

@@ -327,9 +327,7 @@ fn forget_pid(running: &Path, pid: i32) {
                 .filter(|line| !ours(line))
                 .map(|line| format!("{line}\n"))
                 .collect();
-            let mut tmp = file.as_os_str().to_owned();
-            tmp.push(format!(".{}.forget", std::process::id()));
-            let tmp = PathBuf::from(tmp);
+            let tmp = temp_path(&file, &format!(".{}.forget", std::process::id()));
             if fs::write(&tmp, kept)
                 .and_then(|()| fs::rename(&tmp, &file))
                 .is_err()
@@ -573,13 +571,18 @@ pub fn dirs(running: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `<file>.new`, the name the shell version rewrote through. Appended to the
-/// whole file name rather than replacing an extension: a program called
-/// `org.kde.dolphin` must not become `org.kde.new`.
+fn temp_path(reg: &Path, suffix: &str) -> PathBuf {
+    let mut name = OsString::from(".");
+    name.push(reg.file_name().unwrap_or_else(|| std::ffi::OsStr::new("")));
+    name.push(suffix);
+    reg.with_file_name(name)
+}
+
+/// `.<file>.new`, hidden from registry readers while a rewrite is in flight.
+/// Appended to the whole file name rather than replacing an extension: a
+/// program called `org.kde.dolphin` must not become `org.kde.new`.
 fn tmp_path(reg: &Path) -> PathBuf {
-    let mut name = OsString::from(reg.as_os_str());
-    name.push(".new");
-    PathBuf::from(name)
+    temp_path(reg, ".new")
 }
 
 #[cfg(test)]
@@ -887,10 +890,10 @@ mod tests {
     }
 
     #[test]
-    fn the_temporary_file_does_not_eat_a_dotted_program_name() {
+    fn the_temporary_file_is_hidden_and_does_not_eat_a_dotted_program_name() {
         assert_eq!(
             tmp_path(Path::new("/r/.running/__main__/org.kde.dolphin")),
-            PathBuf::from("/r/.running/__main__/org.kde.dolphin.new")
+            PathBuf::from("/r/.running/__main__/.org.kde.dolphin.new")
         );
     }
 
