@@ -196,6 +196,7 @@ pub mod tasks;
 pub mod timings;
 pub mod tools;
 pub mod traffic;
+pub mod transport;
 pub mod tray;
 pub(crate) mod tray_restore;
 pub mod trust;

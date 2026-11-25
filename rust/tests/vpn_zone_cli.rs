@@ -251,6 +251,38 @@ fn crlf_config() -> String {
 }
 
 #[test]
+fn transport_inventory_and_manifest_check_never_execute_the_adapter() {
+    let home = Home::new("transport-inventory");
+    let manifests = home.root.join("config/transports");
+    fs::create_dir_all(&manifests).unwrap();
+    let manifest = manifests.join("reticulum.conf");
+    fs::write(
+        &manifest,
+        "[Transport]\nName = reticulum\nRun = /nonexistent/adapter\nChannel = datagram\nIPv6 = yes\nAsymmetric = yes\nMTU = 1200\n",
+    )
+    .unwrap();
+    let listed = home.run(&["transport", "list", "--json"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let text = stdout(&listed);
+    for expected in ["wireguard", "amneziawg", "openconnect", "reticulum"] {
+        assert!(text.contains(expected), "{text}");
+    }
+    assert!(text.contains("\"asymmetric\":true"), "{text}");
+    assert!(text.contains("\"mtu\":1200"), "{text}");
+    let checked = home.run(&["transport", "check", manifest.to_str().unwrap()]);
+    assert!(checked.status.success(), "{}", stderr(&checked));
+    assert!(stdout(&checked).starts_with("reticulum\tplugin\tdatagram"));
+    fs::write(
+        manifests.join("broken.conf"),
+        "[Transport]\nUnknown = value\n",
+    )
+    .unwrap();
+    let broken = home.run(&["transport", "list"]);
+    assert!(!broken.status.success());
+    assert!(stderr(&broken).contains("Unknown"));
+}
+
+#[test]
 fn the_help_works_without_a_manifest() {
     // Somebody who ran the binary without the wrapper has to be told what this
     // is, not what is missing.

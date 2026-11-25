@@ -91,6 +91,7 @@ const VERBS: &[&str] = &[
     "version",
     "status",
     "traffic",
+    "transport",
     "explain",
     "run",
     "launch",
@@ -332,6 +333,9 @@ pub fn candidates(words: &[String], cursor: usize, snap: &Snapshot) -> Vec<Strin
                 strs(&mut out, &["--json"]);
             }
             "explain" if pos == 4 => strs(&mut out, &["--json"]),
+            "transport" if pos == 2 => strs(&mut out, &["list", "check"]),
+            "transport" if pos == 3 && word(2) == "check" => return vec![FILES.to_string()],
+            "transport" if pos == 3 && word(2) == "list" => strs(&mut out, &["--json"]),
             "traffic" => strs(&mut out, &["--json", "--watch", "--days"]),
             "container" if pos == 2 => strs(
                 &mut out,
@@ -604,6 +608,18 @@ mod tests {
         assert_eq!(
             complete(&["vpn-zone", "trust", "add", "work", ""], 5),
             [FILES]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "transport", ""], 3),
+            ["list", "check"]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "transport", "check", ""], 4),
+            [FILES]
+        );
+        assert_eq!(
+            complete(&["vpn-zone", "transport", "list", ""], 4),
+            ["--json"]
         );
         assert_eq!(
             complete(&["vpn-zone", "container", "set", "dev", "network", "o"], 6),
