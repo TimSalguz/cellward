@@ -674,7 +674,8 @@ const RUN_USAGE: &str = "cellward run <сеть> [контейнер] [--] [ко
   --sandbox <имя>         контейнер со своим домом\n\
   --fs-sandbox [--join <имя>]  разовый контейнер с пустым домом\n\
   --tmp-profile [--join <каталог>]  разовый слой над домом\n\
-  --no-isolation          встроенный контейнер без изоляции\n\
+  --no-isolation          встроенный контейнер без изоляции;\n\
+                          не отменяет ограничения host-files сети\n\
   --with <ключ=значение>  разрешение одного разового запуска\n";
 
 /// Run a program inside a zone. Returns only when something went wrong: the

@@ -687,6 +687,39 @@ What to do instead:
 - **Between two containers:** grant both the same directory,
   `cellward container grant <container> <dir>`.
 
+### SSH: first login to a server
+
+`--no-isolation` does not override the network's `host-files` policy. Where the
+network forbids writes to the host's startup files, the real home's `~/.ssh`
+stays read-only: `ssh-copy-id` cannot create its temporary directory there, and
+`StrictHostKeyChecking=accept-new` cannot save `known_hosts`. Do not weaken that
+policy or disable server host-key checking. Instead, create a separate admin
+container with a persistent home of its own and generate a **new** key inside it
+while it is `offline` (replace `DE`, `user`, and `server` with your values):
+
+```sh
+cellward container create ssh-admin --home private
+cellward container set ssh-admin network offline
+cellward run offline --container ssh-admin -- \
+  sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && exec ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519'
+
+cellward container set ssh-admin network DE
+cellward run DE --container ssh-admin -- \
+  ssh-copy-id -i ~/.ssh/id_ed25519.pub user@server
+cellward run DE --container ssh-admin -- ssh user@server
+```
+
+`ssh-keygen` prompts for a passphrase for the new key. `ssh-copy-id` adds only
+the public `id_ed25519.pub` to the server; the private `id_ed25519` stays in the
+`ssh-admin` home and is not mounted from the real home.
+
+On the first connection, verify the server's host-key fingerprint through an
+independent channel before answering `yes`. The server's public key is saved in
+`~/.ssh/known_hosts` in the `ssh-admin` container and checked by later launches
+in that same container. `StrictHostKeyChecking=accept-new` can save a new key
+there too: it does not disable checking of an already saved key and should not
+replace fingerprint verification when first establishing trust.
+
 ## The system tier (optional)
 
 Everything above is the user tier: a session, your user, no root. The system

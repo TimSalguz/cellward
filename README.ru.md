@@ -668,6 +668,39 @@ window-rule {
 - **Между двумя контейнерами:** выдать обоим один и тот же каталог,
   `cellward container grant <контейнер> <каталог>`.
 
+### SSH: первый вход на сервер
+
+`--no-isolation` не отменяет политику `host-files` сети. Если сеть запрещает
+запись файлов запуска хоста, `~/.ssh` настоящего дома остаётся доступным только
+для чтения: `ssh-copy-id` не может создать там временный каталог, а
+`StrictHostKeyChecking=accept-new` — сохранить `known_hosts`. Не ослабляй эту
+политику и не отключай проверку ключа сервера. Вместо этого создай отдельный
+admin-контейнер со своим постоянным домом и сгенерируй **новый** ключ внутри
+него, пока он `offline` (замени `DE`, `user` и `server` на свои значения):
+
+```sh
+cellward container create ssh-admin --home private
+cellward container set ssh-admin network offline
+cellward run offline --container ssh-admin -- \
+  sh -c 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && exec ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519'
+
+cellward container set ssh-admin network DE
+cellward run DE --container ssh-admin -- \
+  ssh-copy-id -i ~/.ssh/id_ed25519.pub user@server
+cellward run DE --container ssh-admin -- ssh user@server
+```
+
+`ssh-keygen` предложит задать парольную фразу нового ключа. `ssh-copy-id`
+добавляет на сервер только публичный `id_ed25519.pub`; приватный
+`id_ed25519` остаётся в доме `ssh-admin` и не монтируется из настоящего дома.
+
+При первом подключении проверь отпечаток ключа сервера по независимому каналу и
+только потом ответь `yes`. Публичный ключ сервера сохранится в
+`~/.ssh/known_hosts` контейнера `ssh-admin` и будет проверяться при следующих
+запусках в том же контейнере. Опция `StrictHostKeyChecking=accept-new` тоже
+может записать туда новый ключ: она не отключает проверку уже сохранённого
+ключа и не должна заменять проверку отпечатка при первом доверенном контакте.
+
 ## Системный уровень (по желанию)
 
 Всё, что выше, — пользовательский уровень: сеанс, твой пользователь, без root.

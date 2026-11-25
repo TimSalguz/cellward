@@ -388,6 +388,7 @@ fn run_help_and_the_main_selector_start_no_network() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(stdout(&out).starts_with("cellward run <сеть>"));
     assert!(stdout(&out).contains("--container <имя>|main"));
+    assert!(stdout(&out).contains("не отменяет ограничения host-files сети"));
     assert!(stderr(&out).is_empty(), "{}", stderr(&out));
     assert!(!home.state().join(".instances").exists());
 
