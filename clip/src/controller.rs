@@ -617,7 +617,9 @@ mod tests {
             Self::configured(|_| ()).0
         }
         fn configured<T>(setup: impl FnOnce(&mut Controller) -> T) -> (Self, T) {
-            let runtime = std::env::temp_dir().join(format!(
+            // The socket below this directory must stay below SUN_LEN even
+            // when the CI runner's TMPDIR is long.
+            let runtime = PathBuf::from("/tmp").join(format!(
                 "cw-controller-{}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
