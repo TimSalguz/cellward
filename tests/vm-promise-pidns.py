@@ -165,6 +165,10 @@ with subtest("a daemon forked twice stays in its launch's tree, under profile-ru
     machine.wait_until_fails(f"test -e /proc/{daemon}", timeout=30)
 
 with subtest("an orphan pid 1 adopts is reaped, and counted as a program"):
+    # This fixture deliberately enters directly, with no launch registry or
+    # profile-run: strict ownership refuses that by design. Use the documented
+    # legacy backend only for this instance, then restore strict for vmpe.
+    alice("cellward defaults set strict-network off")
     keep("vmpd", "vmpd-keep", D)
     # Entered with no profile-run: the orphan goes to the instance's pid 1.
     in_inst("vmpd", "offline", f"bash -c '(exec sleep {ORPHAN} </dev/null >/dev/null 2>&1 &)'")
@@ -186,6 +190,7 @@ with subtest("an orphan pid 1 adopts is reaped, and counted as a program"):
         "| grep -q '\"id\":\"vmpd\"'",
         timeout=60,
     )
+    alice("cellward defaults set strict-network on")
 
 with subtest("a launch its terminal stopped holds up no kill"):
     # Review 2026-09-28: `^Z` stops the whole launch, its waiter on the host

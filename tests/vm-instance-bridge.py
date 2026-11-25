@@ -12,7 +12,7 @@ loopback and a tap; its only way out is a `passt --fd` its zone starts in
 the zone's app namespace, which the instance's relay pumps. The zone's end
 cuts it, and its programs live on with no way out; the zone back as it was
 attaches it again, with new addresses; the zone back as another one leaves
-it cut until the person says. Entered here as a launch enters it
+it cut until the person says. Entered here as a registered launch enters it
 (`vpn-zone-core container-enter`), the instance asked for as a launch asks
 (the file beside its directory).
 """

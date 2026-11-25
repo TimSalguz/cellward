@@ -111,7 +111,7 @@ pub fn snapshot(tools: &Tools) -> Vec<Instance> {
             let registry = tools
                 .state
                 .join(".running")
-                .join(crate::instance::container_of(&i.id).unwrap_or(crate::registry::MAIN));
+                .join(crate::instance::registry_of(&i.id));
             let launches = match crate::epoch::read(&i.dir) {
                 Some(epoch) => crate::epoch::leaves(&epoch.dir())
                     .into_iter()

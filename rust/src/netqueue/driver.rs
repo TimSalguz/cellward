@@ -40,6 +40,7 @@ pub struct Driver<T: Transport> {
     queue: u16,
     sequence: u32,
     acknowledgements: BTreeMap<u32, Instant>,
+    missing_drops: HashSet<u32>,
     ready: VecDeque<Held>,
     archive: Option<Lookup>,
 }
@@ -59,6 +60,7 @@ impl<T: Transport> Driver<T> {
             queue,
             sequence: 0,
             acknowledgements: BTreeMap::new(),
+            missing_drops: HashSet::new(),
             ready: VecDeque::new(),
             archive: None,
         };
@@ -231,6 +233,7 @@ impl<T: Transport> Driver<T> {
         self.session.fail();
         self.ready.clear();
         self.acknowledgements.clear();
+        self.missing_drops.clear();
         drop(self.transport.take());
     }
 
@@ -269,7 +272,11 @@ impl<T: Transport> Driver<T> {
         self.send(
             sequence,
             &wire::verdict(self.queue, packet, allow, sequence),
-        )
+        )?;
+        if !allow {
+            self.missing_drops.insert(sequence);
+        }
+        Ok(())
     }
 
     fn messages(&mut self, messages: Vec<wire::Message>) -> io::Result<()> {
@@ -279,7 +286,11 @@ impl<T: Transport> Driver<T> {
                     if self.acknowledgements.remove(&sequence).is_none() {
                         return Err(io::Error::other("unexpected network queue ACK"));
                     }
-                    if errno != 0 {
+                    let vanished_drop = self.missing_drops.remove(&sequence);
+                    // Sealing an epoch can destroy a socket before the DROP
+                    // verdict for its queued packet. That packet is already
+                    // gone; only a DROP's ENOENT is therefore successful.
+                    if errno != 0 && !(vanished_drop && errno == -libc::ENOENT) {
                         return Err(io::Error::from_raw_os_error(-errno));
                     }
                 }
@@ -388,6 +399,7 @@ mod tests {
         sent: RefCell<Vec<Vec<u8>>>,
         closed: Cell<bool>,
         auto_ack: Cell<bool>,
+        ack_errno: Cell<i32>,
     }
     struct Fake(Rc<State>);
     impl Drop for Fake {
@@ -403,7 +415,10 @@ mod tests {
                 self.0
                     .incoming
                     .borrow_mut()
-                    .push_back(vec![wire::Message::Ack { sequence, errno: 0 }]);
+                    .push_back(vec![wire::Message::Ack {
+                        sequence,
+                        errno: self.0.ack_errno.get(),
+                    }]);
             }
             Ok(())
         }
@@ -432,6 +447,26 @@ mod tests {
             .borrow_mut()
             .push_back(wire::parse(&wire::fixture(7, id, token), 0, false).unwrap());
     }
+    #[test]
+    fn a_vanished_packets_drop_ack_does_not_close_the_queue() {
+        let (mut driver, state, token) = driver();
+        packet(&state, 41, token.mark());
+        let held = driver.receive().unwrap().remove(0);
+        state.ack_errno.set(-libc::ENOENT);
+        driver.decide(held.ticket, false).unwrap();
+        assert!(!state.closed.get());
+    }
+
+    #[test]
+    fn a_vanished_packets_allow_ack_still_closes_the_queue() {
+        let (mut driver, state, token) = driver();
+        packet(&state, 42, token.mark());
+        let held = driver.receive().unwrap().remove(0);
+        state.ack_errno.set(-libc::ENOENT);
+        assert!(driver.decide(held.ticket, true).is_err());
+        assert!(state.closed.get());
+    }
+
     #[test]
     fn binding_timeout_destroys_transport() {
         let state = Rc::new(State::default());

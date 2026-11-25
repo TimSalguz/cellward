@@ -34,6 +34,7 @@ pkgs.testers.runNixOSTest {
       home-manager.users.alice = {
         imports = [ ../module ];
         programs.cellward.enable = true;
+        programs.cellward.defaults.permissions.network = "yes";
         home.stateVersion = "26.05";
       };
 
@@ -46,7 +47,7 @@ pkgs.testers.runNixOSTest {
       };
       boot.extraModulePackages = [ config.boot.kernelPackages.amneziawg ];
       boot.kernelModules = [ "amneziawg" "wireguard" "tun" "nf_tables" ];
-      environment.systemPackages = [ pkgs.wireguard-tools pkgs.procps pkgs.iproute2 ];
+      environment.systemPackages = [ pkgs.wireguard-tools pkgs.procps pkgs.iproute2 pkgs.curl ];
       virtualisation.vlans = [ 1 ];
       virtualisation.cores = 2;
       virtualisation.memorySize = 1536;
@@ -57,7 +58,13 @@ pkgs.testers.runNixOSTest {
     {
       virtualisation.vlans = [ 1 ];
       boot.kernelModules = [ "wireguard" ];
-      environment.systemPackages = [ pkgs.wireguard-tools pkgs.iproute2 pkgs.iputils ];
+      environment.systemPackages = [
+        pkgs.wireguard-tools
+        pkgs.iproute2
+        pkgs.iputils
+        pkgs.dnsmasq
+        pkgs.python3
+      ];
       networking.firewall.allowedUDPPorts = [ 51821 ];
       networking.firewall.trustedInterfaces = [ "wg1" "wg2" "wg3" ];
       virtualisation.memorySize = 768;
@@ -75,8 +82,9 @@ pkgs.testers.runNixOSTest {
         )
 
     def add_node(name, number, private, public, endpoint):
+        dns = "DNS = 198.51.100.1\\n" if name == "inner" else ""
         alice(
-            f"printf '[Interface]\\nPrivateKey = %s\\nAddress = 10.99.{number}.2/32, fd99:{number}::2/128\\n\\n"
+            f"printf '[Interface]\\nPrivateKey = %s\\nAddress = 10.99.{number}.2/32, fd99:{number}::2/128\\n{dns}\\n"
             f"[Peer]\\nPublicKey = %s\\nAllowedIPs = 0.0.0.0/0, ::/0\\n"
             f"Endpoint = {endpoint}\\n' "
             f"'{private}' '{public}' > /tmp/{name}.conf"
@@ -170,6 +178,30 @@ pkgs.testers.runNixOSTest {
         for number in [1, 2, 3]:
             handshakes = server.succeed(f"wg show wg{number} latest-handshakes")
             assert handshakes.strip() and not handshakes.strip().endswith("\t0"), handshakes
+
+    with subtest("nested DNS and numeric egress work after a resolver restart and another launch"):
+        server.succeed("ip addr add 198.51.100.1/32 dev lo")
+        server.succeed("printf NESTED_OK > /tmp/nested-response")
+        server.succeed(
+            "systemd-run --unit=nested-dns dnsmasq -k --user=root --port=53 "
+            "--bind-interfaces --listen-address=198.51.100.1 --no-resolv "
+            "--address=/nested.test/198.51.100.2"
+        )
+        server.succeed(
+            "systemd-run --unit=nested-http python3 -m http.server 8000 "
+            "--bind 198.51.100.1 --directory /tmp"
+        )
+        server.wait_until_succeeds("ss -lun | grep -q '198.51.100.1:53'", timeout=20)
+        server.wait_until_succeeds("ss -ltn | grep -q ':8000 '", timeout=20)
+        for launch in range(2):
+            if launch == 1:
+                server.succeed("systemctl restart nested-dns")
+                server.wait_until_succeeds("ss -lun | grep -q '198.51.100.1:53'", timeout=20)
+            out = alice(
+                "cellward run inner -- sh -c 'getent ahostsv4 nested.test; "
+                "curl --noproxy \"*\" -fsS --max-time 5 http://198.51.100.1:8000/nested-response'"
+            )
+            assert "198.51.100.2" in out and "NESTED_OK" in out, (launch, out)
 
     with subtest("losing the outer VPN cuts both dependent hops"):
         alice("cellward down outer")

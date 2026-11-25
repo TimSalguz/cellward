@@ -108,12 +108,10 @@ def live_switch_is(id_, available, reason):
     raise AssertionError(f"{id_}: never {available}/{reason}: {instance(id_)}")
 
 
-# Stage 4 (docs/LEAK-MODEL.md «Смена сети на ходу»): a launch through the
-# user's manager is put into the instance's epoch — the cgroup a live switch
-# moves, whose sockets alone the rules let out after one; a launch from a
-# login session (su here) the kernel does not let move, and while it runs
-# the instance cannot be switched live.
-with subtest("an instance's programs are in its epoch; one from a login session holds the switch"):
+# Stage 4 (docs/LEAK-MODEL.md «Смена сети на ходу»): strict launches from a
+# login session are handed off through the user's manager and put into the
+# instance's epoch. A program outside that epoch still holds a live switch.
+with subtest("an instance's programs are in its epoch; one outside holds the switch"):
     cg = alice(
         "systemctl --user show -p ControlGroup --value vpn-zone-container@vmia.service"
     ).strip()
@@ -136,8 +134,16 @@ with subtest("an instance's programs are in its epoch; one from a login session 
             "vmia -- sleep 4343 </dev/null >/dev/null 2>&1 &"
         )
     )
-    live_switch_is("vmia", False, "outside")
+    machine.wait_until_succeeds("pgrep -xf 'sleep 4343'", timeout=30)
     outsider = machine.succeed("pgrep -xf 'sleep 4343'").strip()
+    assert f"{cg}/e1" in machine.succeed(f"cat /proc/{outsider}/cgroup"), outsider
+    live_switch_is("vmia", True, None)
+    # A legacy launch cannot be handed off, and a program can also be moved
+    # out by root. Exercise the keeper's outside detection without depending
+    # on the old, pre-handoff CLI path.
+    machine.succeed(f"echo {outsider} > /sys/fs/cgroup/init.scope/cgroup.procs")
+    in_c("vmia", "true")  # Another launch's doorbell makes the keeper look again.
+    live_switch_is("vmia", False, "outside")
     assert f"{cg}/e1" not in machine.succeed(f"cat /proc/{outsider}/cgroup"), outsider
     machine.succeed("pkill -xf 'sleep 4343'")
     live_switch_is("vmia", True, None)

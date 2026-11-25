@@ -2740,20 +2740,25 @@ fn keep(
         if !look {
             continue;
         }
+        // A launch holds the lock shared until its program is in. Sweeping
+        // only with the lock exclusive keeps a new, still-empty launch cgroup
+        // from being removed between mkdir and the child's write to its
+        // cgroup.procs.
+        let locked = lock.as_ref().is_some_and(lock_exclusive_now);
+        if lock.is_some() && !locked {
+            continue;
+        }
         members = crate::place::members(userns, Some(keeper), Some(space));
-        if members.is_empty() && armed && lock.as_ref().is_some_and(lock_exclusive_now) {
-            // Nobody on the way in (a launch holds the lock shared until its
-            // program is in): looked at once more, and nobody is in.
-            members = crate::place::members(userns, Some(keeper), Some(space));
-            if members.is_empty() {
-                break Ending::Idle;
-            }
+        if members.is_empty() && armed && locked {
+            break Ending::Idle;
+        }
+        outside = transport.epochs.look(&members);
+        if locked {
             if let Some(lock) = &lock {
                 // SAFETY: flock(2) on a descriptor we hold.
                 unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
             }
         }
-        outside = transport.epochs.look(&members);
     };
     WAKE.store(-1, Ordering::SeqCst);
     if doorbell.is_some() {
@@ -2898,9 +2903,10 @@ fn answer_request(
             let core = std::env::current_exe().map_err(|e| e.to_string())?;
             let space = transport.space_pidfd().ok_or("instance exited")?;
             let epoch = transport.epochs.now.as_ref().ok_or("no delegated epoch")?;
-            let registry = transport.state.join(".running").join(
-                crate::instance::container_of(&transport.id).unwrap_or(crate::registry::MAIN),
-            );
+            let registry = transport
+                .state
+                .join(".running")
+                .join(crate::instance::registry_of(&transport.id));
             let strict = transport
                 .strict
                 .as_mut()
@@ -4305,8 +4311,10 @@ impl Transport {
             // is non-blocking.
             while unsafe { libc::read(news.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
         }
-        let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
-        let registry = self.state.join(".running").join(container);
+        let registry = self
+            .state
+            .join(".running")
+            .join(crate::instance::registry_of(&self.id));
         let mut fresh = self.owners.fresh(&self.dir);
         if self.strict_requested {
             self.count_launches();
@@ -4427,8 +4435,10 @@ impl Transport {
             return;
         };
         // Each launch's program, while it is there to be found.
-        let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
-        let registry = self.state.join(".running").join(container);
+        let registry = self
+            .state
+            .join(".running")
+            .join(crate::instance::registry_of(&self.id));
         for path in &leaves {
             let leaf = path.rsplit('/').next().unwrap_or_default().to_owned();
             if self.leaf_programs.contains_key(&leaf) {

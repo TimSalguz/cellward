@@ -27,7 +27,6 @@ import re
 import tempfile
 
 SW = "vmsw"
-SW_CORE = alice("command -v vpn-zone-core").strip()
 PY = PROBE["py"]
 LOGS = "/tmp/sw-tcp.log /tmp/sw-udp.log /tmp/sw-udp6.log"
 
@@ -345,14 +344,19 @@ with subtest("switch: every refusal leaves A attached, its sockets as they were"
     )
     assert code != 0 and "locked" in out and "--restart" in out, out
     alice("cellward unlock vmreal")
-    # A program launched from a login session (P4): outside the epoch.
+    # A program outside the epoch (P4): start a registered launch, then move
+    # it out as root. Another launch's doorbell makes the keeper look again.
     machine.succeed(
         "su -l alice -c "
         + shlex.quote(
-            f"export XDG_RUNTIME_DIR=/run/user/1000; setsid {SW_CORE} container-enter "
-            f"--instance {SW} --network vmreal -- sleep 4848 </dev/null >/dev/null 2>&1 &"
+            f"export XDG_RUNTIME_DIR=/run/user/1000; setsid cellward run vmreal --container "
+            f"{SW} -- sleep 4848 </dev/null >/dev/null 2>&1 &"
         )
     )
+    machine.wait_until_succeeds("pgrep -xf 'sleep 4848'", timeout=30)
+    outsider = machine.succeed("pgrep -xf 'sleep 4848'").strip()
+    machine.succeed(f"echo {outsider} > /sys/fs/cgroup/init.scope/cgroup.procs")
+    in_placed(SW, "vmreal", "true")
     wait_sw(lambda i: i["live_switch"]["reason"] == "outside", "outside")
     code, out = machine.execute(
         "su -l alice -c "

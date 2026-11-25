@@ -282,8 +282,10 @@ echo "ok: $WORK/smoke.conf"
 # --- 3. cellward add ---------------------------------------------------------
 step "cellward add smoke"
 # Нет экрана, где спросить: программам контейнеров сеть без вопроса
-# (docs/FIREWALL.md §9).
+# (docs/FIREWALL.md §9). Подставной systemctl не даёт delegated cgroup,
+# поэтому этот legacy-смоук явно отключает строгую регистрацию запусков.
 "$VPN_ZONE" defaults set network yes >/dev/null
+"$VPN_ZONE" defaults set strict-network off >/dev/null
 "$VPN_ZONE" add smoke "$WORK/smoke.conf"
 [ -d "$STATE/smoke" ] || fail "каталог зоны не появился"
 [ -f "$STATE/smoke/config.conf" ] || fail "конфиг не скопирован в зону"
