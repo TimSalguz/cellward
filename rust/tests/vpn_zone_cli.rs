@@ -274,6 +274,27 @@ fn the_help_works_without_a_manifest() {
 }
 
 #[test]
+fn run_help_and_the_main_selector_start_no_network() {
+    let home = Home::new("run-help");
+    let out = home.run(&["run", "--help"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).starts_with("cellward run <сеть>"));
+    assert!(stdout(&out).contains("--container <имя>|main"));
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    assert!(!home.state().join(".instances").exists());
+
+    let out = home.run_with(
+        &["run", "nl", "--container", "main", "--", "true"],
+        &[("VPN_ZONE_DRYRUN", "1")],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let line = stdout(&out);
+    assert!(line.contains("контейнер настоящий дом"), "{line}");
+    assert!(line.contains(" -- true"), "{line}");
+    assert!(!home.state().join(".instances").exists());
+}
+
+#[test]
 fn a_missing_or_broken_manifest_is_an_error_of_its_own() {
     let out = Command::new(BIN)
         .arg("list")
