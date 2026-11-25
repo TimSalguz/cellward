@@ -1065,7 +1065,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
         // its container's record; a throwaway one keeps none.
         wrap.push("--clip-history".into());
         wrap.push(
-            record_name(&selection)
+            clip_history_name(&selection)
                 .filter(|_| {
                     !container.ephemeral && !matches!(selection.sandbox, Sandbox::Throwaway(_))
                 })
@@ -2482,6 +2482,19 @@ pub fn record_name(selection: &Selection) -> Option<String> {
     })
 }
 
+/// Clipboard identity follows the actual home, not a named main-home record.
+fn clip_history_name(selection: &Selection) -> Option<String> {
+    match (&selection.sandbox, &selection.container) {
+        (Sandbox::None, Container::Main | Container::MainNamed(_)) => {
+            Some(crate::container::MAIN_RECORD.to_owned())
+        }
+        (Sandbox::Named(name), _) | (Sandbox::None, Container::Named(name)) => {
+            Some(name.to_string_lossy().into_owned())
+        }
+        _ => record_name(selection),
+    }
+}
+
 /// One launch, one container (`docs/PERMISSIONS.md` §11.7): the name —
 /// `--container`, and the words from before, `--profile` and `--sandbox` —
 /// read as the container it is now, its kind of home deciding how it is
@@ -3878,6 +3891,32 @@ mod tests {
             resolve(&["nl", "--container", "files", "--", "x"]),
             Ok((Container::MainNamed(name("files")), Sandbox::None))
         );
+        let main_home = resolve_selection(
+            &tools,
+            Selection::parse(&[
+                "unconfined".into(),
+                "--container".into(),
+                "files".into(),
+                "--".into(),
+                "alacritty".into(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(clip_history_name(&main_home).as_deref(), Some("main"));
+        let private = resolve_selection(
+            &tools,
+            Selection::parse(&[
+                "unconfined".into(),
+                "--container".into(),
+                "dev".into(),
+                "--".into(),
+                "alacritty".into(),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(clip_history_name(&private).as_deref(), Some("dev"));
         // A missing one is made — at the launch, after its network is
         // checked, not while it is resolved.
         let new = Selection::parse(&[

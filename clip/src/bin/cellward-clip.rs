@@ -165,29 +165,31 @@ fn list(_dir: &Path, history: &str, n: usize) -> ExitCode {
 /// The histories, opened by the daemon as they are needed.
 struct Store {
     dir: PathBuf,
+    config: PathBuf,
     key: Key,
     open: HashMap<String, History>,
 }
 
 impl Store {
-    fn canonical_name(name: &str) -> String {
+    fn canonical_name(&self, name: &str) -> String {
+        let canonical = |name: &str| {
+            if self.real_home_alias(name) {
+                clipstore::clipboard_scope::HOST.to_owned()
+            } else {
+                clipstore::clipboard_scope::canonical_history(name).to_owned()
+            }
+        };
         if let Some(real) = name.strip_prefix("@favorites:") {
-            format!(
-                "@favorites:{}",
-                clipstore::clipboard_scope::canonical_history(real)
-            )
+            format!("@favorites:{}", canonical(real))
         } else if let Some(real) = name.strip_prefix("@secrets:") {
-            format!(
-                "@secrets:{}",
-                clipstore::clipboard_scope::canonical_history(real)
-            )
+            format!("@secrets:{}", canonical(real))
         } else {
-            clipstore::clipboard_scope::canonical_history(name).to_owned()
+            canonical(name)
         }
     }
 
     fn history(&mut self, name: &str) -> Result<&mut History, String> {
-        let name = Self::canonical_name(name);
+        let name = self.canonical_name(name);
         let (dir, real) = if let Some(real) = name.strip_prefix("@favorites:") {
             (self.dir.join(".favorites"), real)
         } else if let Some(real) = name.strip_prefix("@secrets:") {
@@ -206,6 +208,29 @@ impl Store {
         Ok(self.open.get_mut(&name).expect("just opened"))
     }
 
+    fn real_home_alias(&self, name: &str) -> bool {
+        if clipstore::clipboard_scope::canonical_history(name) == clipstore::clipboard_scope::HOST {
+            return true;
+        }
+        [
+            self.config
+                .join("containers")
+                .join(name)
+                .join("container.conf"),
+            self.config
+                .join("declared/containers")
+                .join(format!("{name}.conf")),
+        ]
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .any(|text| {
+            text.lines().any(|line| {
+                line.split_once('=')
+                    .is_some_and(|(key, value)| key.trim() == "home" && value.trim() == "main")
+            })
+        })
+    }
+
     fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(&self.dir)
             .into_iter()
@@ -214,6 +239,10 @@ impl Store {
             .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| recorder::valid_history(n) && n != recorder::NO_HISTORY)
+            .filter(|n| {
+                clipstore::clipboard_scope::canonical_history(n) == clipstore::clipboard_scope::HOST
+                    || !self.real_home_alias(n)
+            })
             .map(|n| clipstore::clipboard_scope::canonical_history(&n).to_owned())
             .collect();
         names.sort();
@@ -247,7 +276,7 @@ impl Store {
                 }
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name != recorder::HOST
-                    && clipstore::clipboard_scope::canonical_history(&name) == recorder::HOST
+                    && self.real_home_alias(&name)
                     && recorder::valid_history(&name)
                 {
                     aliases.push(name);
@@ -318,7 +347,7 @@ impl Store {
     /// Purge matching text even when a favourite kept HTML or a different
     /// text MIME alongside it. Other buffers are not touched implicitly.
     fn clean_password_copies(&mut self, name: &str, content: &Content) -> Result<(), String> {
-        let name = Self::canonical_name(name);
+        let name = self.canonical_name(name);
         for shelf in [name.to_owned(), format!("@favorites:{name}")] {
             if shelf.starts_with('@') && !self.dir.join(".favorites").join(&name).is_dir() {
                 continue;
@@ -351,7 +380,7 @@ impl Store {
         if name.starts_with('@') {
             return Err("нужно имя буфера, не полки".into());
         }
-        let name = Self::canonical_name(name);
+        let name = self.canonical_name(name);
         let preview = secret_preview(label)?;
         let text = clipstore::protocol::decode(text).ok_or("текст пароля не читается")?;
         if text.len() > 32 * 1024 {
@@ -380,7 +409,7 @@ impl Store {
         if from.starts_with('@') || to.starts_with('@') {
             return Err("нужны два разных буфера".into());
         }
-        let (from, to) = (Self::canonical_name(from), Self::canonical_name(to));
+        let (from, to) = (self.canonical_name(from), self.canonical_name(to));
         if from == to {
             return Err("нужны два разных буфера".into());
         }
@@ -529,7 +558,7 @@ impl Store {
                 let Ok(id) = id.parse::<u64>() else {
                     return error(&"не номер");
                 };
-                let (from, to) = (Self::canonical_name(from), Self::canonical_name(to));
+                let (from, to) = (self.canonical_name(from), self.canonical_name(to));
                 if from == to {
                     return error(&"это та же история");
                 }
@@ -552,7 +581,7 @@ impl Store {
                 if name.starts_with("@favorites:") || name.starts_with("@secrets:") {
                     return error(&"запись уже из избранного");
                 }
-                let name = Self::canonical_name(name);
+                let name = self.canonical_name(name);
                 let entry = match self.history(&name).map(|h| h.get(id)) {
                     Ok(Ok(Some(entry))) => entry,
                     Ok(Ok(None)) => return error(&"записи нет"),
@@ -573,7 +602,7 @@ impl Store {
                 if name.starts_with('@') {
                     return error(&"паролем можно отметить только запись истории");
                 }
-                let name = Self::canonical_name(name);
+                let name = self.canonical_name(name);
                 let preview = match secret_preview(label) {
                     Ok(p) => p,
                     Err(e) => return error(&e),
@@ -663,7 +692,7 @@ impl Store {
     }
 
     fn keep(&mut self, history: &str, entry: NewEntry) {
-        let history = Self::canonical_name(history);
+        let history = self.canonical_name(history);
         if self.dir.join(".secrets").join(&history).is_dir() {
             if let Some(content) = password_content(&entry.contents) {
                 let secret = format!("@secrets:{history}");
@@ -1194,6 +1223,7 @@ fn daemon(dir: &Path) -> ExitCode {
     let _ = listener.set_nonblocking(true);
     let mut store = Store {
         dir: dir.to_path_buf(),
+        config: home.join(".config/vpn-zones"),
         key,
         open: HashMap::new(),
     };
@@ -1327,6 +1357,7 @@ mod tests {
         let mut store = Store {
             key: Key::load_or_create(&dir.join("key")).unwrap(),
             dir: dir.clone(),
+            config: dir.join("config"),
             open: HashMap::new(),
         };
         let id = store
@@ -1392,6 +1423,7 @@ mod tests {
         let key = Key::load_or_create(&dir.join("key")).unwrap();
         let mut store = Store {
             dir: dir.clone(),
+            config: dir.join("config"),
             key,
             open: HashMap::new(),
         };
@@ -1442,6 +1474,7 @@ mod tests {
         let key = Key::load_or_create(&dir.join("key")).unwrap();
         let mut store = Store {
             dir: dir.clone(),
+            config: dir.join("config"),
             key,
             open: HashMap::new(),
         };
@@ -1538,6 +1571,7 @@ mod tests {
         let key = Key::load_or_create(&dir.join("key")).unwrap();
         let mut store = Store {
             dir: dir.clone(),
+            config: dir.join("config"),
             key,
             open: HashMap::new(),
         };
@@ -1681,6 +1715,7 @@ mod tests {
         let key = Key::load_or_create(&dir.join("key")).unwrap();
         let mut store = Store {
             dir: dir.clone(),
+            config: dir.join("config"),
             key,
             open: HashMap::new(),
         };
@@ -1698,6 +1733,10 @@ mod tests {
             .as_nanos();
         let dir =
             std::env::temp_dir().join(format!("cw-shared-main-{}-{nonce}", std::process::id()));
+        let config = std::env::temp_dir().join(format!(
+            "cw-shared-main-config-{}-{nonce}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let key = Key::load_or_create(&dir.join("key")).unwrap();
         let text = |value: &str, copied_at| NewEntry {
@@ -1741,6 +1780,14 @@ mod tests {
         let mut nl = History::open(&dir.join("main:NL"), &key).unwrap();
         nl.append(text("NL only", 320)).unwrap();
         drop(nl);
+        let mut open = History::open(&dir.join("open"), &key).unwrap();
+        open.append(text("open main only", 330)).unwrap();
+        drop(open);
+        let mut unconfined = History::open(&dir.join("main-unconfined"), &key).unwrap();
+        unconfined
+            .append(text("unconfined main only", 340))
+            .unwrap();
+        drop(unconfined);
         let mut work = History::open(&dir.join("work"), &key).unwrap();
         work.append(text("private work", 400)).unwrap();
         drop(work);
@@ -1752,10 +1799,20 @@ mod tests {
         hidden.preview = Some("Пароль: synthetic".into());
         secret.append(hidden).unwrap();
         drop(secret);
+        for (name, home) in [
+            ("open", "main"),
+            ("main-unconfined", "main"),
+            ("work", "private"),
+        ] {
+            let policy = config.join("containers").join(name);
+            std::fs::create_dir_all(&policy).unwrap();
+            std::fs::write(policy.join("container.conf"), format!("home = {home}\n")).unwrap();
+        }
         drop(key);
 
         let mut store = Store {
             dir: dir.clone(),
+            config: config.clone(),
             key: Key::load_or_create(&dir.join("key")).unwrap(),
             open: HashMap::new(),
         };
@@ -1787,7 +1844,9 @@ mod tests {
                 "NL only",
                 "host only",
                 "host shared",
-                "main only"
+                "main only",
+                "open main only",
+                "unconfined main only"
             ]
         );
         assert_eq!(
@@ -1867,7 +1926,7 @@ mod tests {
         let Reply::Text(host_list) = store.answer("list\thost\t20") else {
             panic!()
         };
-        for alias in ["main", "main:DE", "main:NL"] {
+        for alias in ["main", "main:DE", "main:NL", "open", "main-unconfined"] {
             let Reply::Text(alias_list) = store.answer(&format!("list\t{alias}\t20")) else {
                 panic!()
             };
@@ -1879,5 +1938,6 @@ mod tests {
         ));
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(config).unwrap();
     }
 }
