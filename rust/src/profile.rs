@@ -239,6 +239,8 @@ pub struct Args {
     /// `--trust-extra DIR`, repeated: certificate directories declared in Nix,
     /// besides the container's own.
     pub trust_extra: Vec<PathBuf>,
+    /// The container's IANA timezone; `None` inherits the host's.
+    pub timezone: Option<OsString>,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -302,7 +304,13 @@ impl Args {
         let mut devices = Vec::new();
         let mut all_devices = false;
         let mut registered = None;
+        let mut timezone = None;
         while let Some(flag) = positional.first() {
+            if flag == "--timezone" {
+                timezone = Some(positional.get(1).ok_or(ArgError::MissingArguments)?.clone());
+                positional = positional.get(2..).unwrap_or(&[]);
+                continue;
+            }
             if flag == "--home-shared" {
                 home_shared = true;
                 positional = &positional[1..];
@@ -438,6 +446,7 @@ impl Args {
             folder_shared,
             home_shared,
             trust_extra,
+            timezone,
             cmd,
         })
     }
@@ -654,6 +663,37 @@ fn own_group_only() -> io::Result<()> {
     // SAFETY: a list of one gid and its length.
     if unsafe { libc::setgroups(1, &gid) } != 0 {
         return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn cover_timezone(zone: &OsStr) -> Result<(), String> {
+    if zone == "system" {
+        return Ok(());
+    }
+    let name = zone.to_str().ok_or("timezone is not UTF-8".to_owned())?;
+    if !crate::container::valid_timezone(name) {
+        return Err(format!("unknown IANA timezone {name:?}"));
+    }
+    let source = Path::new("/etc/zoneinfo").join(name);
+    crate::rebind::Own::open(&source, Path::new("/etc/localtime"))
+        .and_then(|own| own.lay())
+        .map_err(|e| e.to_string())?;
+    if Path::new("/etc/timezone").is_file() {
+        let dir = std::env::temp_dir().join(format!("cellward-timezone-{}", std::process::id()));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let file = dir.join("timezone");
+        fs::write(&file, format!("{name}\n")).map_err(|e| e.to_string())?;
+        let result = crate::sys::mount(
+            file.as_os_str(),
+            Path::new("/etc/timezone"),
+            "",
+            libc::MS_BIND,
+            "",
+        )
+        .and_then(|()| crate::sys::remount_read_only(Path::new("/etc/timezone")));
+        let _ = fs::remove_dir_all(&dir);
+        result.map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1611,6 +1651,16 @@ pub fn run(args: Args) -> u8 {
                  — not starting"
             );
             return EXIT_NOT_STARTED;
+        }
+    }
+
+    if let Some(zone) = &args.timezone {
+        if let Err(e) = cover_timezone(zone) {
+            eprintln!("profile-run: cannot set the container's timezone: {e}");
+            return EXIT_NOT_STARTED;
+        }
+        if zone != "system" {
+            std::env::set_var("TZ", zone);
         }
     }
 

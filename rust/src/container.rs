@@ -257,6 +257,8 @@ pub struct Container {
     /// Whether its programs cast the screen through the portal
     /// (`crate::screencast`); none of its own is the zone's setting.
     pub screencast: Option<Sourced<crate::microphone::Setting>>,
+    /// Its IANA timezone; `system` inherits the host's, none means UTC.
+    pub timezone: Option<Sourced<String>>,
     /// How its programs see the host's cameras (`crate::camera::Mode`);
     /// none of its own is the template's.
     pub camera: Option<Sourced<crate::camera::Mode>>,
@@ -1629,6 +1631,43 @@ pub fn own_value_in(
     }
 }
 
+/// A valid IANA timezone name with an installed zoneinfo entry.
+pub fn valid_timezone(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'+'))
+        })
+        && Path::new("/etc/zoneinfo").join(name).is_file()
+}
+
+/// The container's timezone: `system` inherits the host's, none means UTC.
+pub fn timezone_for(config: &Path, name: &str) -> std::ffi::OsString {
+    match own_value_in(config, name, "timezone") {
+        Ok(Some((word, _))) if word == "system" => word.into(),
+        Ok(Some((word, _))) if valid_timezone(&word) => word.into(),
+        _ => std::ffi::OsString::from("UTC"),
+    }
+}
+
+/// Persist a container's timezone (`None`: UTC, `system`: inherit the host's).
+pub fn set_timezone(tools: &Tools, selector: &str, value: Option<&str>) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if let Some(name) = value {
+        if name != "system" && !valid_timezone(name) {
+            return Err(format!(
+                "«{name}» — нет такой IANA-зоны в /etc/zoneinfo; используйте, например, UTC или Europe/Kaliningrad"
+            ));
+        }
+    }
+    write_key(&container.policy.join(FILE), "timezone", value, true)
+}
+
 /// A container's own on/off `key` and where it is from ([`own_value_in`]):
 /// `true`/`on` is on, anything else off — and a file that cannot be read is
 /// off, where it is.
@@ -1995,6 +2034,10 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         frame_color,
         microphone,
         screencast,
+        timezone: own_value_in(&tools.config, name, "timezone")
+            .ok()
+            .flatten()
+            .map(|(value, source)| Sourced { value, source }),
         camera,
         devices,
         links,
@@ -3673,6 +3716,32 @@ mod tests {
     }
 
     #[test]
+    fn a_containers_timezone_is_persistent_and_can_be_system_or_utc() {
+        let t = Tmp::new("timezone");
+        let tools = tools_in(&t.0);
+        fs::create_dir_all(tools.config.join(POLICY_DIR)).unwrap();
+        fs::write(tools.config.join(POLICY_DIR).join(LAYOUT_MARK), LAYOUT).unwrap();
+        fs::write(tools.config.join(POLICY_DIR).join(PINS_MOVED), "").unwrap();
+        create(&tools, "work", Home::Private).unwrap();
+        assert_eq!(timezone_for(&tools.config, "work"), "UTC");
+        set_timezone(&tools, "work", Some("Europe/Kaliningrad")).unwrap();
+        assert_eq!(timezone_for(&tools.config, "work"), "Europe/Kaliningrad");
+        assert_eq!(
+            load(&tools, "work").unwrap().timezone,
+            Some(Sourced {
+                value: "Europe/Kaliningrad".into(),
+                source: Source::Local,
+            })
+        );
+        set_timezone(&tools, "work", Some("system")).unwrap();
+        assert_eq!(timezone_for(&tools.config, "work"), "system");
+        set_timezone(&tools, "work", None).unwrap();
+        assert_eq!(timezone_for(&tools.config, "work"), "UTC");
+        assert!(set_timezone(&tools, "work", Some("../Kaliningrad")).is_err());
+        assert!(set_timezone(&tools, "work", Some("Mars/Olympus")).is_err());
+    }
+
+    #[test]
     fn a_container_has_a_frame_colour_of_its_own() {
         let t = Tmp::new("colour");
         let tools = tools_in(&t.0);
@@ -3944,6 +4013,7 @@ mod tests {
             frame_color: None,
             microphone: None,
             screencast: None,
+            timezone: None,
             camera: None,
             devices: Vec::new(),
             links: Vec::new(),

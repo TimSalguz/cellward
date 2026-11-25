@@ -957,6 +957,13 @@ zone's; a reader must take `null` as "the network's". Nix:
 `containers.<name>.permissions.x11` (`nullOr bool`, default `null`);
 locally `cellward container set <c> x11 default|on|off`.
 
+**A container's timezone** (`containers[].timezone`, added 2026-11-25): the
+IANA zone and its source. Locally `cellward container set <c> timezone
+default|system|<IANA-zone>`; `default`/missing is UTC, `system` inherits the
+host. The selected `/etc/localtime`, `/etc/timezone` and `TZ` agree in both
+`profile-run` and `fs-sandbox`, so an ordinary launch gets the same value as a
+throwaway sandbox. Unknown names and paths outside `/etc/zoneinfo` are refused.
+
 **A container's own zone-level permissions** (stage 5 of the container
 design, 2026-09-28): `containers[].hermetic`, `nix_daemon`,
 `host_files_writable` and `audio_manager`, each `{value, source}` with

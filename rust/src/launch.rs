@@ -1195,6 +1195,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             wrapped.push("--zone".into());
             wrapped.push(zone.clone());
         }
+        if let Some(zone) = launch_timezone(tools, &selection, &zone) {
+            wrapped.push("--timezone".into());
+            wrapped.push(zone);
+        }
         // In its container's instance, the container's /tmp — shared by its
         // launches, so that a single-instance program started again finds
         // the first copy (`fs_sandbox::Layout::share_tmp`). Never outside
@@ -1683,6 +1687,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             devices: &device_args,
             storage: storage_dir.as_deref(),
             net_denied,
+            timezone: launch_timezone(tools, &selection, &zone),
         },
         cmd,
     );
@@ -1780,7 +1785,7 @@ pub enum Network {
 }
 
 /// Everything the last command line of a launch depends on.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Entry<'a> {
     pub unshare: &'a Path,
     pub core: &'a Path,
@@ -1838,6 +1843,8 @@ pub struct Entry<'a> {
     /// launch's cgroup is its epoch's `denied` (`container-enter --net-rule
     /// deny`, `crate::epoch::DENIED`), whose sockets the instance drops.
     pub net_denied: bool,
+    /// The container's IANA timezone; `None` inherits the host's.
+    pub timezone: Option<OsString>,
 }
 
 /// The command line `run` finally `exec`s: the namespaces, the container, then
@@ -1926,6 +1933,10 @@ pub fn entry_argv(entry: &Entry<'_>, cmd: Vec<OsString>) -> Vec<OsString> {
     if entered {
         exec.push(entry.core.into());
         exec.push("profile-run".into());
+        if let Some(zone) = &entry.timezone {
+            exec.push("--timezone".into());
+            exec.push(zone.clone());
+        }
         exec.push("--cwd".into());
         exec.push(entry.cwd.into());
         // Only a throwaway container asks who else is in it.
@@ -2429,6 +2440,16 @@ pub fn container_name(selection: &Selection) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn launch_timezone(tools: &Tools, selection: &Selection, zone: &OsStr) -> Option<OsString> {
+    if zone == UNCONFINED && selection.sandbox == Sandbox::None {
+        return None;
+    }
+    Some(container_name(selection).map_or_else(
+        || OsString::from("UTC"),
+        |name| crate::container::timezone_for(&tools.config, &name),
+    ))
 }
 
 /// A frame has to identify a program-owned home without reducing every such
@@ -3984,6 +4005,19 @@ mod tests {
     }
 
     #[test]
+    fn an_unconfined_launch_keeps_the_system_timezone() {
+        let tools = tools_in(Path::new("/nonexistent"));
+        let open =
+            Selection::parse(&argv(&["unconfined", "--no-isolation", "--", "date"])).unwrap();
+        assert_eq!(launch_timezone(&tools, &open, &open.zone), None);
+        let isolated = Selection::parse(&argv(&["offline", "--", "date"])).unwrap();
+        assert_eq!(
+            launch_timezone(&tools, &isolated, &isolated.zone),
+            Some(OsString::from("UTC"))
+        );
+    }
+
+    #[test]
     fn the_old_name_of_unconfined_is_read_as_it() {
         let s = Selection::parse(&argv(&["direct", "--", "firefox"])).unwrap();
         assert_eq!(s.zone, os(UNCONFINED));
@@ -4606,6 +4640,7 @@ mod tests {
             black_camera: false,
             devices: &[],
             net_denied: false,
+            timezone: None,
         }
     }
 

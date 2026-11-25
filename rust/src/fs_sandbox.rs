@@ -274,6 +274,8 @@ pub struct Args {
     /// one. Its programs are the zone to the portal
     /// (`desktop::zone_app_id`, LEAK-MODEL §23).
     pub zone: Option<String>,
+    /// `--timezone <IANA>`: the container's timezone; `system` inherits.
+    pub timezone: Option<OsString>,
     /// `--share-tmp on`: the launch runs in its container's instance, whose
     /// `/tmp` is the container's own — the sandbox takes it instead of a
     /// tmpfs of its own ([`Layout::share_tmp`]).
@@ -350,6 +352,7 @@ impl Args {
         let mut share_tmp = false;
         let mut devices = Vec::new();
         let mut zone: Option<String> = None;
+        let mut timezone: Option<OsString> = None;
         let mut app_id: Option<OsString> = None;
         let mut rest = argv[..split].iter();
         while let Some(arg) = rest.next() {
@@ -365,6 +368,7 @@ impl Args {
                 .next()
                 .ok_or_else(|| ArgError::MissingValue(flag.clone()))?;
             match flag.as_str() {
+                "--timezone" => timezone = Some(value.clone()),
                 "--bwrap" => tools.bwrap = PathBuf::from(value),
                 "--dbus-proxy" => tools.dbus_proxy = PathBuf::from(value),
                 "--kdialog" => tools.kdialog = PathBuf::from(value),
@@ -435,6 +439,7 @@ impl Args {
             share_tmp,
             devices,
             zone,
+            timezone,
             tools,
             cmd,
         })
@@ -629,6 +634,8 @@ pub struct Layout {
     pub resolv: Option<PathBuf>,
     /// The container's IANA timezone; `None` keeps the host's.
     pub timezone: Option<OsString>,
+    /// The selected name rendered for `/etc/timezone`.
+    pub timezone_file: Option<PathBuf>,
     /// `/dev/dri` and the `/dev/nvidia*` nodes that exist.
     pub dev_nodes: Vec<PathBuf>,
     /// The compositor's socket — already the restricted one built by
@@ -786,7 +793,28 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
     bind_same(&mut a, "--ro-bind-try", Path::new("/run/current-system"));
     bind_same(&mut a, "--ro-bind-try", Path::new("/run/opengl-driver"));
     bind_same(&mut a, "--ro-bind-try", Path::new("/run/opengl-driver-32"));
-    bind_same(&mut a, "--ro-bind", Path::new("/etc"));
+    if layout.timezone.is_some() {
+        push(&mut a, "--tmpfs");
+        push(&mut a, "/etc");
+        let mut entries: Vec<PathBuf> = fs::read_dir("/etc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                !matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("localtime" | "timezone")
+                )
+            })
+            .collect();
+        entries.sort();
+        for path in entries {
+            bind_same(&mut a, "--ro-bind-try", &path);
+        }
+    } else {
+        bind_same(&mut a, "--ro-bind", Path::new("/etc"));
+    }
     // Right after /etc, which it covers one file of: the host's machine-id is
     // one identifier for every zone and every sandbox of the machine, and two
     // identities that are never supposed to meet share it. (LEAK-MODEL §10)
@@ -800,12 +828,11 @@ pub fn bwrap_args(layout: &Layout, cmd: &[OsString]) -> Vec<OsString> {
             &Path::new("/etc/zoneinfo").join(zone),
             Path::new("/etc/localtime"),
         );
-        bind(
-            &mut a,
-            "--ro-bind-try",
-            Path::new("/dev/null"),
-            Path::new("/etc/timezone"),
-        );
+        let file = layout
+            .timezone_file
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/dev/null"));
+        bind(&mut a, "--ro-bind-try", file, Path::new("/etc/timezone"));
     }
     bind_same(&mut a, "--ro-bind-try", Path::new("/sys"));
     // The FILE behind /etc/resolv.conf, and never the directory it lives in:
@@ -1471,6 +1498,12 @@ pub fn settle_permissions(
 
 /// Everything `fs-sandbox` does, from the permissions to the exit code.
 pub fn run(args: Args) -> u8 {
+    if let Some(zone) = args.timezone.as_ref().filter(|zone| *zone != "system") {
+        if !zone.to_str().is_some_and(crate::container::valid_timezone) {
+            eprintln!("fs-sandbox: unknown IANA timezone {zone:?}");
+            return EXIT_NOT_STARTED;
+        }
+    }
     let Some(home) = home_dir() else {
         eprintln!("fs-sandbox: no $HOME — there is nothing to sandbox");
         return EXIT_NOT_STARTED;
@@ -1773,6 +1806,24 @@ pub fn run(args: Args) -> u8 {
     } else {
         appearance(&home, &real_home)
     };
+    let timezone_file = args
+        .timezone
+        .as_ref()
+        .filter(|zone| *zone != "system")
+        .map(|zone| {
+            let path = cleanup.dir.join("timezone");
+            fs::write(&path, format!("{}\n", zone.to_string_lossy()))
+                .map_err(|e| format!("cannot write the container's timezone: {e}"))
+                .map(|()| path)
+        })
+        .transpose();
+    let timezone_file = match timezone_file {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("fs-sandbox: {error}");
+            return EXIT_NOT_STARTED;
+        }
+    };
     let layout = Layout {
         app_id: args.app_id.clone(),
         home: home.clone(),
@@ -1788,7 +1839,8 @@ pub fn run(args: Args) -> u8 {
         mimeapps: home.join(MIMEAPPS).is_file().then(|| home.join(MIMEAPPS)),
         appearance: look,
         resolv: resolv_file(),
-        timezone: Some(OsString::from("UTC")),
+        timezone: args.timezone.clone().filter(|zone| *zone != "system"),
+        timezone_file,
         dev_nodes: {
             let mut nodes = dev_nodes(Path::new("/dev"));
             if args.camera {
@@ -2325,6 +2377,7 @@ mod tests {
             appearance: Vec::new(),
             resolv: Some(PathBuf::from("/run/systemd/resolve/stub-resolv.conf")),
             timezone: None,
+            timezone_file: None,
             dev_nodes: Vec::new(),
             wayland: None,
             pipewire: None,
@@ -2539,6 +2592,31 @@ mod tests {
             .windows(3)
             .any(|words| { words == ["--ro-bind-try", "/dev/null", "/etc/timezone"] }));
         assert!(got.windows(2).any(|words| words == ["TZ", "UTC"]));
+        let named = Layout {
+            timezone: Some(OsString::from("Europe/Kaliningrad")),
+            timezone_file: Some(PathBuf::from("/tmp/cellward-test-timezone")),
+            ..l
+        };
+        let got = strs(&bwrap_args(&named, &argv(&["prog"])));
+        assert!(got.windows(3).any(|words| {
+            words
+                == [
+                    "--ro-bind-try",
+                    "/etc/zoneinfo/Europe/Kaliningrad",
+                    "/etc/localtime",
+                ]
+        }));
+        assert!(got.windows(3).any(|words| {
+            words
+                == [
+                    "--ro-bind-try",
+                    "/tmp/cellward-test-timezone",
+                    "/etc/timezone",
+                ]
+        }));
+        assert!(got
+            .windows(2)
+            .any(|words| words == ["TZ", "Europe/Kaliningrad"]));
     }
 
     /// In its container's instance the sandbox takes the container's /tmp —

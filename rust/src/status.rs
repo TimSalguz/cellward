@@ -965,6 +965,10 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         Some(m) => sourced_str(m.value.as_str(), m.source),
         None => sourced("null".to_owned(), Source::Default),
     };
+    let timezone = match &c.timezone {
+        Some(zone) => sourced_str(&zone.value, zone.source),
+        None => sourced_str("UTC", Source::Default),
+    };
     // The devices it is given (`crate::devices`), each with where from.
     let devices = array(
         c.devices
@@ -1031,7 +1035,7 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"folder_rules\":{folder_rules},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"frame_width\":{frame_width},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"camera_mode\":{camera_mode},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"frame_width\":{frame_width},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"camera_mode\":{camera_mode},\"timezone\":{timezone},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),
