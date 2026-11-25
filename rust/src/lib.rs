@@ -125,6 +125,7 @@ pub mod desktop;
 pub mod device_guard;
 pub mod devices;
 pub mod dialog;
+pub mod dnscache;
 pub mod dnsfwd;
 pub mod dnspath;
 pub mod doctor;

@@ -11,11 +11,12 @@
 //! ask them further is made in the zone. The host's resolver — resolved, nscd,
 //! `/etc/resolv.conf` — points here and nowhere else.
 //!
-//! **Nothing is parsed.** A query is forwarded as bytes and an answer is
-//! passed back as bytes; the only field read is the ID, to drop an answer
-//! that is not to this query. Each query gets a socket of its own, connected
-//! to the resolver, so the kernel picks a fresh source port and drops what
-//! comes from anywhere else.
+//! A query is forwarded as bytes and an answer is passed back as bytes; the
+//! forwarding path reads only the ID, to drop an answer that is not to this
+//! query. The optional positive cache also compares the question and reads
+//! resource-record TTLs, without interpreting their data. Each upstream query
+//! gets a socket of its own, connected to the resolver, so the kernel picks a
+//! fresh source port and drops what comes from anywhere else.
 //!
 //! **Where it asks.** `--resolv FILE`: the `nameserver` lines of the zone's
 //! resolv.conf, bound over `/etc/resolv.conf` by the attaching drop-in and
@@ -26,6 +27,7 @@
 //! are off. No resolver: the query is dropped, and the asker times out — a
 //! zone that is not up answers nothing rather than something from elsewhere.
 
+use crate::dnscache::Cache;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -218,6 +220,15 @@ pub fn forward_udp(query: &[u8], resolvers: &[SocketAddr]) -> Option<Vec<u8>> {
     None
 }
 
+fn forward_udp_cached(query: &[u8], resolvers: &[SocketAddr], cache: &Cache) -> Option<Vec<u8>> {
+    if let Some(response) = cache.get(query, resolvers) {
+        return Some(response);
+    }
+    let response = forward_udp(query, resolvers)?;
+    cache.put(query, resolvers, &response);
+    Some(response)
+}
+
 /// A length-prefixed message, whole by `deadline` when there is one: each
 /// read waits no longer than what is left of it, so a peer trickling a byte
 /// at a time cannot stretch one message past it (review 2026-09-27: the
@@ -287,6 +298,15 @@ pub fn forward_tcp(query: &[u8], resolvers: &[SocketAddr]) -> Option<Vec<u8>> {
     None
 }
 
+fn forward_tcp_cached(query: &[u8], resolvers: &[SocketAddr], cache: &Cache) -> Option<Vec<u8>> {
+    if let Some(response) = cache.get(query, resolvers) {
+        return Some(response);
+    }
+    let response = forward_tcp(query, resolvers)?;
+    cache.put(query, resolvers, &response);
+    Some(response)
+}
+
 /// One slot of `MAX_IN_FLIGHT`, given back when dropped.
 struct Slot(Arc<AtomicUsize>);
 
@@ -307,7 +327,7 @@ impl Drop for Slot {
     }
 }
 
-fn serve_udp(listener: UdpSocket, args: Arc<Args>) {
+fn serve_udp(listener: UdpSocket, args: Arc<Args>, cache: Arc<Cache>) {
     let listener = Arc::new(listener);
     let in_flight = Arc::new(AtomicUsize::new(0));
     let mut buf = vec![0u8; MAX_MESSAGE];
@@ -320,17 +340,18 @@ fn serve_udp(listener: UdpSocket, args: Arc<Args>) {
         };
         let query = buf[..n].to_vec();
         let (listener, args) = (Arc::clone(&listener), Arc::clone(&args));
+        let cache = Arc::clone(&cache);
         // No thread to be had: the query is dropped, the listener lives on.
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            if let Some(reply) = forward_udp(&query, &args.resolvers()) {
+            if let Some(reply) = forward_udp_cached(&query, &args.resolvers(), &cache) {
                 let _ = listener.send_to(&reply, client);
             }
         });
     }
 }
 
-fn serve_tcp_client(mut client: TcpStream, args: &Args) {
+fn serve_tcp_client(mut client: TcpStream, args: &Args, cache: &Cache) {
     let _ = client.set_read_timeout(Some(TCP_IDLE));
     let _ = client.set_write_timeout(Some(TCP_IDLE));
     let end = std::time::Instant::now() + TCP_LIFE;
@@ -338,7 +359,7 @@ fn serve_tcp_client(mut client: TcpStream, args: &Args) {
         let Ok(query) = read_message_by(&mut client, Some(end)) else {
             return;
         };
-        let Some(reply) = forward_tcp(&query, &args.resolvers()) else {
+        let Some(reply) = forward_tcp_cached(&query, &args.resolvers(), cache) else {
             return;
         };
         if write_message(&mut client, &reply).is_err() {
@@ -347,7 +368,7 @@ fn serve_tcp_client(mut client: TcpStream, args: &Args) {
     }
 }
 
-fn serve_tcp(listener: TcpListener, args: Arc<Args>) {
+fn serve_tcp(listener: TcpListener, args: Arc<Args>, cache: Arc<Cache>) {
     let in_flight = Arc::new(AtomicUsize::new(0));
     for client in listener.incoming() {
         let Ok(client) = client else {
@@ -357,9 +378,10 @@ fn serve_tcp(listener: TcpListener, args: Arc<Args>) {
             continue;
         };
         let args = Arc::clone(&args);
+        let cache = Arc::clone(&cache);
         let _ = thread::Builder::new().spawn(move || {
             let _slot = slot;
-            serve_tcp_client(client, &args);
+            serve_tcp_client(client, &args, &cache);
         });
     }
 }
@@ -401,19 +423,21 @@ pub fn run(args: Args) -> u8 {
         return 1;
     }
     let args = Arc::new(args);
+    let cache = Arc::new(Cache::default());
     let mut workers = Vec::new();
     for fd in LISTEN_FDS_START..LISTEN_FDS_START + count as RawFd {
         let args = Arc::clone(&args);
+        let cache = Arc::clone(&cache);
         match socket_type(fd) {
             // SAFETY: systemd passed this descriptor to us to own.
             Some(libc::SOCK_DGRAM) => {
                 let sock = unsafe { UdpSocket::from_raw_fd(fd) };
-                workers.push(thread::spawn(move || serve_udp(sock, args)));
+                workers.push(thread::spawn(move || serve_udp(sock, args, cache)));
             }
             // SAFETY: as above.
             Some(libc::SOCK_STREAM) => {
                 let sock = unsafe { TcpListener::from_raw_fd(fd) };
-                workers.push(thread::spawn(move || serve_tcp(sock, args)));
+                workers.push(thread::spawn(move || serve_tcp(sock, args, cache)));
             }
             _ => eprintln!("dns-forward: descriptor {fd} is not a UDP or TCP socket, skipped"),
         }
@@ -580,6 +604,38 @@ mod tests {
         assert_eq!(&reply[..2], &[7, 9]);
         assert_eq!(reply.last(), Some(&0x42));
         assert!(forward_udp(&query, &[]).is_none());
+    }
+
+    #[test]
+    fn a_repeated_udp_query_is_answered_by_the_route_cache() {
+        let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&calls);
+        thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            while let Ok((n, from)) = sock.recv_from(&mut buf) {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut reply = buf[..n].to_vec();
+                reply[2] = 0x81;
+                reply[3] = 0x80;
+                reply[7] = 1;
+                reply.extend_from_slice(b"\xc0\x0c\x00\x01\x00\x01");
+                reply.extend_from_slice(&30_u32.to_be_bytes());
+                reply.extend_from_slice(b"\x00\x04");
+                reply.extend_from_slice(&[192, 0, 2, 1]);
+                let _ = sock.send_to(&reply, from);
+            }
+        });
+        let mut query = vec![7, 9, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        query.extend_from_slice(b"\x07example\x03com\x00\x00\x01\x00\x01");
+        let cache = Cache::default();
+        let first = forward_udp_cached(&query, &[addr], &cache).unwrap();
+        query[..2].copy_from_slice(&0xabcd_u16.to_be_bytes());
+        let second = forward_udp_cached(&query, &[addr], &cache).unwrap();
+        assert_eq!(&first[..2], &[7, 9]);
+        assert_eq!(&second[..2], &0xabcd_u16.to_be_bytes());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

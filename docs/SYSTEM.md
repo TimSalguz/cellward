@@ -662,12 +662,16 @@ nscd, a program reading `/etc/resolv.conf` — is asked through the zone.
   in the host's network — hands its sockets to `vpn-zones-dns.service`, which the generator
   (§5) attaches to the zone. The queries arrive from the host, and every socket the service
   makes to ask them further is made in the zone (`vpn-zone-core dns-forward`,
-  `rust/src/dnsfwd.rs`). It parses nothing but the ID, gives each query a socket of its own
+  `rust/src/dnsfwd.rs`). It checks the ID, gives each upstream query a socket of its own
   connected to the resolver (a fresh port from the kernel, nothing accepted from elsewhere),
   and asks the zone's resolv.conf — bound over `/etc/resolv.conf`, read again per query
   because the zone rewrites it in place when its tunnel comes up. A zone that is not up
   answers nothing: the query is dropped, never sent elsewhere. `DynamicUser`, no
-  capabilities, `ProtectSystem=strict`.
+  capabilities, `ProtectSystem=strict`. A bounded positive cache (`rust/src/dnscache.rs`)
+  holds at most 256 complete-question answers. Its key includes the ordered resolver
+  list, so another route cannot reuse the entry; truncated, failing and malformed answers
+  are not cached. Hits use the current query's ID and cap every ordinary record's TTL by
+  the time left. There are no background refreshes or negative answers from the cache.
 - **The host's resolver points there and nowhere else.** With resolved: `DNS=127.0.0.60`,
   `FallbackDNS=` empty, `Domains=~.` — forced (`mkForce`), because a merged list would send
   part of the questions around the zone. Without it: `networking.nameservers`. What DHCP
