@@ -12,8 +12,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use vpn_zone::{
-    bus_filter, console, desktop, dnsfwd, egress, fs_sandbox, openconnect, profile, sysrun, system,
-    wl_sandbox, zone,
+    adapter_process, bus_filter, console, desktop, dnsfwd, egress, fs_sandbox, openconnect,
+    profile, sysrun, system, wl_sandbox, zone,
 };
 
 const USAGE: &str = "\
@@ -258,6 +258,7 @@ fn main() -> ExitCode {
                 ExitCode::from(EXIT_USAGE)
             }
         },
+        Some("_transport-fake") => ExitCode::from(adapter_process::fake_main()),
         Some("dns-forward") => match dnsfwd::Args::parse(&args[1..]) {
             Ok(parsed) => ExitCode::from(dnsfwd::run(parsed)),
             Err(e) => {

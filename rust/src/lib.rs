@@ -100,6 +100,7 @@
 //! and the systemd unit delegate to) and `vpn-zone-seccomp` (the filter, and its
 //! own selftest).
 
+pub mod adapter_process;
 pub mod bridge;
 pub mod broker;
 pub mod build;

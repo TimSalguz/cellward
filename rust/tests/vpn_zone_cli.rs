@@ -283,6 +283,46 @@ fn transport_inventory_and_manifest_check_never_execute_the_adapter() {
 }
 
 #[test]
+#[ignore = "needs user namespaces; run by integration smoke"]
+fn transport_selftest_runs_the_fake_adapter_in_bwrap() {
+    let home = Home::new("transport-selftest");
+    let bwrap = std::env::var("BWRAP").unwrap_or_else(|_| {
+        let out = Command::new("which")
+            .arg("bwrap")
+            .output()
+            .expect("bwrap is required for the lifecycle test");
+        assert!(
+            out.status.success(),
+            "bwrap is required for the lifecycle test"
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    });
+    let manifest = home.manifest();
+    let text = fs::read_to_string(&manifest)
+        .unwrap()
+        .replace("/nonexistent/bwrap", &bwrap)
+        .replace("/nonexistent/vpn-zone-core", CORE);
+    fs::write(&manifest, text).unwrap();
+    let manifests = home.root.join("config/transports");
+    fs::create_dir_all(&manifests).unwrap();
+    fs::write(
+        manifests.join("fake.conf"),
+        format!(
+            "[Transport]\nName = fake\nRun = {CORE}\nChannel = datagram\nFake = yes\nMTU = 1200\n"
+        ),
+    )
+    .unwrap();
+    let out = home.run(&["transport", "selftest", "fake"]);
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).starts_with("ok\tfake\tsession=42 sequence=1 bytes=9"));
+}
+
+#[test]
 fn mtu_reports_each_down_hop_without_calling_external_tools() {
     let home = Home::new("mtu-report");
     let outer = home.state().join("outer");

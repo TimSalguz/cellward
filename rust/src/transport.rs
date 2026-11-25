@@ -89,6 +89,8 @@ pub struct Adapter {
     pub channel: Channel,
     pub capabilities: Capabilities,
     pub run: Option<PathBuf>,
+    /// Run the deterministic lifecycle adapter instead of the normal protocol.
+    pub fake: bool,
 }
 
 impl Adapter {
@@ -99,6 +101,7 @@ impl Adapter {
             channel,
             capabilities: Capabilities::new(ipv6),
             run: None,
+            fake: false,
         }
     }
 
@@ -125,6 +128,7 @@ impl Adapter {
             "Asymmetric",
             "Multiplex",
             "MTU",
+            "Fake",
         ];
         if let Some(key) = section
             .entries
@@ -177,6 +181,7 @@ impl Adapter {
             channel,
             capabilities,
             run: Some(run),
+            fake: boolean(section, "Fake", false)?,
         })
     }
 
@@ -322,7 +327,8 @@ impl AdapterSession for LoopbackSession {
 /// `cellward transport list [--json]` and `transport check <manifest>`.
 pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
     const USAGE: &str = "cellward transport list [--json]\n\
-                         cellward transport check <manifest.conf>";
+                         cellward transport check <manifest.conf>\n\
+                         cellward transport selftest <имя>";
     let words: Vec<&str> = match args.iter().map(|arg| arg.to_str()).collect::<Option<_>>() {
         Some(words) => words,
         None => {
@@ -357,6 +363,22 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
                         );
                     }
                 }
+                0
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        },
+        ["selftest", name] => match crate::adapter_process::selftest(tools, name) {
+            Ok(frame) => {
+                println!(
+                    "ok\t{}\tsession={} sequence={} bytes={}",
+                    name,
+                    frame.session_id,
+                    frame.sequence,
+                    frame.payload.len()
+                );
                 0
             }
             Err(error) => {

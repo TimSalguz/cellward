@@ -48,9 +48,32 @@ error-free configuration only.
 The fake adapter is for scheduler and VM tests, including MTU rejection. It is
 not a network transport.
 
-A later lifecycle adapter must run the external program in a separate sandbox
-with only explicitly issued capabilities. It must not inherit permission to
-change host routes, firewall or DNS. Publication, start, health checks and
-consumer access remain separate decisions, and adapter death closes the
-consumer path. No external program is started by this document's current
-implementation.
+## Sandboxed lifecycle selftest
+
+`cellward transport selftest <name>` starts an external adapter in bwrap with
+`--unshare-all`: no host network, real home, host routes, firewall or DNS are
+granted. The process gets a fresh empty home/runtime and read-only Nix/store and
+`/etc`. Closing the control channel stops it.
+
+The stdio protocol is a big-endian `u32` length, then `session_id` and
+`sequence` as big-endian `u64`, then at most 1 MiB of payload. An adapter must
+first return session/sequence zero with payload `ready`. Startup and response
+timeouts are three seconds; malformed frames and a closed channel are errors.
+
+For the deterministic end-to-end fixture, `Fake = yes` appends the hidden
+`_transport-fake` command to `Run` (normally the Cellward core binary). It sends
+`ready` and echoes each frame. This is a lifecycle test, not a network route:
+
+```ini
+[Transport]
+Name = fake
+Run = /nix/store/…-cellward/bin/vpn-zone-core
+Channel = datagram
+Fake = yes
+MTU = 1200
+```
+
+`selftest` sends session 42, sequence 1 and requires the same frame back. It
+publishes nothing and grants no consumer access. A production adapter still
+needs a separately reviewed network capability, health checks and publication;
+adapter death must close that consumer path.
