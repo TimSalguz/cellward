@@ -187,6 +187,8 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
     second_box = boxes[1]
     x = second_box[2] - 4 - 12
     y = second_box[1] + 4 + 10
+    pointer("move", (second_box[0] + second_box[2]) // 2, second_box[1] + 1)
+    machine.sleep(0.5)
     pointer("move", x, y)
     settled("niri-two-windows-hover", two_frames)
     pointer("press")
