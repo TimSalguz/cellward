@@ -152,6 +152,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::os::fd::OwnedFd;
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use wl_proxy::client::Client;
@@ -2432,6 +2433,8 @@ impl CornerParts {
     }
 }
 
+static NEXT_TOP_OWNER: AtomicU64 = AtomicU64::new(1);
+
 /// One xdg_surface of the program, toplevel or not. Weak references to the
 /// program's objects: their handlers hold this, and a cycle would keep a
 /// closed window's objects for the connection's life.
@@ -2494,6 +2497,8 @@ struct Window {
     /// click on the title turns ([`Window::double_clicked`]).
     maximized: bool,
     unified_top: bool,
+    /// This window's identity in the launch's shared top-cache claim.
+    top_owner: u64,
     /// When the title was last pressed, on the compositor's clock: the
     /// first press of a double click, maybe.
     title_pressed: Option<u32>,
@@ -2561,6 +2566,7 @@ impl Window {
             in_window: false,
             maximized: false,
             unified_top: false,
+            top_owner: NEXT_TOP_OWNER.fetch_add(1, Ordering::Relaxed),
             title_pressed: None,
             hover_keep_until: None,
             laid: None,
@@ -2738,8 +2744,8 @@ impl Window {
         }
         let unified = self.look.outer > 0
             && !self.look.tag()
-            && f.text().is_some()
-            && geometry_up(area, i).w <= crate::wl_title::top::MAX_WIDTH;
+            && geometry_up(area, i).w <= crate::wl_title::top::MAX_WIDTH
+            && f.text().is_some_and(|text| text.claim_top(self.top_owner));
         if unified != self.unified_top && self.title.is_some() {
             // Crossing the bounded renderer's width limit changes the
             // surface topology; do not reuse a hidden legacy top strip.

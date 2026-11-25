@@ -2148,6 +2148,8 @@ pub struct Text {
     prompt: Regions,
     top: Regions,
     top_keys: RefCell<Vec<Option<(top::TopSpec, u32)>>>,
+    /// The one window that may use the shared, width-dependent top cache.
+    top_owner: Cell<Option<u64>>,
     clock: Cell<u64>,
 }
 
@@ -2249,6 +2251,7 @@ impl Text {
             prompt,
             top,
             top_keys: RefCell::new(vec![None; top::TOP_SLOTS]),
+            top_owner: Cell::new(None),
             clock: Cell::new(0),
         }
     }
@@ -2317,6 +2320,21 @@ impl Text {
         self.region_at(&self.buttons, scale, |scale| {
             render_buttons(&self.font, &self.glyphs, &self.look.buttons, scale, self.bg)
         })
+    }
+
+    /// Claim the width-dependent top cache for one window of the launch.
+    /// Other windows retain the legacy renderer, whose images do not depend
+    /// on the window's width and are safe to share. The claim is retained for
+    /// the text's lifetime: a closed owner's compositor buffers may still be
+    /// alive when another window appears.
+    pub(crate) fn claim_top(&self, owner: u64) -> bool {
+        match self.top_owner.get() {
+            None => {
+                self.top_owner.set(Some(owner));
+                true
+            }
+            Some(current) => current == owner,
+        }
     }
 
     pub(crate) fn top_at(&self, scale: u32, spec: top::TopSpec) -> Option<Drawn> {
@@ -2588,6 +2606,12 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         let bg = Rgb(0x90, 0x60, 0x40);
         let text = Text::new(prepared, bg, file.into(), writer);
+        assert!(text.claim_top(1));
+        assert!(text.claim_top(1), "the same window keeps its renderer");
+        assert!(
+            !text.claim_top(2),
+            "a second window uses the legacy renderer"
+        );
         let base = top::TopSpec {
             width: 600,
             height: 52,

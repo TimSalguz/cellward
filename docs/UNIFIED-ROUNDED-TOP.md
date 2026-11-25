@@ -52,7 +52,13 @@ size is unchanged. Side strips extend one logical pixel underneath the top,
 so independent device-pixel rounding cannot open an internal seam; the top
 occludes that overlap and the outer contour is unchanged.
 The sparse memfd reserves bounded space for two images, not every button
-variant at full-window width. Actual pixels are rendered only on demand.
+variant at full-window width. Actual pixels are rendered only on demand. One
+window owns this width-dependent cache for the text's lifetime; other windows
+use the legacy renderer, whose images are width-independent. This prevents
+one window's current and retired buffers from starving another window's resize
+or hover redraw. The owner's claim is not transferred on close because its
+compositor buffers may still be alive.
+
 The composite path supports up to 8192 logical pixels of width; larger windows
 and font-less launches retain the legacy bounded renderer. Crossing that
 limit rebuilds the surface topology. The plain square-frame and tag paths

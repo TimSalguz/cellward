@@ -10,6 +10,7 @@
 #   - without niri's clipping, the frame's own corners
 #     (`frame outer-radius niri`) cut the frame round themselves, on the fly;
 #   - a new radius in niri's config reaches the open window;
+#   - two windows of one launch keep their own width and working hover buttons;
 #   - fullscreen: the border at the screen's edges, the zone's name over the
 #     top for a moment, with its text.
 #   - permission panels accept real pointer clicks, fall back on the same
@@ -242,9 +243,14 @@ let
                   machine.sleep(1)
           raise AssertionError(f"{name}: never tried")
 
+      feet = (
+          "foot --app-id niri-foot & "
+          "while [ ! -e /tmp/niri-second-window ]; do sleep 0.2; done; "
+          "foot --app-id niri-foot-second & wait"
+      )
       alice(
           f"systemd-run --user --unit=vmfoot --setenv=WAYLAND_DISPLAY={nested} "
-          "cellward run offline -- foot --app-id niri-foot"
+          f"cellward run offline -- bash -c {shlex.quote(feet)}"
       )
 
       def framed(at):
