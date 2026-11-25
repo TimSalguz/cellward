@@ -1631,8 +1631,12 @@ pub fn own_value_in(
     }
 }
 
-/// A valid IANA timezone name with an installed zoneinfo entry.
+/// A valid IANA timezone name. UTC needs no installed zoneinfo entry; other
+/// names do.
 pub fn valid_timezone(name: &str) -> bool {
+    if name == "UTC" {
+        return true;
+    }
     !name.is_empty()
         && name.len() <= 128
         && name.split('/').all(|part| {
