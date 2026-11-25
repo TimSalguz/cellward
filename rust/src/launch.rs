@@ -47,6 +47,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -643,9 +644,46 @@ pub fn has_display() -> bool {
     env_nonempty("WAYLAND_DISPLAY").is_some() || env_nonempty("DISPLAY").is_some()
 }
 
+fn interactive_terminal() -> bool {
+    // SAFETY: isatty only examines the standard descriptors.
+    unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 }
+}
+
+fn terminal_yes(answer: &str) -> bool {
+    matches!(
+        answer.trim().to_lowercase().as_str(),
+        "y" | "yes" | "д" | "да"
+    )
+}
+
+fn terminal_conflict(message: &str) -> crate::window::Asked {
+    eprintln!("{message}");
+    eprint!("Запустить всё равно? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_ok() && terminal_yes(&answer) {
+        crate::window::Asked::Chose("go".into())
+    } else {
+        crate::window::Asked::Closed
+    }
+}
+
+const RUN_USAGE: &str = "cellward run <сеть> [контейнер] [--] [команда [аргументы…]]\n\n\
+  --container <имя>|main  контейнер; main — настоящий дом\n\
+  --profile <имя>         прежнее имя --container\n\
+  --sandbox <имя>         контейнер со своим домом\n\
+  --fs-sandbox [--join <имя>]  разовый контейнер с пустым домом\n\
+  --tmp-profile [--join <каталог>]  разовый слой над домом\n\
+  --no-isolation          встроенный контейнер без изоляции\n\
+  --with <ключ=значение>  разрешение одного разового запуска\n";
+
 /// Run a program inside a zone. Returns only when something went wrong: the
 /// successful path ends in `execvp`.
 pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
+    if argv.len() == 1 && matches!(argv[0].as_bytes(), b"-h" | b"--help") {
+        print!("{RUN_USAGE}");
+        return 0;
+    }
     if Selection::parse(argv).is_ok_and(|s| !is_unconfined_name(&s.zone.to_string_lossy())) {
         if let Some(code) = crate::user_launch::maybe_delegate(tools, "run", argv) {
             return code;
@@ -1338,26 +1376,31 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             .replace("{busy}", &busy)
             .replace("{zone}", &zone_name);
         let remembered_key = format!("conflict-{}", appname.to_string_lossy());
-        let asked_in_window =
-            if has_display() && !conflict_remembered(&conflict_file(tools), &remembered_key) {
-                // In the cellward window first, guarded (`window::question`):
-                // not going on is the safe answer, and the first.
-                let always = format!("Запускать и больше не спрашивать для «{shown}»");
-                crate::window::question(
-                    &tools.window,
-                    "Программа уже запущена в другой сети",
-                    &message,
-                    None,
-                    &[
-                        ("cancel", "Не запускать", false),
-                        ("go", "Запустить всё равно", false),
-                        ("always", always.as_str(), false),
-                    ],
-                    None,
-                )
+        let asked_in_window = if interactive_terminal() {
+            if conflict_remembered(&conflict_file(tools), &remembered_key) {
+                crate::window::Asked::Chose("go".into())
             } else {
-                crate::window::Asked::NotShown
-            };
+                terminal_conflict(&message)
+            }
+        } else if has_display() && !conflict_remembered(&conflict_file(tools), &remembered_key) {
+            // In the cellward window first, guarded (`window::question`):
+            // not going on is the safe answer, and the first.
+            let always = format!("Запускать и больше не спрашивать для «{shown}»");
+            crate::window::question(
+                &tools.window,
+                "Программа уже запущена в другой сети",
+                &message,
+                None,
+                &[
+                    ("cancel", "Не запускать", false),
+                    ("go", "Запустить всё равно", false),
+                    ("always", always.as_str(), false),
+                ],
+                None,
+            )
+        } else {
+            crate::window::Asked::NotShown
+        };
         match &asked_in_window {
             crate::window::Asked::Chose(tag) if tag == "go" => {}
             crate::window::Asked::Chose(tag) if tag == "always" => {
@@ -2533,6 +2576,14 @@ pub fn resolve_selection(tools: &Tools, selection: Selection) -> Result<Selectio
         }
     }
     let (asked, sandbox_asked) = match (&selection.container, &selection.sandbox) {
+        (Container::Named(name), Sandbox::None)
+            if name.as_bytes() == crate::container::MAIN_RECORD.as_bytes() =>
+        {
+            return Ok(Selection {
+                container: Container::Main,
+                ..selection
+            });
+        }
         (Container::Main, Sandbox::None | Sandbox::Throwaway(_))
         | (Container::TmpNew | Container::TmpJoin(_), Sandbox::None) => return Ok(selection),
         (Container::Named(name) | Container::MainNamed(name), Sandbox::None) => {
@@ -3731,6 +3782,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_terminal_conflict_takes_only_an_explicit_yes() {
+        for yes in ["y\n", "YES\n", "д\n", "Да\n"] {
+            assert!(terminal_yes(yes), "{yes:?}");
+        }
+        for no in ["", "\n", "n\n", "нет\n", "yep\n"] {
+            assert!(!terminal_yes(no), "{no:?}");
+        }
+    }
+
+    #[test]
     fn fresh_throwaway_warning_uses_the_same_identity_as_its_launch_record() {
         let home = Selection::parse(&argv(&["vpn", "--", "firefox"])).unwrap();
         let fresh = Selection::parse(&argv(&["host", "--fs-sandbox", "--", "firefox"])).unwrap();
@@ -3940,7 +4001,11 @@ mod tests {
         assert!(resolve(&["nl", "--container", "gone", "--", "x"])
             .unwrap_err()
             .contains("нет"));
-        assert!(resolve(&["nl", "--container", "main", "--", "x"]).is_err());
+        // The reserved selector is the built-in real home, not a named container.
+        assert_eq!(
+            resolve(&["nl", "--container", "main", "--", "x"]),
+            Ok((Container::Main, Sandbox::None))
+        );
         for two in [
             &["nl", "--profile", "work", "--sandbox", "dev", "--", "x"][..],
             &["nl", "--profile", "work", "--fs-sandbox", "--", "x"],
