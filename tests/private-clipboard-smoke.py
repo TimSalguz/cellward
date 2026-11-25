@@ -244,7 +244,10 @@ def main():
         # History reads the broker directly; explicit manager copy transfers
         # an entry to a selected container without touching the host.
         if not args.without_history:
-            recorded = wire.wait_for(lambda: ask('list\tmain\t20') or None)
+            def latest_image_entry():
+                entries = ask('list\tmain\t20')
+                return entries if 'image/png' in entries else None
+            recorded = wire.wait_for(latest_image_entry)
             entry = recorded.splitlines()[0].split('\t')[0]
             assert entry.isdigit(), recorded
             assert ask(f'copy-to\tmain\t{entry}\tsynthetic-other') == 'ok\n'

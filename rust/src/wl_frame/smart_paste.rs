@@ -26,7 +26,7 @@ pub(super) fn begin(
     modifiers: u32,
 ) {
     STATE.with_borrow_mut(|s| {
-        if s.pending.is_some() || !state.borrow().on {
+        if s.pending.is_some() {
             return;
         }
         let Some(ticket) = s.serial.checked_add(1) else {
@@ -62,6 +62,7 @@ pub(crate) fn finish(ticket: u64, revision: Option<u64>) {
     STATE.with_borrow_mut(|s| {
         if let Some(p) = s.pending.as_mut().filter(|p| p.ticket == ticket) {
             if let Some(revision) = revision {
+                p.state.borrow_mut().on = true;
                 p.confirmed = Some(revision);
                 p.until = p.until.min(Instant::now() + Duration::from_secs(2));
             } else {

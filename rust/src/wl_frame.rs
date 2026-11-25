@@ -4553,7 +4553,8 @@ struct Keyboard {
 /// A keyboard of the program as a paste pressed by the proxy sees it.
 #[derive(Clone, Copy, Default)]
 struct Focus {
-    /// A surface of the program has its focus.
+    /// The last focused program surface is eligible for paste; actual key
+    /// delivery still decides whether new input arrives.
     on: bool,
     serial: u32,
     /// Depressed, latched, locked, group: as the compositor said last.
@@ -4687,7 +4688,10 @@ impl WlKeyboardHandler for Keyboard {
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlKeyboard>, serial: u32, surface: &Rc<WlSurface>) {
-        self.typing.borrow_mut().on = false;
+        // Keep the last program keyboard eligible for paste: no new keys reach
+        // it while it is unfocused, and smart-paste verifies its window before
+        // restoring it. A compositor may restore that window without another
+        // wl_keyboard.enter, so clearing `on` here would block paste forever.
         if typing::owns_keyboard(slf) {
             self.set_focus(|f| f.on = false);
             self.held = None;
@@ -6353,7 +6357,6 @@ impl WlPointerHandler for Pointer {
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlPointer>, serial: u32, surface: &Rc<WlSurface>) {
-        self.typing.borrow_mut().on = false;
         self.hover_leave(slf, surface);
         self.off_frame();
         if programs(surface) {

@@ -776,6 +776,38 @@ mod tests {
     }
 
     #[test]
+    fn manager_set_does_not_close_the_metadata_connection() {
+        let h = Harness::new();
+        let owner = Lease::new();
+        let bound = endpoint::bind_capture(&h.runtime, "other", "-", owner.fd.as_fd()).unwrap();
+        let mut data = Client::new(bound.data).unwrap();
+        let mut metadata = Client::new(bound.captures.unwrap()).unwrap();
+        assert!(matches!(
+            exchange(&mut metadata, Request::Capabilities).unwrap(),
+            Reply::Capabilities(3)
+        ));
+        let manager = endpoint::lookup(&h.runtime, "other").unwrap();
+        let mut manager = Client::new(manager.data).unwrap();
+        let png = vec![1, 2, 3, 4];
+        assert!(matches!(
+            exchange(
+                &mut manager,
+                Request::Set(&[("image/png", &png), ("text/plain", b"entry")])
+            )
+            .unwrap(),
+            Reply::Set(_)
+        ));
+        assert!(matches!(
+            exchange(&mut metadata, Request::Capabilities).unwrap(),
+            Reply::Capabilities(3)
+        ));
+        assert!(matches!(
+            exchange(&mut data, Request::Types).unwrap(),
+            Reply::Types(Some(_))
+        ));
+    }
+
+    #[test]
     fn private_recording_never_needs_a_host_selection_and_skips_secrets_and_restores() {
         let h = Harness::new();
         let owner = Lease::new();
