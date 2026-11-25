@@ -534,6 +534,7 @@ fn ask_in_window(window: &Path, shown: &str, question: &str) -> Option<Perms> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    crate::window::focus_when_mapped(&child, None);
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(request.as_bytes());
     }

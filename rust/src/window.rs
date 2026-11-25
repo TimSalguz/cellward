@@ -239,7 +239,50 @@ pub fn spawn_menu_on(
             let _ = std::io::Write::write_all(&mut stdin, request.as_bytes());
         });
     }
+    if menu.guard_ms > 0 {
+        focus_when_mapped(&child, display);
+    }
     Some(child)
+}
+
+fn niri_socket(display: Option<&std::ffi::OsStr>) -> Option<std::path::PathBuf> {
+    let display = display
+        .map(std::ffi::OsStr::to_owned)
+        .or_else(|| std::env::var_os("WAYLAND_DISPLAY"))?;
+    let prefix = format!("niri.{}.", display.to_string_lossy());
+    std::fs::read_dir(crate::broker::runtime_dir())
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(&prefix))
+                && path.extension().is_some_and(|ext| ext == "sock")
+        })
+}
+
+/// Focus a trusted Cellward window after its compositor window appears. Winit's
+/// `focus_window` is a no-op on Wayland, and niri deliberately keeps focus on
+/// an existing fullscreen window when another window opens.
+pub fn focus_when_mapped(child: &Child, display: Option<&std::ffi::OsStr>) {
+    let socket = niri_socket(display);
+    if crate::focus::compositor().is_none() && socket.is_none() {
+        return;
+    }
+    let pid = child.id() as i32;
+    std::thread::spawn(move || {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let focused = match socket.as_deref() {
+                Some(socket) => crate::focus::focus_launch_niri(pid, socket.as_os_str()),
+                None => crate::focus::focus_launch(pid),
+            };
+            if focused.is_ok() || std::time::Instant::now() >= until {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
 }
 
 /// The exit status of a window that could not be shown at all (its

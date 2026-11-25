@@ -247,6 +247,7 @@ pub fn run() -> iced::Result {
         req.title.clone()
     };
     let height = 200.0 + 30.0 * req.items.len() as f32 + 22.0 * req.notes.len() as f32;
+    let guarded = req.guard > 0;
     let boot = std::sync::Mutex::new(Some(req));
     iced::application(
         move || {
@@ -266,7 +267,8 @@ pub fn run() -> iced::Result {
     .window(iced::window::Settings {
         size: Size::new(600.0, height.clamp(260.0, 600.0)),
         position: iced::window::Position::Centered,
-        // A fixed size: floated by the compositor itself, as a dialog.
+        fullscreen: guarded,
+        // A guarded question stays above any fullscreen application.
         resizable: false,
         #[cfg(target_os = "linux")]
         platform_specific: iced::window::settings::PlatformSpecific {

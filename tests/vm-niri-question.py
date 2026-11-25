@@ -10,8 +10,10 @@ import json
 outer = machine.succeed("ls /run/user/1000/sway-ipc.*.sock").strip()
 niri_socket = machine.succeed("ls /run/user/1000/niri.*.sock").strip()
 niri_cmd = f"NIRI_SOCKET={niri_socket} niri msg --json"
+python = POINTER.split()[0]
 windows = json.loads(alice(f"{niri_cmd} windows"))
-supervisor = next(w["pid"] for w in windows if w["app_id"] == "niri-foot")
+supervisor_window = next(w for w in windows if w["app_id"] == "niri-foot")
+supervisor = supervisor_window["pid"]
 output = json.loads(alice(f"SWAYSOCK={outer} swaymsg -t get_outputs -r"))[0]["rect"]
 fifo = "/tmp/niri-question-pointer"
 alice(
@@ -35,7 +37,6 @@ def question(name):
         "s.settimeout(90); reply=s.recv(512); "
         f"open('/tmp/{name}.reply', 'wb').write(reply)"
     )
-    python = POINTER.split()[0]
     alice(f"systemd-run --user --unit={name} {python} -c {shlex.quote(code)}")
 
 
@@ -75,6 +76,41 @@ def second_menu_action(at):
     assert len(points) > 1000, "guarded menu's selected action not found"
     xs, ys = zip(*points)
     return (min(xs) + max(xs)) // 2, max(ys) + 19
+
+
+def fills_output(window):
+    size = [round(v) for v in window["layout"]["tile_size"]]
+    return size == [output["width"], output["height"]]
+
+
+def focused_fullscreen(app_id=None):
+    for _ in range(50):
+        focused = json.loads(alice(f"{niri_cmd} focused-window"))
+        if (
+            focused is not None
+            and fills_output(focused)
+            and (app_id is None or focused["app_id"] == app_id)
+        ):
+            return focused
+        machine.sleep(0.2)
+    raise AssertionError(f"focused window does not fill the output: {focused}")
+
+
+def fullscreen_application(name):
+    alice(
+        f"systemd-run --user --unit={name} --setenv=WAYLAND_DISPLAY={nested} "
+        f"foot --app-id {name}"
+    )
+    machine.wait_until_succeeds(
+        f"{niri_cmd} windows | grep -F '\"app_id\":\"{name}\"'",
+        timeout=30,
+    )
+    window = next(
+        w for w in json.loads(alice(f"{niri_cmd} windows")) if w["app_id"] == name
+    )
+    alice(f"{niri_cmd} action fullscreen-window --id {window['id']}")
+    focused_fullscreen()
+    return window
 
 
 def close_menu_button(at):
@@ -225,6 +261,7 @@ def network_question(unit, path, *, app_id=None, container="", window=True):
     program = f"foot --app-id {unit} bash -c" if window else "bash -c"
     alice(
         f"systemd-run --user --unit={unit} --setenv=WAYLAND_DISPLAY={nested} "
+        f"--setenv=NIRI_SOCKET={niri_socket} "
         f"--setenv=VPN_ZONE_APPID={app_id or unit} "
         f"cellward run host {container} -- {program} {shlex.quote(command)}"
     )
@@ -274,11 +311,13 @@ with subtest("a blocked address is not reached, and nobody is asked about it"):
     alice("cellward container net niri-block unblock 192.0.2.2")
     assert "заблокировано" not in alice("cellward container net niri-block")
 
-with subtest("closing the network question keeps actual TCP closed"):
+with subtest("closing the network question above fullscreen keeps actual TCP closed"):
+    background = fullscreen_application("niri-net-fullscreen-background")
     network_question("niri-net-close", "closed", window=False)
     # A program with no window to show a panel on is asked in the guarded
     # launch window; closing it is a refusal.
     machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=90)
+    focused = focused_fullscreen("vpn-zone-window")
     x, y = settled("niri-network-close", close_menu_button)
     pointer("move", x, y)
     machine.sleep(2.5)
@@ -287,7 +326,26 @@ with subtest("closing the network question keeps actual TCP closed"):
     machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=20)
     machine.sleep(3)
     peer.fail(requested("closed"))
-    alice("systemctl --user stop niri-net-close")
+    alice("systemctl --user stop niri-net-close niri-net-fullscreen-background")
+
+with subtest("the file access checklist takes focus above a fullscreen application"):
+    background = fullscreen_application("niri-files-fullscreen-background")
+    alice(
+        f"systemd-run --user --unit=niri-fullscreen-files "
+        f"--setenv=WAYLAND_DISPLAY={nested} "
+        f"--setenv=NIRI_SOCKET={niri_socket} "
+        "--setenv=VPN_ZONE_APPID=niri-fullscreen-files "
+        "cellward run host --fs-sandbox -- bash -c 'sleep 600'"
+    )
+    machine.wait_until_succeeds("pgrep -f '[v]pn-zone-window checklist'", timeout=90)
+    focused = focused_fullscreen("vpn-zone-window")
+    x, y = settled("niri-fullscreen-checklist", close_menu_button)
+    pointer("move", x, y)
+    machine.sleep(2.5)
+    pointer("press")
+    pointer("release")
+    machine.wait_until_fails("pgrep -f '[v]pn-zone-window checklist'", timeout=15)
+    alice("systemctl --user stop niri-fullscreen-files niri-files-fullscreen-background")
 
 with subtest("an own application container can stop and ask again after it is recreated"):
     alice("cellward container create app-niri-own-repeat --home private")

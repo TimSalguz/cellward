@@ -1981,44 +1981,71 @@ fn sway_nodes_of(v: &Value, pid: i64, out: &mut Vec<i64>) {
 const NO_WINDOW: &str = "у программы нет окна";
 
 pub fn focus_launch(pid: i32) -> Result<(), String> {
-    let (program, args): (&str, Vec<String>) = match compositor() {
-        Some(Compositor::Niri) => {
-            let windows = run_json("niri", &["msg", "--json", "windows"])?;
-            let id = windows_of_niri(&windows, pid)
-                .into_iter()
-                .max()
-                .ok_or(NO_WINDOW)?;
-            (
-                "niri",
-                vec![
-                    "msg".into(),
-                    "action".into(),
-                    "focus-window".into(),
-                    "--id".into(),
-                    id.to_string(),
-                ],
-            )
-        }
-        Some(Compositor::Sway) => {
-            let tree = run_json("swaymsg", &["-t", "get_tree", "-r"])?;
-            let id = windows_of_sway(&tree, pid)
-                .into_iter()
-                .max()
-                .ok_or(NO_WINDOW)?;
-            ("swaymsg", vec![format!("[con_id={id}] focus")])
-        }
-        None => {
-            return Err(
-                "композитор не отвечает: нужен niri (NIRI_SOCKET) или sway (SWAYSOCK)".to_owned(),
-            )
-        }
-    };
-    let done = Command::new(program)
+    focus_launch_with_niri_socket(pid, None)
+}
+
+/// Focus through an explicit niri IPC socket, discovered from the display when
+/// a broker was started before the compositor exported NIRI_SOCKET.
+pub fn focus_launch_niri(pid: i32, socket: &std::ffi::OsStr) -> Result<(), String> {
+    focus_launch_with_niri_socket(pid, Some(socket))
+}
+
+fn focus_launch_with_niri_socket(pid: i32, socket: Option<&std::ffi::OsStr>) -> Result<(), String> {
+    let (program, args): (&str, Vec<String>) =
+        match socket.map(|_| Compositor::Niri).or_else(compositor) {
+            Some(Compositor::Niri) => {
+                let windows = if let Some(socket) = socket {
+                    let out = Command::new("niri")
+                        .args(["msg", "--json", "windows"])
+                        .env("NIRI_SOCKET", socket)
+                        .output()
+                        .map_err(|e| format!("niri: {e}"))?;
+                    if !out.status.success() {
+                        return Err("niri msg --json windows failed".to_owned());
+                    }
+                    json::parse(String::from_utf8_lossy(&out.stdout).trim())?
+                } else {
+                    run_json("niri", &["msg", "--json", "windows"])?
+                };
+                let id = windows_of_niri(&windows, pid)
+                    .into_iter()
+                    .max()
+                    .ok_or(NO_WINDOW)?;
+                (
+                    "niri",
+                    vec![
+                        "msg".into(),
+                        "action".into(),
+                        "focus-window".into(),
+                        "--id".into(),
+                        id.to_string(),
+                    ],
+                )
+            }
+            Some(Compositor::Sway) => {
+                let tree = run_json("swaymsg", &["-t", "get_tree", "-r"])?;
+                let id = windows_of_sway(&tree, pid)
+                    .into_iter()
+                    .max()
+                    .ok_or(NO_WINDOW)?;
+                ("swaymsg", vec![format!("[con_id={id}] focus")])
+            }
+            None => {
+                return Err(
+                    "композитор не отвечает: нужен niri (NIRI_SOCKET) или sway (SWAYSOCK)"
+                        .to_owned(),
+                )
+            }
+        };
+    let mut command = Command::new(program);
+    command
         .args(&args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("{program}: {e}"))?;
+        .stderr(Stdio::null());
+    if let Some(socket) = socket {
+        command.env("NIRI_SOCKET", socket);
+    }
+    let done = command.status().map_err(|e| format!("{program}: {e}"))?;
     if !done.success() {
         return Err(format!("{program} {} — не вышло", args.join(" ")));
     }
