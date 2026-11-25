@@ -99,7 +99,9 @@ fn report(tools: &Tools, zone: &str) -> Result<Report, String> {
         let host = crate::hostif::HostIfConfig::from_ini(&ini)?;
         (host.interface, ini.mtu())
     } else {
-        let default = if crate::openconnect::is_openconnect(&ini) {
+        let default = if crate::proxy::is_proxy(&ini) {
+            crate::zone::DEFAULT_MTU
+        } else if crate::openconnect::is_openconnect(&ini) {
             crate::openconnect::DEFAULT_MTU
         } else {
             crate::zone::DEFAULT_MTU

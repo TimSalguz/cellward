@@ -158,7 +158,9 @@ pub struct Tunnel {
 pub fn tunnel_of(dir: &Path) -> Option<Tunnel> {
     let raw = fs::read(dir.join("config.conf")).ok()?;
     let cfg = crate::config::WgConfig::parse(&raw).ok()?;
-    let kind = if crate::openconnect::is_openconnect(&cfg) {
+    let kind = if crate::proxy::is_proxy(&cfg) {
+        "proxy"
+    } else if crate::openconnect::is_openconnect(&cfg) {
         "openconnect"
     } else if crate::hostif::is_host_network(&cfg) || crate::hostif::is_host_interface(&cfg) {
         "host"

@@ -230,6 +230,11 @@ pub fn in_zone_args(ns: &str, args: &[&str]) -> Vec<String> {
 
 /// Why this config can't be a system zone yet, if it can't.
 pub fn refusal(cfg: &WgConfig) -> Option<&'static str> {
+    if crate::proxy::is_proxy(cfg) {
+        return Some(
+            "a [Proxy] zone needs a sing-box client in its own uplink namespace; system zones carry only kernel WireGuard/AmneziaWG",
+        );
+    }
     if crate::openconnect::is_openconnect(cfg) {
         return Some(
             "an [OpenConnect] zone needs an uplink namespace of its own; system zones carry \

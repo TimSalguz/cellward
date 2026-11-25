@@ -274,6 +274,7 @@ struct CapData {
 }
 
 const CAP_VERSION_3: u32 = 0x2008_0522;
+const CAP_NET_ADMIN: libc::c_int = 12;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_RAISE: libc::c_int = 2;
 const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_int = 4;
@@ -309,6 +310,39 @@ fn raise_ambient() -> io::Result<()> {
                 unsafe { libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, cap, 0, 0) };
             }
         }
+    }
+    Ok(())
+}
+
+/// Preserve the permitted set across setuid so the proxy client can reduce it
+/// to CAP_NET_ADMIN immediately afterwards.
+pub(crate) fn keep_capabilities_on_setuid() -> io::Result<()> {
+    // SAFETY: prctl with plain integers.
+    if unsafe { libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Only CAP_NET_ADMIN left for the proxy client: enough to bring its tun up,
+/// not to administer namespaces or enter another one.
+pub(crate) fn keep_only_net_admin() -> io::Result<()> {
+    let mut header = CapHeader {
+        version: CAP_VERSION_3,
+        pid: 0,
+    };
+    let mut data = [CapData::default(); 2];
+    data[0].effective = 1u32 << CAP_NET_ADMIN;
+    data[0].permitted = data[0].effective;
+    data[0].inheritable = data[0].effective;
+    // SAFETY: capset with a version-3 header and its two data words.
+    if unsafe { libc::syscall(libc::SYS_capset, &mut header, data.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the capability is both permitted and inheritable, so ambient may
+    // raise it and preserve it across the unprivileged exec.
+    if unsafe { libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, CAP_NET_ADMIN, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }

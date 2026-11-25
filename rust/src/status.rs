@@ -267,6 +267,7 @@ fn zone_kind(dir: &std::path::Path) -> Option<&'static str> {
     let raw = crate::chain::read_zone_config_dir(dir).ok()?;
     let ini = WgConfig::parse(&strip_cr(&raw)).ok();
     Some(match ini {
+        Some(ini) if crate::proxy::is_proxy(&ini) => "proxy",
         Some(ini) if crate::openconnect::is_openconnect(&ini) => "openconnect",
         // The host's own network (2e): no tunnel, nothing encrypted.
         Some(ini) if crate::hostif::is_host_network(&ini) => "host-network",

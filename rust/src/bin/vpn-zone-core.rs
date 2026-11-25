@@ -21,7 +21,7 @@ vpn-zone-core — helper commands of cellward
 
 Usage:
   vpn-zone-core zone-holder [--ip P] [--awg P] [--wg P] [--pasta P] [--nft P]
-                            [--openconnect P] [--dbus-proxy P] [--opener P]
+                            [--openconnect P] [--sing-box P] [--dbus-proxy P] [--opener P]
                             [--kdialog P] <name>
         Bring the zone up and hold it: a user namespace with the double id
         mapping, a net+mount namespace with the tunnel in it, and pasta as the

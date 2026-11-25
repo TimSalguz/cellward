@@ -118,6 +118,7 @@ let
   # (белый список Args=, rust/src/openconnect.rs). Обычный vpnc-script
   # настраивал бы сеть ХОСТА.
   openconnect = "${pkgs.openconnect}/bin/openconnect";
+  singBox = "${pkgs.sing-box}/bin/sing-box";
   notify = "${pkgs.libnotify}/bin/notify-send";
   kdialog = "${pkgs.kdePackages.kdialog}/bin/kdialog";
   # Фильтр сессионной шины с одной правкой: `--own=ИМЯ-*` разрешает ЗАНЯТЬ имя
@@ -2019,6 +2020,7 @@ in
     # чем-то другим значит однажды разойтись с ним в формате (README).
     # Замыкание от этого не растёт: юнит и так тянет тот же store-путь.
     pkgs.openconnect
+    pkgs.sing-box
     pkgs.kdePackages.kdialog # файлпикер в стиле остального десктопа
   ];
 
@@ -2074,7 +2076,7 @@ in
         # Мост для экземпляров контейнеров (rust/src/bridge.rs): зона
         # запускает passt --fd на каждый экземпляр, который везёт.
         + " --passt ${passtBin}"
-        + " --openconnect ${openconnect} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy"
+        + " --openconnect ${openconnect} --sing-box ${singBox} --dbus-proxy ${dbusProxy}/bin/xdg-dbus-proxy"
         # Фильтр шины герметичной зоны отдаёт ссылки брокеру (PERMISSIONS
         # §11.13); opener остался ему на случай песочницы на хосте.
         + " --opener ${vpn-zone-opener}"

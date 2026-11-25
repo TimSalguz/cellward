@@ -8,6 +8,43 @@ This first slice is deliberately read-only: `cellward transport list [--json]`
 shows the inventory and `cellward transport check <file>` validates one
 manifest. Neither command executes the adapter.
 
+## SOCKS5 and HTTP CONNECT zones
+
+A `[Proxy]` zone turns one explicitly configured proxy into a full-tunnel
+network through sing-box. Its client runs unprivileged in the uplink, with only
+`CAP_NET_ADMIN` for the pre-created TUN; the uplink firewall accepts only the
+configured proxy address and port. The TUN moves into the application
+namespace, and client death takes the whole zone down without a direct-route
+fallback.
+
+```ini
+[Interface]
+Address = 10.200.0.2/32
+DNS = 1.1.1.1
+MTU = 1380
+
+[Proxy]
+Type = socks5
+Server = 192.0.2.10
+Port = 1080
+; Username = optional
+; Password = optional
+```
+
+`Type` is `socks5` or `http`. `Server` must be a literal unicast IPv4/IPv6
+address, never a hostname, so creating or chaining a route cannot silently use
+the host resolver. `[Interface]` accepts only `Address`, `DNS` and `MTU`; one
+IPv4 address is required and one IPv6 address is optional. HTTP CONNECT is
+explicitly TCP-only. SOCKS5 UDP support depends on the proxy server; no UDP
+support is inferred for HTTP. Credentials stay in the private generated
+sing-box configuration and do not enter argv or the environment.
+
+The same section works in a pooled node and as the inner hop of a chain. The
+outer route must provide the address family of the proxy server. GUI-only VPN
+clients can use this backend by exposing a local SOCKS5 endpoint inside their
+adapter's uplink; the GUI application itself is not implicitly trusted as a
+full-tunnel route.
+
 ## Manifest
 
 Place an external manifest in `~/.config/vpn-zones/transports/<name>.conf`:

@@ -44,6 +44,8 @@
 //!   Pulse) in the uplink namespace, whose tun moves down into the app
 //!   namespace. The `[OpenConnect]` config section, the vpnc-script contract as
 //!   a pure function, and `vpn-zone-core oc-script` (`docs/GOTCHAS.md` §2a);
+//! * [`proxy`] — SOCKS5/HTTP proxy zones through sing-box in the same uplink
+//!   contour, with a pinned endpoint and a TUN handed to the app namespace;
 //! * [`fs_sandbox`] — the filesystem sandbox: bwrap, the permissions, the
 //!   `/.flatpak-info` that switches toolkits over to the portals, the filtered
 //!   session bus and the sandbox's own X server (`docs/GOTCHAS.md` §6, §8, §9);
@@ -177,6 +179,7 @@ pub mod place;
 pub mod presets;
 pub mod profile;
 pub mod protect;
+pub mod proxy;
 pub mod pulse_filter;
 pub mod pw_context;
 pub mod rebind;

@@ -49,7 +49,9 @@ pub fn validate_node(ini: &WgConfig) -> Result<(), String> {
             "a pooled node must be a tunnel config, not a route or host interface".to_owned(),
         );
     }
-    if openconnect::is_openconnect(ini) {
+    if crate::proxy::is_proxy(ini) {
+        crate::proxy::Config::from_ini(ini, crate::zone::TUN_IFACE)?;
+    } else if openconnect::is_openconnect(ini) {
         OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
     } else if ini
         .interface()
@@ -464,6 +466,10 @@ impl ChainConfig {
     /// The gateway login helper currently connects there before the tunnel
     /// exists, so interactive OpenConnect login cannot be chained yet.
     pub fn validate_transport(ini: &WgConfig) -> Result<(), String> {
+        if crate::proxy::is_proxy(ini) {
+            crate::proxy::Config::from_ini(ini, crate::zone::TUN_IFACE)?;
+            return Ok(());
+        }
         if openconnect::is_openconnect(ini) {
             let oc = OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
             if oc.server_literal().is_none() {
@@ -493,6 +499,11 @@ impl ChainConfig {
     /// An IPv6 endpoint cannot be reached over an IPv4-only preceding hop.
     /// The broker reports what the pinned source namespace really carries.
     pub fn needs_ipv6_transport(ini: &WgConfig) -> Result<bool, String> {
+        if crate::proxy::is_proxy(ini) {
+            return Ok(crate::proxy::Config::from_ini(ini, crate::zone::TUN_IFACE)?
+                .server
+                .is_ipv6());
+        }
         if openconnect::is_openconnect(ini) {
             return Ok(OcConfig::from_ini(ini)
                 .map_err(|e| e.to_string())?
@@ -543,6 +554,7 @@ impl ChainConfig {
 enum TunnelIdentity {
     WireGuard(String),
     OpenConnect(String, u16),
+    Proxy(String, u16),
 }
 
 fn identity(ini: &WgConfig) -> Result<Option<TunnelIdentity>, String> {
@@ -551,6 +563,13 @@ fn identity(ini: &WgConfig) -> Result<Option<TunnelIdentity>, String> {
         || crate::sysuplink::is_system_zone(ini)
     {
         return Ok(None);
+    }
+    if crate::proxy::is_proxy(ini) {
+        let proxy = crate::proxy::Config::from_ini(ini, crate::zone::TUN_IFACE)?;
+        return Ok(Some(TunnelIdentity::Proxy(
+            proxy.server.to_string(),
+            proxy.port,
+        )));
     }
     if openconnect::is_openconnect(ini) {
         let oc = OcConfig::from_ini(ini).map_err(|e| e.to_string())?;
@@ -687,6 +706,17 @@ mod tests {
             .contains("gateway login"));
         let ini = WgConfig::parse(b"[OpenConnect]\nServer = 192.0.2.2\nAskLogin = no\n").unwrap();
         assert!(ChainConfig::validate_transport(&ini).is_ok());
+    }
+
+    #[test]
+    fn a_proxy_has_one_identity_in_direct_and_chained_routes() {
+        let direct = "[Interface]\nAddress = 10.200.0.2/32\n[Proxy]\nType = socks5\nServer = 192.0.2.10\nPort = 1080\n";
+        let chained = format!("{direct}[Chain]\nVia = nl\n");
+        let direct = WgConfig::parse(direct.as_bytes()).unwrap();
+        let chained = WgConfig::parse(chained.as_bytes()).unwrap();
+        assert_eq!(identity(&direct).unwrap(), identity(&chained).unwrap());
+        assert!(ChainConfig::validate_transport(&chained).is_ok());
+        assert!(!ChainConfig::needs_ipv6_transport(&chained).unwrap());
     }
 
     #[test]

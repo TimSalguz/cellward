@@ -34,9 +34,10 @@
 //! configured there — the encrypted packets are born in the uplink and leave
 //! through pasta, while the app namespace never sees the endpoint at all.
 //!
-//! **Two kinds of tunnel, one contour.** A zone is either a kernel
-//! WireGuard/AmneziaWG one (its config has an `[Interface]` section) or an
-//! OpenConnect one (`[OpenConnect]`, [`crate::openconnect`]). The wall stands in
+//! **Several kinds of tunnel, one contour.** A zone is a kernel
+//! WireGuard/AmneziaWG one, an OpenConnect one (`[OpenConnect]`,
+//! [`crate::openconnect`]) or a SOCKS5/HTTP proxy one (`[Proxy]`,
+//! [`crate::proxy`]). The wall stands in
 //! the same place either way — what changes is only what stays behind it. With
 //! WireGuard it is a UDP socket; with OpenConnect it is a whole client process:
 //! the TLS session, the gateway's address and every packet still wrapped in it
@@ -579,6 +580,8 @@ const TOOL_WG: u8 = b'w';
 /// app namespace and the facts about it are in the plan file the uplink wrote
 /// from what the client's script said. (`crate::openconnect`)
 const TOOL_OC: u8 = b'o';
+/// A sing-box proxy client, with the same plan and interface contract.
+const TOOL_PROXY: u8 = b'p';
 /// pasta attached to the app namespace itself, going out through an interface
 /// of the host (`crate::hostif`).
 const TOOL_HOSTIF: u8 = b'h';
@@ -615,6 +618,8 @@ pub struct Tools {
     /// The userspace client of an `[OpenConnect]` zone. Only such a zone runs
     /// it; a WireGuard one never looks at this path.
     pub openconnect: PathBuf,
+    /// The userspace network stack of a `[Proxy]` zone.
+    pub sing_box: PathBuf,
     /// The filter in front of the system bus (`docs/HERMETICITY.md` §7, B2).
     pub dbus_proxy: PathBuf,
     /// What a hermetic zone's bus filter asks the broker to open a program's
@@ -645,6 +650,7 @@ impl Default for Tools {
             passt: PathBuf::from("passt"),
             nft: PathBuf::from("nft"),
             openconnect: PathBuf::from("openconnect"),
+            sing_box: PathBuf::from("sing-box"),
             dbus_proxy: PathBuf::from("xdg-dbus-proxy"),
             opener: PathBuf::from("xdg-open"),
             kdialog: PathBuf::from("kdialog"),
@@ -691,7 +697,7 @@ impl std::error::Error for ArgError {}
 
 impl Args {
     /// Parse `[--ip P] [--awg P] [--wg P] [--pasta P] [--passt P] [--nft P]
-    /// [--openconnect P] [--dbus-proxy P] [--opener P] [--kdialog P]
+    /// [--openconnect P] [--sing-box P] [--dbus-proxy P] [--opener P] [--kdialog P]
     /// [--runner P] <name>`.
     ///
     /// Only `--`-prefixed words are flags, so a zone name is free to start with
@@ -719,6 +725,7 @@ impl Args {
                 "--passt" => &mut tools.passt,
                 "--nft" => &mut tools.nft,
                 "--openconnect" => &mut tools.openconnect,
+                "--sing-box" => &mut tools.sing_box,
                 "--dbus-proxy" => &mut tools.dbus_proxy,
                 "--opener" => &mut tools.opener,
                 "--kdialog" => &mut tools.kdialog,
@@ -1302,7 +1309,7 @@ fn runs_a_client(zone: &Zone) -> bool {
     crate::chain::read_zone_config_dir(&zone.dir)
         .ok()
         .and_then(|raw| WgConfig::parse(&raw).ok())
-        .is_some_and(|cfg| openconnect::is_openconnect(&cfg))
+        .is_some_and(|cfg| openconnect::is_openconnect(&cfg) || crate::proxy::is_proxy(&cfg))
 }
 
 /// Write the ranges into the child's namespace.
@@ -1899,6 +1906,7 @@ fn tool_flags(tools: &Tools) -> Vec<OsString> {
         ("--passt", &tools.passt),
         ("--nft", &tools.nft),
         ("--openconnect", &tools.openconnect),
+        ("--sing-box", &tools.sing_box),
         ("--dbus-proxy", &tools.dbus_proxy),
         ("--opener", &tools.opener),
         ("--kdialog", &tools.kdialog),
@@ -4738,10 +4746,9 @@ fn cover_cgroupfs(zone: &Zone) -> Result<(), String> {
 /// Which kind of tunnel this zone carries, decided once by [`prepare`] and read
 /// by both namespaces afterwards.
 ///
-/// The decision itself is one question asked of the config file: is there an
-/// `[OpenConnect]` section? The two shapes cannot be confused — a WireGuard
-/// config has no such section, and a file that has one but does not parse is
-/// refused by `vpn-zone add` before a zone exists at all.
+/// The decision comes from explicit `[OpenConnect]` and `[Proxy]` sections;
+/// a file that has one but does not parse is refused by `vpn-zone add` before
+/// a zone exists at all.
 pub enum Backend {
     /// Kernel WireGuard or AmneziaWG. The uplink creates the interface itself
     /// and hands it down; the transport socket stays where it was created.
@@ -4751,6 +4758,8 @@ pub enum Backend {
     /// hands it down once the client's `--script` says the session is up; the
     /// TLS session stays with the process, which never leaves the uplink.
     Oc(Box<OcZone>),
+    /// A sing-box process turns one pinned SOCKS5/HTTP proxy into the zone's tun.
+    Proxy(Box<crate::proxy::Config>),
     /// No tunnel and no uplink: pasta attaches to the app namespace and binds
     /// everything it sends to one interface of the host.
     HostIf(HostIfConfig),
@@ -4792,6 +4801,10 @@ impl Backend {
             Self::Oc(oc) => vec![EndpointSocket {
                 addr: oc.addr,
                 port: None,
+            }],
+            Self::Proxy(proxy) => vec![EndpointSocket {
+                addr: proxy.server,
+                port: Some(proxy.port),
             }],
             // No uplink exists to be filtered.
             Self::HostIf(_) | Self::HostNet | Self::SysZone(_) => Vec::new(),
@@ -5319,7 +5332,7 @@ fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfi
         )
     {
         return Err(format!(
-            "{CONFIG}: [Chain] is for a zone with its own WireGuard/AmneziaWG or OpenConnect tunnel"
+            "{CONFIG}: [Chain] is for a zone with its own WireGuard/AmneziaWG, OpenConnect or proxy tunnel"
         ));
     }
     Ok((backend, seed, chain))
@@ -5328,6 +5341,12 @@ fn prepare(zone: &Zone) -> Result<(Backend, u64, Option<crate::chain::ChainConfi
 /// [`prepare`] of the config's bytes.
 fn prepare_backend(zone: &Zone, raw: &[u8]) -> Result<Backend, String> {
     let mut cfg = WgConfig::parse(raw).map_err(|e| format!("{CONFIG}: {e}"))?;
+    if crate::proxy::is_proxy(&cfg) {
+        let proxy = crate::proxy::Config::from_ini(&cfg, TUN_IFACE)
+            .map_err(|e| format!("{CONFIG}: {e}"))?;
+        let _ = fs::remove_file(zone.path(openconnect::PLAN_FILE));
+        return Ok(Backend::Proxy(Box::new(proxy)));
+    }
     if openconnect::is_openconnect(&cfg) {
         return prepare_openconnect(zone, &cfg);
     }
@@ -5565,7 +5584,7 @@ fn uplink_main(zone: &Zone, links: UplinkLinks<'_>) -> u8 {
             let code = match client.wait() {
                 Ok(status) => {
                     eprintln!(
-                        "zone {}: the openconnect client exited ({status}) — the tunnel is gone",
+                        "zone {}: the userspace tunnel client exited ({status}) — the tunnel is gone",
                         zone.name()
                     );
                     status.code().map_or(1, |c| c as u8)
@@ -5699,10 +5718,10 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     // internet, and nothing in the topology keeps a userspace client to one
     // gateway, as the kernel's WireGuard socket keeps itself to its peer. So
     // an OpenConnect zone whose rule does not load does not come up.
-    if matches!(backend, Backend::Oc(_)) {
+    if matches!(backend, Backend::Oc(_) | Backend::Proxy(_)) {
         feed_nft(&zone.tools.nft, &uplink_ruleset(&backend.sockets())).map_err(|e| {
             format!(
-                "the uplink's filter did not load ({e}) — an OpenConnect client would \
+                "the uplink's filter did not load ({e}) — a userspace client would \
                  reach the whole internet from here, so the zone does not come up"
             )
         })?;
@@ -5796,6 +5815,28 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
                 return Err(e);
             }
             tell_the_zone(moved_w, TOOL_OC)?;
+            Ok(Some(client))
+        }
+        Backend::Proxy(proxy) => {
+            let dir = client_dir()?;
+            tun_for_the_client()?;
+            println!(
+                "zone {}: uplink is up (default dev {dev}), starting sing-box to {}:{}",
+                zone.name(),
+                proxy.server,
+                proxy.port
+            );
+            let mut client = spawn_sing_box(zone, proxy, &dir)?;
+            let handed = wait_for_sing_box(&mut client).and_then(|()| {
+                wait_for_app_namespace(zone_up_r)?;
+                hand_over(zone, zone_pid, &proxy.plan)
+            });
+            if let Err(e) = handed {
+                let _ = client.kill();
+                let _ = client.wait();
+                return Err(e);
+            }
+            tell_the_zone(moved_w, TOOL_PROXY)?;
             Ok(Some(client))
         }
         // `supervise` never starts an uplink for these.
@@ -8410,7 +8451,7 @@ fn client_root(root: &Path, dir: &Path, files: &[PathBuf]) -> Result<ClientRoot,
 /// # Safety
 /// Between fork and exec: touches nothing but fd 2.
 unsafe fn root_failed(what: &[u8], path: &CStr) {
-    let prefix = b"openconnect client root: ";
+    let prefix = b"userspace client root: ";
     let path = path.to_bytes();
     let parts: [&[u8]; 5] = [prefix, what, b" ", path, b"\n"];
     for part in parts {
@@ -8778,6 +8819,110 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
         }
     }
     Ok(child)
+}
+
+fn spawn_sing_box(zone: &Zone, proxy: &crate::proxy::Config, dir: &Path) -> Result<Child, String> {
+    let config = dir.join(crate::proxy::CONFIG_FILE);
+    fs::write(&config, proxy.sing_box_config())
+        .map_err(|e| format!("cannot write {}: {e}", config.display()))?;
+    let program = real_program(&zone.tools.sing_box)?;
+    let root = client_root(
+        Path::new("/tmp/sing-box-root"),
+        dir,
+        std::slice::from_ref(&program),
+    )?;
+    let mut cmd = Command::new(&program);
+    cmd.arg("run")
+        .arg("--disable-color")
+        .arg("-c")
+        .arg(&config)
+        .env_clear()
+        .env("HOME", dir)
+        .env("XDG_CACHE_HOME", dir)
+        .stdin(Stdio::null());
+    let filter = seccomp::Filter::build(seccomp::FilterOptions { deny_userns: true })
+        .and_then(|f| f.instructions())
+        .map_err(|e| format!("cannot build the proxy client's seccomp filter: {e}"))?;
+    let filter_len = u16::try_from(filter.len())
+        .map_err(|_| "the proxy client's seccomp filter is too long to load".to_string())?;
+    let families = seccomp::Filter::zone_sockets()
+        .and_then(|f| f.instructions())
+        .map_err(|e| format!("cannot build the proxy client's socket filter: {e}"))?;
+    let families_len = u16::try_from(families.len())
+        .map_err(|_| "the proxy client's socket filter is too long to load".to_string())?;
+    // SAFETY: getpid(2) takes no arguments and cannot fail.
+    let uplink = unsafe { libc::getpid() };
+    // SAFETY: the same checked, allocation-free child setup as OpenConnect:
+    // private root, unprivileged id, no new privileges, death with the uplink,
+    // then the two syscall filters.
+    unsafe {
+        cmd.pre_exec(move || {
+            enter_client_root(&root)?;
+            crate::enter::keep_capabilities_on_setuid()?;
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setresgid(CLIENT_ID, CLIENT_ID, CLIENT_ID) != 0
+                || libc::setresuid(CLIENT_ID, CLIENT_ID, CLIENT_ID) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            crate::enter::keep_only_net_admin()?;
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != uplink {
+                return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            let program = libc::sock_fprog {
+                len: filter_len,
+                filter: filter.as_ptr().cast_mut(),
+            };
+            if libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                std::ptr::from_ref(&program),
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let program = libc::sock_fprog {
+                len: families_len,
+                filter: families.as_ptr().cast_mut(),
+            };
+            if libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                std::ptr::from_ref(&program),
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn().map_err(|e| {
+        format!(
+            "cannot run {} as the proxy client's own id: {e}",
+            zone.tools.sing_box.display()
+        )
+    })
+}
+
+fn wait_for_sing_box(client: &mut Child) -> Result<(), String> {
+    for _ in 0..20 {
+        if let Some(status) = client
+            .try_wait()
+            .map_err(|e| format!("cannot wait for sing-box: {e}"))?
+        {
+            return Err(format!(
+                "sing-box exited before its tunnel was ready ({status})"
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
 }
 
 /// Wait for the client's script to say the tunnel is up, and read what it
@@ -9207,7 +9352,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             configure_wg(zone, cfg, wgtool)?;
             (cfg.dns(), None, Mirror::Wg(wgtool.to_path_buf()))
         }
-        TOOL_OC => {
+        TOOL_OC | TOOL_PROXY => {
             // The facts come from the file the uplink wrote after the move —
             // so by the time this byte arrives, the interface is already down
             // here.
@@ -9346,7 +9491,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
             // tunnel over, and it takes the zone down with it the moment it
             // stops.
             println!(
-                "zone {}: the openconnect client is connected — the tunnel is alive",
+                "zone {}: the userspace client is connected — the tunnel is alive",
                 zone.name()
             );
         }
@@ -11264,6 +11409,7 @@ mod tests {
             passt: PathBuf::from("/t/passt"),
             nft: PathBuf::from("/t/nft"),
             openconnect: PathBuf::from("/t/openconnect"),
+            sing_box: PathBuf::from("/t/sing-box"),
             dbus_proxy: PathBuf::from("/t/xdg-dbus-proxy"),
             opener: PathBuf::from("/t/opener"),
             kdialog: PathBuf::from("/t/kdialog"),
