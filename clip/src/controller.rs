@@ -763,7 +763,7 @@ mod tests {
             Err(e) => panic!("unshare: {e}"),
         };
         let stderr = String::from_utf8_lossy(&result.stderr);
-        if !result.status.success() && stderr.contains("unshare failed: Operation not permitted") {
+        if !result.status.success() && stderr.contains("Operation not permitted") {
             eprintln!("namespace authentication probe skipped: user namespaces are denied");
             return;
         }
