@@ -135,6 +135,71 @@ with subtest("an unanswered panel stays on its window: no hand-over, no answer b
     # Its asker gives up: the panel goes with it.
     alice("systemctl --user stop niri-panel-stays")
 
+with subtest("two windows of one launch resize and keep their hover buttons usable"):
+    alice("touch /home/alice/niri-second-window")
+    machine.wait_until_succeeds(
+        f"su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+        f"{niri_cmd} windows' | grep -F '\"app_id\":\"niri-foot-second\"'",
+        timeout=60,
+    )
+    windows = json.loads(alice(f"{niri_cmd} windows"))
+    first = next(w for w in windows if w["app_id"] == "niri-foot")
+    second = next(w for w in windows if w["app_id"] == "niri-foot-second")
+    assert first["pid"] == second["pid"], "the feet do not share one frame cache"
+    for window, width in ((first, 700), (second, 520)):
+        alice(f"NIRI_SOCKET={niri_socket} niri msg action focus-window --id {window['id']}")
+        alice(f"NIRI_SOCKET={niri_socket} niri msg action set-column-width {width}")
+
+    def frame_boxes(at):
+        columns = [
+            x
+            for x in range(at.size[0])
+            if any(at(x, y) == MAGENTA for y in range(at.size[1]))
+        ]
+        groups = []
+        for x in columns:
+            if not groups or x != groups[-1][-1] + 1:
+                groups.append([])
+            groups[-1].append(x)
+        boxes = []
+        for group in groups:
+            ys = [
+                y
+                for x in group
+                for y in range(at.size[1])
+                if at(x, y) == MAGENTA
+            ]
+            boxes.append((group[0], min(ys), group[-1], max(ys)))
+        return sorted(boxes)
+
+    def two_frames(at):
+        boxes = frame_boxes(at)
+        assert len(boxes) == 2, boxes
+        widths = [box[2] - box[0] + 1 for box in boxes]
+        assert widths[0] != widths[1] and all(width > 0 for width in widths), boxes
+        for x0, y0, x1, y1 in boxes:
+            assert at(x1, y0) != MAGENTA, ("stale right corner", boxes)
+            assert at(x1 - 1, y0 + 20) == MAGENTA, ("missing right corner", boxes)
+        return boxes
+
+    boxes = settled("niri-two-windows", two_frames, tries=60)
+    alice("cellward frame title hover")
+    second_box = boxes[1]
+    x = second_box[2] - 4 - 12
+    y = second_box[1] + 4 + 10
+    pointer("move", (second_box[0] + second_box[2]) // 2, second_box[1] + 1)
+    machine.sleep(0.5)
+    pointer("move", x, y)
+    settled("niri-two-windows-hover", two_frames)
+    pointer("press")
+    pointer("release")
+    machine.wait_until_fails(
+        f"su -l alice -c 'export XDG_RUNTIME_DIR=/run/user/1000; "
+        f"{niri_cmd} windows' | grep -F '\"app_id\":\"niri-foot-second\"'",
+        timeout=30,
+    )
+    alice("cellward frame title always")
+
 # The main-home guard correctly refuses foot in two networks at once.
 # Finish the offline input probe before opening its host-network instance.
 alice("systemctl --user stop vmfoot")
