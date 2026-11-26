@@ -418,6 +418,10 @@ const CAPTURE_ERR: u8 = b'R';
 /// Proxy → supervisor: toggle recording of the selected root surface.
 const RECORD: u8 = b'y';
 const RECORD_PIPEWIRE: u8 = b'W';
+const RECORD_PIPEWIRE_STOP: u8 = b'X';
+/// Supervisor → proxy: select the last focused root for portal recording.
+const RECORD_ACTIVE: u8 = b'M';
+const RECORD_STOP_ACTIVE: u8 = b'O';
 /// Supervisor → proxy: a dedicated record-agent channel.
 const RECORD_ATTACH: u8 = b'z';
 /// A frame's line at most.
@@ -435,6 +439,7 @@ fn ask_byte(ask: Ask) -> u8 {
         Ask::ScreenshotHover => SCREENSHOT_HOVER,
         Ask::Record => RECORD,
         Ask::RecordPipeWire => RECORD_PIPEWIRE,
+        Ask::RecordPipeWireStop => RECORD_PIPEWIRE_STOP,
     }
 }
 
@@ -450,6 +455,7 @@ fn ask_of(byte: u8) -> Option<Ask> {
         SCREENSHOT_HOVER => Some(Ask::ScreenshotHover),
         RECORD => Some(Ask::Record),
         RECORD_PIPEWIRE => Some(Ask::RecordPipeWire),
+        RECORD_PIPEWIRE_STOP => Some(Ask::RecordPipeWireStop),
         _ => None,
     }
 }
@@ -1672,6 +1678,20 @@ impl Proxy {
                 continue;
             }
             if let Some(payload) = asked_of(&buf) {
+                if payload == b"\0record-pipewire" || payload == b"\0record-pipewire-stop" {
+                    let request = if payload == b"\0record-pipewire-stop" {
+                        RECORD_STOP_ACTIVE
+                    } else {
+                        RECORD_ACTIVE
+                    };
+                    let sent = !of_this_launch(stream.as_raw_fd())
+                        && self.channel.as_ref().is_some_and(|channel| {
+                            sys::send_with_fds(channel.as_raw_fd(), &[request], &[]).is_ok()
+                        });
+                    self.asking
+                        .say(&stream, if sent { ASK_YES } else { ASK_NO });
+                    return;
+                }
                 if let Some(request @ crate::type_input::Request::Cancel { .. }) =
                     crate::type_input::Request::parse(payload)
                 {
@@ -1810,9 +1830,12 @@ impl Proxy {
 
     fn stop_recording(&self) {
         if let Some(recording) = self.recording.take() {
+            eprintln!("wl-sandbox: stopping the root-surface recording");
             // SAFETY: the agent is started in its own process group. SIGINT
             // reaches both it and the encoder, which finalizes the MP4 index.
             unsafe { libc::kill(-recording.pid, libc::SIGINT) };
+        } else {
+            eprintln!("wl-sandbox: no root-surface recording to stop");
         }
     }
 
@@ -1968,8 +1991,15 @@ impl Proxy {
     /// writing the byte in a loop gets one `systemd-run`, not a flood of
     /// them (review 2026-09-27).
     fn ask(&self, ask: Ask) {
-        if matches!(ask, Ask::Record | Ask::RecordPipeWire) {
-            self.record(ask == Ask::RecordPipeWire);
+        if matches!(
+            ask,
+            Ask::Record | Ask::RecordPipeWire | Ask::RecordPipeWireStop
+        ) {
+            if ask == Ask::RecordPipeWireStop {
+                self.stop_recording();
+            } else {
+                self.record(ask == Ask::RecordPipeWire);
+            }
             return;
         }
         if ask == Ask::ScreenshotWindow {
@@ -2192,7 +2222,7 @@ pub(crate) fn menu_argv(
         Ask::Network => verb.push("--network".into()),
         Ask::Restart => verb.push("--restart".into()),
         Ask::Clip => verb[0] = "clip-window".into(),
-        Ask::Record | Ask::RecordPipeWire => {}
+        Ask::Record | Ask::RecordPipeWire | Ask::RecordPipeWireStop => {}
         Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover => {
             let mode = match ask {
                 Ask::ScreenshotWindow => "window",
@@ -3318,6 +3348,8 @@ fn serve(
                             &[],
                         );
                     }
+                    Answer::RecordActive => asks.record_focused(&questions),
+                    Answer::RecordStopActive => asks.record_stop(),
                     Answer::Record(stream) => {
                         recording = Some(stream);
                     }
@@ -3475,6 +3507,8 @@ enum Answer {
     ClipboardFailed,
     TypeControl(u64, crate::type_input::Request, Option<OwnedFd>),
     Capture(Option<OwnedFd>),
+    RecordActive,
+    RecordStopActive,
     Record(UnixStream),
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
@@ -3517,6 +3551,8 @@ fn answer(channel: &UnixStream) -> Answer {
         Ok((1, _, false)) if byte[0] == CLIPBOARD_REBOUND || byte[0] == CLIPBOARD_REFUSED => {
             Answer::ClipboardFailed
         }
+        Ok((1, _, _)) if byte[0] == RECORD_ACTIVE => Answer::RecordActive,
+        Ok((1, _, _)) if byte[0] == RECORD_STOP_ACTIVE => Answer::RecordStopActive,
         Ok((1, mut fds, _)) if byte[0] == RECORD_ATTACH => match fds.pop() {
             Some(fd) => Answer::Record(UnixStream::from(fd)),
             None => Answer::Closed,
@@ -6655,7 +6691,22 @@ mod tests {
             SMART_RESULT,
             TYPE_CONTROL,
             RECORD_ATTACH,
+            QUESTION,
+            RETRACT,
+            FRAME,
+            PASTE,
+            CLIPBOARD_REBOUND,
+            CLIPBOARD_REFUSED,
+            CAPTURE,
+            RECORD_ACTIVE,
+            RECORD_STOP_ACTIVE,
         ];
+        for (at, byte) in others.iter().enumerate() {
+            assert!(
+                !others[..at].contains(byte),
+                "duplicate channel byte {byte}"
+            );
+        }
         for ask in [
             Ask::Menu,
             Ask::Network,
@@ -6666,6 +6717,7 @@ mod tests {
             Ask::ScreenshotHover,
             Ask::Record,
             Ask::RecordPipeWire,
+            Ask::RecordPipeWireStop,
         ] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");

@@ -10,6 +10,10 @@ import json
 outer = machine.succeed("ls /run/user/1000/sway-ipc.*.sock").strip()
 niri_socket = machine.succeed("ls /run/user/1000/niri.*.sock").strip()
 niri_cmd = f"NIRI_SOCKET={niri_socket} niri msg --json"
+alice(
+    f"dbus-update-activation-environment NIRI_SOCKET={niri_socket} "
+    f"WAYLAND_DISPLAY={nested} PATH=\"$PATH\""
+)
 python = POINTER.split()[0]
 windows = json.loads(alice(f"{niri_cmd} windows"))
 supervisor_window = next(w for w in windows if w["app_id"] == "niri-foot")
@@ -344,6 +348,63 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
             f"--object-path {session} --method org.freedesktop.impl.portal.Session.Close"
         )
         toggle_recording(139)
+        machine.wait_until_fails("pgrep -f '[v]pn-zone-core record-agent'", timeout=15)
+
+    with subtest("trusted CLI toggles the focused root without the frame menu"):
+        alice(f"{niri_cmd} action focus-window --id {first['id']}")
+        alice(f"NIRI_SOCKET={niri_socket} cellward window-record --pid {supervisor}")
+        machine.wait_until_succeeds(
+            "su -l alice -c "
+            + shlex.quote(
+                f"export XDG_RUNTIME_DIR=/run/user/1000; {query} | grep -qE '^[0-9]+$'"
+            ),
+            timeout=20,
+        )
+        alice(f"NIRI_SOCKET={niri_socket} cellward window-record --pid {supervisor} --stop")
+        machine.wait_until_fails("pgrep -f '[v]pn-zone-core record-agent'", timeout=15)
+
+    with subtest("portal starts a focused source on demand and owns only that source"):
+        request = "/org/cellward/capture/request/ondemand"
+        session = "/org/cellward/capture/session/ondemand"
+        machine.fail(
+            "su -l alice -c "
+            + shlex.quote(
+                f"export XDG_RUNTIME_DIR=/run/user/1000; {query} | grep -qE '^[0-9]+$'"
+            )
+        )
+        created = alice(
+            "gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            "--object-path /org/freedesktop/portal/desktop "
+            f"--method org.freedesktop.impl.portal.ScreenCast.CreateSession "
+            f"{request} {session} vm.test '{{}}'"
+        )
+        assert "session_id" in created and session in created, created
+        selected = alice(
+            "gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            "--object-path /org/freedesktop/portal/desktop "
+            f"--method org.freedesktop.impl.portal.ScreenCast.SelectSources "
+            f"{request} {session} vm.test '{{}}'"
+        )
+        assert selected.startswith("(uint32 0,"), selected
+        started = alice(
+            "gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            "--object-path /org/freedesktop/portal/desktop "
+            f"--method org.freedesktop.impl.portal.ScreenCast.Start "
+            f"{request} {session} vm.test '' '{{}}'"
+        )
+        assert started.startswith("(uint32 0,"), started
+        assert "pipewire-serial" in started, started
+        machine.wait_until_succeeds(
+            "su -l alice -c "
+            + shlex.quote(
+                f"export XDG_RUNTIME_DIR=/run/user/1000; {query} | grep -qE '^[0-9]+$'"
+            ),
+            timeout=20,
+        )
+        alice(
+            f"gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            f"--object-path {session} --method org.freedesktop.impl.portal.Session.Close"
+        )
         machine.wait_until_fails("pgrep -f '[v]pn-zone-core record-agent'", timeout=15)
 
     alice("cellward frame title hover")

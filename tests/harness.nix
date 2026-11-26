@@ -394,6 +394,7 @@ in
       (expect "the backend runs through the pinned binary and pw-dump" (
         lib.hasInfix "cellward-capture-portal --impl --pw-dump /nix/store/" service
         && lib.hasInfix "/bin/pw-dump" service
+        && lib.hasInfix "--cellward /nix/store/" service
       ))
       (expect "capture portal is opt-in" (
         !(hm.config.xdg.dataFile ? "xdg-desktop-portal/portals/cellward.portal")

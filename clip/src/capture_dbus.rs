@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 #[allow(dead_code)]
 #[path = "../../shared/json.rs"]
 mod json;
@@ -28,20 +29,43 @@ fn transition(error: Error) -> u32 {
     }
 }
 
-fn choose_capture_id(
+fn choose_capture_id_with(
     available: &[Source],
     multiple: bool,
     capture_id: Option<&str>,
     kdialog: Option<&Path>,
+    choose: impl FnOnce() -> io::Result<String>,
 ) -> Result<Option<String>, Error> {
+    if available.is_empty() {
+        return Err(Error::NoSources);
+    }
     if capture_id.is_some() || multiple || available.len() == 1 {
         return Ok(capture_id.map(str::to_owned));
     }
     if available.len() > 64 {
         return Err(Error::AmbiguousSource);
     }
-    let Some(program) = kdialog else {
+    if kdialog.is_none() {
         return Err(Error::AmbiguousSource);
+    }
+    let selected = choose()
+        .map_err(|_| Error::AmbiguousSource)?
+        .trim()
+        .to_owned();
+    if selected.is_empty() || !available.iter().any(|source| source.capture_id == selected) {
+        return Err(Error::AmbiguousSource);
+    }
+    Ok(Some(selected))
+}
+
+fn choose_capture_id(
+    available: &[Source],
+    multiple: bool,
+    capture_id: Option<&str>,
+    kdialog: Option<&Path>,
+) -> Result<Option<String>, Error> {
+    let Some(program) = kdialog else {
+        return choose_capture_id_with(available, multiple, capture_id, None, || unreachable!());
     };
     let mut command = Command::new(program);
     command
@@ -50,15 +74,121 @@ fn choose_capture_id(
     for source in available {
         command.arg(&source.capture_id).arg(&source.capture_id);
     }
-    let output = command.output().map_err(|_| Error::AmbiguousSource)?;
-    if !output.status.success() {
-        return Err(Error::AmbiguousSource);
+    choose_capture_id_with(available, multiple, capture_id, kdialog, || {
+        let output = command.output()?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(io::Error::other("capture chooser was cancelled"))
+        }
+    })
+}
+
+#[derive(Clone)]
+struct Recorder {
+    cellward: PathBuf,
+    transition: Arc<Mutex<()>>,
+}
+
+impl Recorder {
+    fn new(cellward: PathBuf) -> Self {
+        Self {
+            cellward,
+            transition: Arc::new(Mutex::new(())),
+        }
     }
-    let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if selected.is_empty() || !available.iter().any(|source| source.capture_id == selected) {
-        return Err(Error::AmbiguousSource);
+}
+
+type Recording = Arc<Mutex<Option<i32>>>;
+type Recordings = Arc<Mutex<HashMap<String, Recording>>>;
+
+impl Recorder {
+    fn start_focused(&self) -> Option<i32> {
+        let output = Command::new(&self.cellward)
+            .args(["focused", "--json"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            eprintln!(
+                "cellward-capture-portal: cannot find the focused window: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return None;
+        }
+        let focused = json::parse(String::from_utf8_lossy(&output.stdout).trim()).ok()?;
+        let pid = i32::try_from(focused.get("pid")?.as_i64()?).ok()?;
+        let status = Command::new(&self.cellward)
+            .arg("window-record")
+            .arg("--pid")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .status()
+            .ok()?;
+        if !status.success() {
+            eprintln!("cellward-capture-portal: cannot start the focused PipeWire source");
+        }
+        status.success().then_some(pid)
     }
-    Ok(Some(selected))
+
+    fn stop(&self, pid: i32) {
+        let _ = Command::new(&self.cellward)
+            .arg("window-record")
+            .arg("--pid")
+            .arg(pid.to_string())
+            .arg("--stop")
+            .stdout(Stdio::null())
+            .status();
+    }
+
+    fn available(
+        &self,
+        available: &Provider,
+        recordings: &Recordings,
+        handle: &str,
+    ) -> (Vec<Source>, Option<i32>) {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let existing = (available)();
+        let already_recording = recordings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(handle)
+            .and_then(|recording| *recording.lock().unwrap_or_else(|error| error.into_inner()))
+            .is_some();
+        if !existing.is_empty() || already_recording {
+            return (existing, None);
+        }
+        let Some(pid) = self.start_focused() else {
+            return (existing, None);
+        };
+        for _ in 0..50 {
+            let sources = (available)();
+            if !sources.is_empty() {
+                return (sources, Some(pid));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        self.stop(pid);
+        (Vec::new(), None)
+    }
+}
+
+fn close_session(recorder: &Option<Recorder>, recordings: &Recordings, handle: &str) {
+    let recording = recordings
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(handle);
+    let pid = recording.and_then(|recording| {
+        recording
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    });
+    if let (Some(recorder), Some(pid)) = (recorder, pid) {
+        recorder.stop(pid);
+    }
 }
 
 fn token(options: &Options<'_>, name: &str) -> fdo::Result<String> {
@@ -111,6 +241,8 @@ impl Request {
 struct Session {
     registry: Arc<Mutex<Registry>>,
     handle: String,
+    recorder: Option<Recorder>,
+    recordings: Recordings,
 }
 
 #[interface(name = "org.freedesktop.portal.Session")]
@@ -120,6 +252,7 @@ impl Session {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .close(&self.handle);
+        close_session(&self.recorder, &self.recordings, &self.handle);
     }
 
     #[zbus(property)]
@@ -136,6 +269,8 @@ pub struct Portal {
     available: Arc<Provider>,
     pipewire: PathBuf,
     kdialog: Option<PathBuf>,
+    recorder: Option<Recorder>,
+    recordings: Recordings,
 }
 
 impl Portal {
@@ -149,11 +284,18 @@ impl Portal {
             available,
             pipewire,
             kdialog: None,
+            recorder: None,
+            recordings: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_kdialog(mut self, path: PathBuf) -> Self {
         self.kdialog = Some(path);
+        self
+    }
+
+    pub fn with_recorder(mut self, cellward: PathBuf) -> Self {
+        self.recorder = Some(Recorder::new(cellward));
         self
     }
 
@@ -175,9 +317,17 @@ impl Portal {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .create_session();
+        if self.recorder.is_some() {
+            self.recordings
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(handle.clone(), Arc::new(Mutex::new(None)));
+        }
         let session = Session {
             registry: self.registry.clone(),
             handle: handle.clone(),
+            recorder: self.recorder.clone(),
+            recordings: self.recordings.clone(),
         };
         connection
             .object_server()
@@ -239,7 +389,14 @@ impl Portal {
         let capture_id = options
             .get("cellward_capture_id")
             .and_then(|value| String::try_from(value).ok());
-        let available = (self.available)();
+        let (available, recording_pid) = match &self.recorder {
+            Some(recorder) => recorder.available(
+                self.available.as_ref(),
+                &self.recordings,
+                session_handle.as_str(),
+            ),
+            None => ((self.available)(), None),
+        };
         let selected = choose_capture_id(
             &available,
             self.registry
@@ -256,6 +413,20 @@ impl Portal {
                 .unwrap_or_else(|error| error.into_inner())
                 .start(session_handle.as_str(), &available, capture_id.as_deref())
         });
+        if let Some(pid) = recording_pid {
+            if result.is_ok() {
+                if let Some(recording) = self
+                    .recordings
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(session_handle.as_str())
+                {
+                    *recording.lock().unwrap_or_else(|error| error.into_inner()) = Some(pid);
+                }
+            } else if let Some(recorder) = &self.recorder {
+                recorder.stop(pid);
+            }
+        }
         let emitter = emitter_for(connection, request.clone());
         match result {
             Ok(sources) => {
@@ -330,6 +501,8 @@ impl ImplRequest {
 struct ImplSession {
     registry: Arc<Mutex<Registry>>,
     handle: String,
+    recorder: Option<Recorder>,
+    recordings: Recordings,
 }
 
 #[interface(name = "org.freedesktop.impl.portal.Session")]
@@ -339,6 +512,7 @@ impl ImplSession {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .close(&self.handle);
+        close_session(&self.recorder, &self.recordings, &self.handle);
     }
 
     #[zbus(property)]
@@ -354,6 +528,8 @@ pub struct ImplPortal {
     registry: Arc<Mutex<Registry>>,
     available: Arc<Provider>,
     kdialog: Option<PathBuf>,
+    recorder: Option<Recorder>,
+    recordings: Recordings,
 }
 
 impl ImplPortal {
@@ -362,11 +538,18 @@ impl ImplPortal {
             registry,
             available,
             kdialog: None,
+            recorder: None,
+            recordings: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub fn with_kdialog(mut self, path: PathBuf) -> Self {
         self.kdialog = Some(path);
+        self
+    }
+
+    pub fn with_recorder(mut self, cellward: PathBuf) -> Self {
+        self.recorder = Some(Recorder::new(cellward));
         self
     }
 }
@@ -393,9 +576,17 @@ impl ImplPortal {
             .create_session_with_handle(session_handle.as_str());
         let code = result.map_or_else(transition, |()| 0);
         if code == 0 {
+            if self.recorder.is_some() {
+                self.recordings
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .insert(session_handle.to_string(), Arc::new(Mutex::new(None)));
+            }
             let session = ImplSession {
                 registry: self.registry.clone(),
                 handle: session_handle.to_string(),
+                recorder: self.recorder.clone(),
+                recordings: self.recordings.clone(),
             };
             connection
                 .object_server()
@@ -442,7 +633,14 @@ impl ImplPortal {
         let capture_id = options
             .get("cellward_capture_id")
             .and_then(|value| String::try_from(value).ok());
-        let available = (self.available)();
+        let (available, recording_pid) = match &self.recorder {
+            Some(recorder) => recorder.available(
+                self.available.as_ref(),
+                &self.recordings,
+                session_handle.as_str(),
+            ),
+            None => ((self.available)(), None),
+        };
         let selected = choose_capture_id(
             &available,
             self.registry
@@ -459,6 +657,20 @@ impl ImplPortal {
                 .unwrap_or_else(|error| error.into_inner())
                 .start(session_handle.as_str(), &available, capture_id.as_deref())
         });
+        if let Some(pid) = recording_pid {
+            if result.is_ok() {
+                if let Some(recording) = self
+                    .recordings
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(session_handle.as_str())
+                {
+                    *recording.lock().unwrap_or_else(|error| error.into_inner()) = Some(pid);
+                }
+            } else if let Some(recorder) = &self.recorder {
+                recorder.stop(pid);
+            }
+        }
         match result {
             Ok(sources) => {
                 let streams: Vec<(u32, Options<'static>)> = sources
@@ -576,6 +788,14 @@ mod tests {
         }
     }
 
+    fn fixture_path(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("cellward-{name}-{}-{nonce}", std::process::id()))
+    }
+
     fn options(token: &str) -> Options<'static> {
         Options::from([(
             "handle_token".to_owned(),
@@ -599,17 +819,16 @@ mod tests {
 
     #[test]
     fn chooser_selects_only_an_advertised_container_and_cancel_is_closed() {
-        let program = std::env::temp_dir().join(format!("cellward-chooser-{}", std::process::id()));
-        std::fs::write(&program, "#!/bin/sh\nprintf 'two\\n'\n").unwrap();
-        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
-        std::fs::set_permissions(&program, permissions).unwrap();
         let available = [
             Source::new(1, 1, "one").unwrap(),
             Source::new(2, 2, "two").unwrap(),
         ];
+        let program = Path::new("/chooser");
         assert_eq!(
-            choose_capture_id(&available, false, None, Some(&program)).unwrap(),
+            choose_capture_id_with(&available, false, None, Some(program), || {
+                Ok("two\n".to_owned())
+            })
+            .unwrap(),
             Some("two".to_owned())
         );
         assert_eq!(
@@ -617,7 +836,11 @@ mod tests {
             Err(Error::AmbiguousSource)
         );
         assert_eq!(
-            choose_capture_id(&available, false, Some("missing"), Some(&program)),
+            choose_capture_id(&[], false, None, Some(program)),
+            Err(Error::NoSources)
+        );
+        assert_eq!(
+            choose_capture_id(&available, false, Some("missing"), Some(program)),
             Ok(Some("missing".to_owned()))
         );
     }
@@ -652,8 +875,7 @@ mod tests {
             .read_line(&mut address)
             .unwrap();
         let address = address.trim().to_owned();
-        let socket =
-            std::env::temp_dir().join(format!("cellward-capture-test-{}", std::process::id()));
+        let socket = fixture_path("capture-test");
         let listener = UnixListener::bind(&socket).unwrap();
         {
             let registry = Arc::new(Mutex::new(Registry::default()));
@@ -753,12 +975,6 @@ mod tests {
             .unwrap();
         let address = address.trim().to_owned();
         let registry = Arc::new(Mutex::new(Registry::default()));
-        let chooser =
-            std::env::temp_dir().join(format!("cellward-impl-chooser-{}", std::process::id()));
-        std::fs::write(&chooser, "#!/bin/sh\nprintf 'two\\n'\n").unwrap();
-        let mut permissions = std::fs::metadata(&chooser).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
-        std::fs::set_permissions(&chooser, permissions).unwrap();
         let portal = ImplPortal::new(
             registry.clone(),
             Arc::new(|| {
@@ -767,8 +983,7 @@ mod tests {
                     Source::new(8, 42, "two").unwrap(),
                 ]
             }),
-        )
-        .with_kdialog(chooser);
+        );
         let _server = zbus::blocking::connection::Builder::address(address.as_str())
             .unwrap()
             .name("org.freedesktop.impl.portal.desktop.cellward")
@@ -808,7 +1023,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 0);
-        let start = Options::new();
+        let start = Options::from([("cellward_capture_id".to_owned(), Value::Str("two".into()))]);
         let (code, results): (u32, HashMap<String, zbus::zvariant::OwnedValue>) = portal
             .call("Start", &(request, session.clone(), "test.app", "", start))
             .unwrap();

@@ -72,8 +72,10 @@ uses a private `dbus-daemon`, never the system portal. The `--impl` variant
 implements the synchronous `org.freedesktop.impl.portal.ScreenCast` API suitable
 for activation through xdg-desktop-portal. Activation through a `.portal` and
 D-Bus service file is opt-in via `programs.cellward.capturePortal.enable` and
-disabled by default. The source is still started from the frame first; starting
-it directly from the portal is the next stage.
+disabled by default. If no source is active, `Start` publishes the focused root surface
+through the trusted `cellward window-record --pid` command. `Session.Close` or cancelling
+the chooser stops that portal-owned source; a source already started from the frame is
+neither adopted nor stopped.
 
 Region and hover captures intentionally keep the composited screen view and use
 the manifest-pinned `grim`. In particular, niri's native screenshot action is

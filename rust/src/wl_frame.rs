@@ -951,6 +951,7 @@ pub(crate) enum Ask {
     ScreenshotHover,
     Record,
     RecordPipeWire,
+    RecordPipeWireStop,
 }
 
 /// Asks the proxy's loop has not sent yet. A few at most: a click is one,
@@ -979,6 +980,17 @@ impl Asks {
 
     fn record_window(&self, window: &Weak<RefCell<Window>>) {
         *self.recording.borrow_mut() = Some(window.clone());
+    }
+
+    pub(crate) fn record_focused(&self, questions: &Questions) {
+        if let Some((window, _)) = questions.windows.borrow().front() {
+            self.record_window(window);
+            self.push(Ask::RecordPipeWire);
+        }
+    }
+
+    pub(crate) fn record_stop(&self) {
+        self.push(Ask::RecordPipeWireStop);
     }
 
     /// The asks to send, in their order; none are left.

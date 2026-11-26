@@ -1802,7 +1802,7 @@ in
       "dbus-1/services/org.freedesktop.impl.portal.desktop.cellward.service".text = ''
         [D-BUS Service]
         Name=org.freedesktop.impl.portal.desktop.cellward
-        Exec=${cellward-clip}/bin/cellward-capture-portal --impl --pw-dump ${pkgs.pipewire}/bin/pw-dump --kdialog ${pkgs.kdePackages.kdialog}/bin/kdialog
+        Exec=${cellward-clip}/bin/cellward-capture-portal --impl --pw-dump ${pkgs.pipewire}/bin/pw-dump --kdialog ${pkgs.kdePackages.kdialog}/bin/kdialog --cellward ${cellward}/bin/cellward
       '';
     })
   ];
