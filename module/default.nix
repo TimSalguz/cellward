@@ -310,6 +310,8 @@ let
       window = "${vpn-zone-window}/bin/vpn-zone-window";
       # Host-side capture only. No desktop clipboard writes or sandbox grants.
       grim = "${pkgs.grim}/bin/grim";
+      # Host-side encoding of the proxy's root-surface frames, never desktop capture.
+      ffmpeg = "${pkgs.ffmpeg}/bin/ffmpeg";
       # Прежний путь к бэкендам AppChooser остаётся для совместимости;
       # брокер и cellward open используют собственное окно (rust/src/links.rs).
       busctl = "${pkgs.systemd}/bin/busctl";

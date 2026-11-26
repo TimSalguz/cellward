@@ -949,6 +949,7 @@ pub(crate) enum Ask {
     ScreenshotWindow,
     ScreenshotArea,
     ScreenshotHover,
+    Record,
 }
 
 /// Asks the proxy's loop has not sent yet. A few at most: a click is one,
@@ -3921,6 +3922,10 @@ impl Window {
             Some(MenuRow::Restart) => asks.push(Ask::Restart),
             Some(MenuRow::Actions) => asks.push(Ask::Menu),
             Some(MenuRow::Clipboard) => asks.push(Ask::Clip),
+            Some(MenuRow::Record) => {
+                asks.capture_window(&self.me);
+                asks.push(Ask::Record);
+            }
             Some(MenuRow::InWindow) => self.toggle_in_window(f),
             Some(MenuRow::Close) => {
                 if let Some(toplevel) = self.toplevel.as_ref().and_then(Weak::upgrade) {
@@ -7919,7 +7924,7 @@ mod tests {
         assert_eq!(menu_key(KEY_ESC, 4, Some(1)), MenuKey::Close);
         assert_eq!(menu_key(30, 4, Some(1)), MenuKey::Nothing);
         assert_eq!(menu_key(KEY_DOWN, 0, None), MenuKey::Close);
-        assert_eq!(crate::wl_title::MENU.len(), 5, "the rows of the dropdown");
+        assert_eq!(crate::wl_title::MENU.len(), 6, "the rows of the dropdown");
     }
 
     /// The buttons at the look's end of the strip, the text in the rest with

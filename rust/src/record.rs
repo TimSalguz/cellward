@@ -9,7 +9,32 @@ use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn request_stop(_: libc::c_int) {
+    STOP.store(true, Ordering::Release);
+}
+
+fn install_stop_handler() -> Result<(), String> {
+    // SAFETY: the handler only stores an atomic. No allocation, locks or I/O.
+    unsafe {
+        if libc::signal(
+            libc::SIGINT,
+            request_stop as *const () as libc::sighandler_t,
+        ) == libc::SIG_ERR
+            || libc::signal(
+                libc::SIGTERM,
+                request_stop as *const () as libc::sighandler_t,
+            ) == libc::SIG_ERR
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    Ok(())
+}
 
 const CAPTURE: u8 = b'P';
 const CAPTURE_OK: u8 = b'Q';
@@ -142,7 +167,7 @@ fn read_frame(fd: &OwnedFd) -> Result<Frame, String> {
     Ok(frame)
 }
 
-fn capture(channel: &mut UnixStream) -> Result<Frame, String> {
+fn capture(channel: &mut UnixStream) -> Result<Option<Frame>, String> {
     let output = memfd()?;
     crate::sys::send_with_fds(channel.as_raw_fd(), &[CAPTURE], &[output.as_raw_fd()])
         .map_err(|e| format!("cannot request a frame: {e}"))?;
@@ -154,23 +179,33 @@ fn capture(channel: &mut UnixStream) -> Result<Frame, String> {
     // SAFETY: pfd points to one initialized pollfd for the duration of poll.
     let ready = unsafe { libc::poll(&mut pfd, 1, REPLY_TIMEOUT_MS) };
     if ready <= 0 {
+        let error = std::io::Error::last_os_error();
+        if ready < 0
+            && error.kind() == std::io::ErrorKind::Interrupted
+            && STOP.load(Ordering::Acquire)
+        {
+            return Ok(None);
+        }
         return Err(if ready == 0 {
             "proxy capture timed out".into()
         } else {
-            std::io::Error::last_os_error().to_string()
+            error.to_string()
         });
     }
     let mut answer = [0u8; 1];
-    channel
-        .read_exact(&mut answer)
-        .map_err(|e| format!("cannot read the capture reply: {e}"))?;
+    if let Err(error) = channel.read_exact(&mut answer) {
+        if error.kind() == std::io::ErrorKind::Interrupted && STOP.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        return Err(format!("cannot read the capture reply: {error}"));
+    }
     if answer[0] == CAPTURE_ERR {
         return Err("proxy has no supported root-surface buffer".into());
     }
     if answer[0] != CAPTURE_OK {
         return Err("unknown proxy capture reply".into());
     }
-    read_frame(&output)
+    read_frame(&output).map(Some)
 }
 
 fn encoder_args(width: i32, height: i32, fps: u32, output: &Path) -> Vec<OsString> {
@@ -215,11 +250,22 @@ struct Encoder {
 
 impl Encoder {
     fn start(ffmpeg: &Path, output: &Path, frame: &Frame, fps: u32) -> Result<Self, String> {
-        let mut child = Command::new(ffmpeg)
+        let mut command = Command::new(ffmpeg);
+        command
             .args(encoder_args(frame.width, frame.height, fps, output))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        // SAFETY: the child only asks for a parent-death signal before exec.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("cannot start ffmpeg: {e}"))?;
         if child.stdin.is_none() {
@@ -254,7 +300,7 @@ impl Encoder {
         drop(self.child.stdin.take());
         let status = self.child.wait().map_err(|e| e.to_string())?;
         self.finished = true;
-        if status.success() {
+        if status.success() || STOP.load(Ordering::Acquire) {
             Ok(())
         } else {
             Err(format!("ffmpeg exited with {status}"))
@@ -272,25 +318,39 @@ impl Drop for Encoder {
 }
 
 fn run(args: &Args) -> Result<(), String> {
+    install_stop_handler()?;
     // SAFETY: the supervisor transfers ownership of this descriptor to the agent.
     let mut channel = unsafe { UnixStream::from_raw_fd(args.fd) };
     let mut encoder: Option<Encoder> = None;
     let interval = Duration::from_secs(1) / args.fps;
     let mut next = Instant::now();
     for _ in 0..args.frames {
+        if STOP.load(Ordering::Acquire) {
+            break;
+        }
         let left = next.saturating_duration_since(Instant::now());
         if !left.is_zero() {
             std::thread::sleep(left);
         }
-        let frame = capture(&mut channel)?;
-        match &mut encoder {
-            Some(encoder) => encoder.write(&frame)?,
+        let Some(frame) = capture(&mut channel)? else {
+            break;
+        };
+        if STOP.load(Ordering::Acquire) {
+            break;
+        }
+        let written = match &mut encoder {
+            Some(encoder) => encoder.write(&frame),
             None => {
                 let mut started = Encoder::start(&args.ffmpeg, &args.output, &frame, args.fps)?;
-                started.write(&frame)?;
+                let written = started.write(&frame);
                 encoder = Some(started);
+                written
             }
+        };
+        if STOP.load(Ordering::Acquire) {
+            break;
         }
+        written?;
         next += interval;
     }
     encoder.ok_or("no frames were recorded")?.finish()

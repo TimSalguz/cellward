@@ -38,6 +38,15 @@ to the desktop. The root surface does not include separately owned popups or a
 composition of application subsurfaces. Those cases, non-SHM buffers and alpha
 presentation remain follow-up work, not claimed support.
 
+The frame menu also toggles root-surface recording. A dedicated agent requests
+frames over its own proxy channel at 30 FPS, so an encoder cannot interleave
+with screenshots or block the main Wayland channel. Host ffmpeg writes H.264
+(yuv420p, veryfast) with no audio to a new `~/Videos/cellward-*.mp4`; existing
+files are never overwritten. Stop is cooperative: no new frame is requested and
+ffmpeg finalizes the MP4 index. A size change mid-stream and an unsupported
+buffer fail without substituting desktop pixels. Recording has the same root
+surface, subsurface and non-SHM limitations as a still capture.
+
 Region and hover captures intentionally keep the composited screen view and use
 the manifest-pinned `grim`. In particular, niri's native screenshot action is
 unsuitable for private copies because it also writes the desktop clipboard.

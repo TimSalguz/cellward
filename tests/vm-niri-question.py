@@ -252,6 +252,41 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
         machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=5)
 
     boxes = settled("niri-two-windows-after-capture", two_frames)
+
+    with subtest("root-surface recording starts and stops from the frame menu"):
+        target = boxes[0]
+        menu_x = target[2] + 1 - 8 * 24 + 12
+        menu_y = target[1] + 4 + 10
+
+        def toggle_recording():
+            pointer("move", menu_x, menu_y)
+            pointer("press")
+            pointer("release")
+            machine.sleep(0.5)
+            shot("niri-record-menu")
+            pointer("move", menu_x - 100, menu_y + 111)
+            pointer("press")
+            pointer("release")
+            shot("niri-record-after-keys")
+
+        toggle_recording()
+        machine.wait_until_succeeds(
+            "ls -1 /home/alice/Videos/cellward-*.mp4", timeout=15
+        )
+        machine.sleep(2)
+        toggle_recording()
+        video = machine.succeed(
+            "ls -1 /home/alice/Videos/cellward-*.mp4 | head -n1"
+        ).strip()
+        machine.wait_until_succeeds(f"ffprobe -v error {video}", timeout=15)
+        info = json.loads(machine.succeed(
+            f"ffprobe -v error -select_streams v:0 "
+            f"-show_entries stream=codec_name,nb_frames,r_frame_rate -of json {video}"
+        ))["streams"][0]
+        assert info["codec_name"] == "h264", info
+        assert info["r_frame_rate"] == "30/1", info
+        assert int(info["nb_frames"]) >= 10, info
+
     alice("cellward frame title hover")
     second_box = boxes[1]
     x = second_box[2] - 4 - 12

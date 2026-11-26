@@ -415,6 +415,10 @@ const CAPTURE: u8 = b'P';
 /// Proxy → supervisor: a complete root-surface image, or an unsupported buffer.
 const CAPTURE_OK: u8 = b'Q';
 const CAPTURE_ERR: u8 = b'R';
+/// Proxy → supervisor: toggle recording of the selected root surface.
+const RECORD: u8 = b'y';
+/// Supervisor → proxy: a dedicated record-agent channel.
+const RECORD_ATTACH: u8 = b'z';
 /// A frame's line at most.
 const MAX_FRAME_ARG: usize = 512;
 
@@ -428,6 +432,7 @@ fn ask_byte(ask: Ask) -> u8 {
         Ask::ScreenshotWindow => SCREENSHOT_WINDOW,
         Ask::ScreenshotArea => SCREENSHOT_AREA,
         Ask::ScreenshotHover => SCREENSHOT_HOVER,
+        Ask::Record => RECORD,
     }
 }
 
@@ -441,6 +446,7 @@ fn ask_of(byte: u8) -> Option<Ask> {
         SCREENSHOT_WINDOW => Some(Ask::ScreenshotWindow),
         SCREENSHOT_AREA => Some(Ask::ScreenshotArea),
         SCREENSHOT_HOVER => Some(Ask::ScreenshotHover),
+        RECORD => Some(Ask::Record),
         _ => None,
     }
 }
@@ -478,6 +484,11 @@ impl Upstream {
 }
 
 /// A running proxy, as its supervisor holds it.
+#[derive(Clone, Copy)]
+struct Recording {
+    pid: libc::pid_t,
+}
+
 pub struct Proxy {
     pid: libc::pid_t,
     pidfd: Option<OwnedFd>,
@@ -507,6 +518,7 @@ pub struct Proxy {
     /// The launch's socket of questions and the instances asking on it.
     asking: Asking,
     smart_partial: Vec<u8>,
+    recording: Cell<Option<Recording>>,
     /// The frame's settings watched, and the frame as the proxy has it.
     live: Option<Live>,
 }
@@ -1117,6 +1129,7 @@ pub(crate) fn start_private(
         attention: MenuStart::default(),
         asking: Asking::default(),
         smart_partial: Vec::new(),
+        recording: Cell::new(None),
     };
     match proxy.await_ready() {
         Ok(()) => Ok(proxy),
@@ -1213,6 +1226,7 @@ impl Proxy {
 
     /// Stop it at once, on a path that will not start the program behind it.
     pub fn kill(mut self) {
+        self.stop_recording();
         self.asking.close();
         if self.adopting {
             // SAFETY: as in `take_over`.
@@ -1256,6 +1270,7 @@ impl Proxy {
         loop {
             self.reap(main, &mut main_status, &mut proxy_alive, &mut told);
             if main_status.is_some() {
+                self.stop_recording();
                 if let Some(on_main_exit) = on_main_exit.take() {
                     on_main_exit();
                     // The proxy stops accepting when this closes, and exits
@@ -1398,6 +1413,13 @@ impl Proxy {
                     self.paste_menu.reaped(pid);
                     self.shots.reaped(pid);
                     self.attention.reaped(pid);
+                    if self
+                        .recording
+                        .get()
+                        .is_some_and(|recording| recording.pid == pid)
+                    {
+                        self.recording.take();
+                    }
                     if pid == main {
                         *main_status = Some(status);
                     } else if pid == self.pid {
@@ -1783,6 +1805,113 @@ impl Proxy {
         Some((fd, path))
     }
 
+    fn stop_recording(&self) {
+        if let Some(recording) = self.recording.take() {
+            // SAFETY: the agent is started in its own process group. SIGINT
+            // reaches both it and ffmpeg, which finalizes the MP4 index.
+            unsafe { libc::kill(-recording.pid, libc::SIGINT) };
+        }
+    }
+
+    fn record(&self) {
+        if self.recording.get().is_some() {
+            self.stop_recording();
+            return;
+        }
+        let tools = match crate::tools::Tools::from_env() {
+            Ok(tools) => tools,
+            Err(error) => {
+                eprintln!("wl-sandbox: no recording tools: {error}");
+                return;
+            }
+        };
+        let Some(ffmpeg) = tools.ffmpeg.as_ref().filter(|path| path.is_absolute()) else {
+            eprintln!("wl-sandbox: recording is unavailable: ffmpeg is not in the tools manifest");
+            return;
+        };
+        let directory = tools.home.join("Videos");
+        if let Err(error) = std::fs::create_dir_all(&directory) {
+            eprintln!("wl-sandbox: cannot create the recording directory: {error}");
+            return;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let output = directory.join(format!("cellward-{}-{stamp}.mp4", std::process::id()));
+        let (proxy_side, agent_side) = match UnixStream::pair() {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!("wl-sandbox: cannot create the recording channel: {error}");
+                return;
+            }
+        };
+        let fd = agent_side.as_raw_fd();
+        let mask = self.signals.as_ref().map(|signals| signals.old);
+        let mut command = std::process::Command::new(&tools.core);
+        command
+            .arg("record-agent")
+            .arg("--fd")
+            .arg(fd.to_string())
+            .arg("--ffmpeg")
+            .arg(ffmpeg)
+            .arg("--output")
+            .arg(&output)
+            .arg("--frames")
+            .arg("100000")
+            .arg("--fps")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit());
+        // SAFETY: the child only changes descriptor/process-group/signal state
+        // and then execs the trusted core; no allocation happens there.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) != 0
+                    || libc::setpgid(0, 0) != 0
+                    || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                if let Some(mask) = &mask {
+                    if libc::sigprocmask(libc::SIG_SETMASK, mask, std::ptr::null_mut()) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                eprintln!("wl-sandbox: cannot start the record agent: {error}");
+                return;
+            }
+        };
+        drop(agent_side);
+        let pid = child.id() as libc::pid_t;
+        let attached = self.channel.as_ref().is_some_and(|channel| {
+            sys::send_with_fds(
+                channel.as_raw_fd(),
+                &[RECORD_ATTACH],
+                &[proxy_side.as_raw_fd()],
+            )
+            .is_ok()
+        });
+        if !attached {
+            // SAFETY: the child was placed in this process group above.
+            unsafe { libc::kill(-pid, libc::SIGINT) };
+            let mut status = 0;
+            let _ = wait(pid, &mut status, 0);
+            return;
+        }
+        self.recording.set(Some(Recording { pid }));
+        eprintln!(
+            "wl-sandbox: recording the root surface to {}",
+            output.display()
+        );
+    }
+
     /// A click on the frame's ≡ or ⇄ (`crate::wl_frame`): the window menu of
     /// this launch, for the person to choose in — `cellward window-menu
     /// --pid <this process>`, and for ⇄ straight to the restart with a
@@ -1799,6 +1928,10 @@ impl Proxy {
     /// writing the byte in a loop gets one `systemd-run`, not a flood of
     /// them (review 2026-09-27).
     fn ask(&self, ask: Ask) {
+        if ask == Ask::Record {
+            self.record();
+            return;
+        }
         if ask == Ask::ScreenshotWindow {
             let Some((fd, path)) = self.capture_handshake() else {
                 eprintln!("wl-sandbox: root-surface capture is unavailable for this buffer");
@@ -2019,6 +2152,7 @@ pub(crate) fn menu_argv(
         Ask::Network => verb.push("--network".into()),
         Ask::Restart => verb.push("--restart".into()),
         Ask::Clip => verb[0] = "clip-window".into(),
+        Ask::Record => {}
         Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover => {
             let mode = match ask {
                 Ask::ScreenshotWindow => "window",
@@ -2986,6 +3120,7 @@ fn serve(
     let focus = Focus::new(focus);
     let mut listener = Some(listener);
     let mut channel = Some(channel);
+    let mut recording: Option<UnixStream> = None;
     // Accepted, their upstream asked for, in the order asked.
     let mut waiting: VecDeque<OwnedFd> = VecDeque::new();
     let mut conns: Vec<Conn> = Vec::new();
@@ -3018,6 +3153,10 @@ fn serve(
         if let Some(c) = &channel {
             fds.push(pollfd(c.as_raw_fd()));
         }
+        let recording_at = recording.as_ref().map(|stream| {
+            fds.push(pollfd(stream.as_raw_fd()));
+            fds.len() - 1
+        });
         let first_conn = fds.len();
         fds.extend(conns.iter().map(|c| pollfd(c.state.poll_fd().as_raw_fd())));
         fds.extend(crate::wl_frame::private_clipboard::pollfds());
@@ -3139,6 +3278,9 @@ fn serve(
                             &[],
                         );
                     }
+                    Answer::Record(stream) => {
+                        recording = Some(stream);
+                    }
                     // The frame changed on the fly: every connection's
                     // windows laid anew, and the next connection's too.
                     Answer::Frame(frame, pixel, title) => {
@@ -3168,6 +3310,28 @@ fn serve(
                         listener = None;
                         waiting.clear();
                     }
+                }
+            }
+        }
+        if let Some(at) = recording_at {
+            if fds[at].revents != 0 {
+                match recording.as_ref().map(answer) {
+                    Some(Answer::Capture(output)) => {
+                        let ok = output.is_some_and(|output| asks.write_capture(output));
+                        let sent = recording.as_ref().is_some_and(|stream| {
+                            sys::send_with_fds(
+                                stream.as_raw_fd(),
+                                &[if ok { CAPTURE_OK } else { CAPTURE_ERR }],
+                                &[],
+                            )
+                            .is_ok()
+                        });
+                        if !sent {
+                            recording = None;
+                        }
+                    }
+                    Some(Answer::Nothing) => {}
+                    _ => recording = None,
                 }
             }
         }
@@ -3271,6 +3435,7 @@ enum Answer {
     ClipboardFailed,
     TypeControl(u64, crate::type_input::Request, Option<OwnedFd>),
     Capture(Option<OwnedFd>),
+    Record(UnixStream),
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
     Frame(Frame, Option<OwnedFd>, Option<String>),
@@ -3312,6 +3477,10 @@ fn answer(channel: &UnixStream) -> Answer {
         Ok((1, _, false)) if byte[0] == CLIPBOARD_REBOUND || byte[0] == CLIPBOARD_REFUSED => {
             Answer::ClipboardFailed
         }
+        Ok((1, mut fds, _)) if byte[0] == RECORD_ATTACH => match fds.pop() {
+            Some(fd) => Answer::Record(UnixStream::from(fd)),
+            None => Answer::Closed,
+        },
         Ok((1, mut fds, _)) if byte[0] == CAPTURE => Answer::Capture(fds.pop()),
         Ok((1, mut fds, _)) if byte[0] == TYPE_CONTROL => {
             let mut head = [0u8; 10];
@@ -6320,8 +6489,8 @@ mod tests {
             assert_eq!(next(&log), 6, "close let go");
             events_until(&mut client, |o, op, _| o == 9 && op == 1);
 
-            // Over the menu: lit; clicked, its dropdown (step 3c) — and its
-            // third row, «Все действия окна…», asked of the supervisor. The
+            // Over the menu: lit; clicked, its dropdown (step 3c) — and the
+            // actions row, «Все действия окна…», asked of the supervisor. The
             // network: asked at once.
             let channel = rig.channel.as_ref().unwrap();
             channel
@@ -6347,7 +6516,7 @@ mod tests {
                 &mut compositor,
                 &[
                     leave(60, buttons),
-                    enter(61, popup, 100, 1 + 3 * 28 + 14),
+                    enter(61, popup, 100, 1 + 4 * 28 + 14),
                     button(62, true),
                     button(63, false),
                 ],
@@ -6445,6 +6614,7 @@ mod tests {
             SMART_PASTE,
             SMART_RESULT,
             TYPE_CONTROL,
+            RECORD_ATTACH,
         ];
         for ask in [
             Ask::Menu,
@@ -6454,6 +6624,7 @@ mod tests {
             Ask::ScreenshotWindow,
             Ask::ScreenshotArea,
             Ask::ScreenshotHover,
+            Ask::Record,
         ] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");

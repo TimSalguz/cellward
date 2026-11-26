@@ -78,6 +78,7 @@ let
           pkgs.sway
           pkgs.niri
           pkgs.grim
+          pkgs.ffmpeg
           pkgs.foot
           pkgs.wtype
         ];

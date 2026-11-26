@@ -109,6 +109,8 @@ pub struct Tools {
     pub nft: PathBuf,
     /// Optional for old manifests: private screenshot capture, never PATH lookup.
     pub grim: Option<PathBuf>,
+    /// Optional for old manifests: host-side root-surface video encoding.
+    pub ffmpeg: Option<PathBuf>,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
@@ -233,6 +235,7 @@ impl Tools {
             secret_tool: take("secret-tool")?,
             nft: take("nft")?,
             grim: entries.get("grim").map(PathBuf::from),
+            ffmpeg: entries.get("ffmpeg").map(PathBuf::from),
         })
     }
 
