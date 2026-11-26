@@ -126,7 +126,7 @@ with subtest("the frame's ≡ drops its menu down; a row of it opens the window 
     machine.fail(f"journalctl --no-pager | grep -F 'window-menu --pid {sup}'")
     # The actions row, «Все действия окна…», lit under the pointer, then
     # chosen: the window menu of the launch, as the ≡ opened it before.
-    row = (right - 20, top + 1 + 4 * 28 + 14)
+    row = (right - 20, top + 1 + 5 * 28 + 14)
     pointer("move", *row)
     at = shot("frame-dropdown-lit")
     assert at(right - 8, row[1]) != border, "the row under the pointer is lit"

@@ -1840,12 +1840,21 @@ impl Proxy {
                 eprintln!("wl-sandbox: PipeWire is unavailable: gst-plugin-path is not in the tools manifest");
                 return;
             };
+            let capture_id = self
+                .clipboard
+                .as_ref()
+                .map(|(_, id)| id)
+                .filter(|id| crate::record::valid_capture_id(id))
+                .cloned()
+                .unwrap_or_else(|| format!("launch-{}", self.pid));
             (
                 vec![
                     "--pipewire".into(),
                     gst_launch.as_os_str().to_owned(),
                     "--gst-plugin-path".into(),
                     plugin_path.clone(),
+                    "--capture-id".into(),
+                    capture_id.into(),
                 ],
                 "PipeWire node cellward_capture".to_owned(),
             )

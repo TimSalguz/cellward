@@ -53,7 +53,9 @@ followed by tightly packed BGRA rows without stride padding. This is the
 broker's internal transport, not a desktop-capture protocol.
 
 A separate frame-menu item publishes the same root surface as the PipeWire node
-`cellward_capture`. GStreamer receives tightly packed BGRA frames;
+`cellward_capture`. Its `cellward.capture.id` property holds the compositor-
+independent container-scope id, or a unique launch id for a legacy launch
+without one. GStreamer receives tightly packed BGRA frames;
 `rawvideoparse` assembles complete frames across short pipe reads, and
 `pipewiresink` supplies I420 to the consumer. The manifest pins `gst-launch` and
 every plugin instead of searching `PATH`. `tests/vm-niri-question.py` selects

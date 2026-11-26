@@ -302,6 +302,12 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
             timeout=20,
         )
         serial = alice(query).strip()
+        identity = alice(
+            f"{PW_DUMP} | jq -r '.[] | select(.type == \"PipeWire:Interface:Node\" "
+            "and .info.props[\"node.name\"] == \"cellward_capture\") "
+            "| .info.props[\"cellward.capture.id\"]'"
+        ).strip()
+        assert identity, "PipeWire source has no container-scoped capture id"
         alice(
             f"GST_PLUGIN_PATH={GST_PLUGIN_PATH} GST_PLUGIN_SYSTEM_PATH={GST_PLUGIN_PATH} "
             f"{GST} -q pipewiresrc "

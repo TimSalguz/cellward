@@ -51,6 +51,7 @@ enum Destination {
     PipeWire {
         gst_launch: PathBuf,
         plugin_path: Option<OsString>,
+        capture_id: Option<String>,
     },
 }
 
@@ -69,6 +70,7 @@ impl Args {
         let mut raw_fd = None;
         let mut pipewire = None;
         let mut gst_plugin_path = None;
+        let mut capture_id = None;
         let mut frames = None;
         let mut fps = None;
         let mut words = args.iter();
@@ -83,6 +85,13 @@ impl Args {
                 Some("--raw-fd") => raw_fd = value.to_str().and_then(|v| v.parse::<RawFd>().ok()),
                 Some("--pipewire") => pipewire = Some(PathBuf::from(value)),
                 Some("--gst-plugin-path") => gst_plugin_path = Some(value.to_owned()),
+                Some("--capture-id") => {
+                    let id = value
+                        .to_str()
+                        .filter(|id| valid_capture_id(id))
+                        .ok_or("invalid --capture-id")?;
+                    capture_id = Some(id.to_owned());
+                }
                 Some("--frames") => frames = value.to_str().and_then(|v| v.parse::<u32>().ok()),
                 Some("--fps") => fps = value.to_str().and_then(|v| v.parse::<u32>().ok()),
                 _ => return Err(format!("unknown option {word:?}")),
@@ -99,6 +108,7 @@ impl Args {
             Destination::PipeWire {
                 gst_launch,
                 plugin_path: gst_plugin_path,
+                capture_id,
             }
         } else {
             match raw_fd {
@@ -406,7 +416,20 @@ impl Raw {
     }
 }
 
-fn pipewire_args(width: i32, height: i32, fps: u32) -> Vec<OsString> {
+pub(crate) fn valid_capture_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
+fn pipewire_args(width: i32, height: i32, fps: u32, capture_id: Option<&str>) -> Vec<OsString> {
+    let mut properties = "props,media.class=Stream/Output/Video,node.name=cellward_capture,node.description=Cellward-root-surface".to_owned();
+    if let Some(id) = capture_id {
+        properties.push_str(",cellward.capture.id=");
+        properties.push_str(id);
+    }
     vec![
         "-q".into(),
         "fdsrc".into(),
@@ -430,7 +453,7 @@ fn pipewire_args(width: i32, height: i32, fps: u32) -> Vec<OsString> {
         "mode=provide".into(),
         "sync=false".into(),
         "enable-last-sample=false".into(),
-        "stream-properties=props,media.class=Stream/Output/Video,node.name=cellward_capture,node.description=Cellward-root-surface".into(),
+        format!("stream-properties={properties}").into(),
         "client-properties=props,application.name=cellward-capture".into(),
     ]
 }
@@ -448,10 +471,11 @@ impl GStreamer {
         plugin_path: Option<&OsStr>,
         frame: &Frame,
         fps: u32,
+        capture_id: Option<&str>,
     ) -> Result<Self, String> {
         let mut command = Command::new(program);
         command
-            .args(pipewire_args(frame.width, frame.height, fps))
+            .args(pipewire_args(frame.width, frame.height, fps, capture_id))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
@@ -574,11 +598,13 @@ fn run(args: &Args) -> Result<(), String> {
                     Destination::PipeWire {
                         gst_launch,
                         plugin_path,
+                        capture_id,
                     } => Sink::PipeWire(GStreamer::start(
                         gst_launch,
                         plugin_path.as_deref(),
                         &frame,
                         args.fps,
+                        capture_id.as_deref(),
                     )?),
                 };
                 let written = started.write(&frame);
@@ -693,7 +719,7 @@ mod tests {
 
     #[test]
     fn pipewire_is_a_named_video_source_without_a_file_or_audio() {
-        let args = pipewire_args(640, 480, 30);
+        let args = pipewire_args(640, 480, 30, Some("work:main"));
         assert!(args.iter().any(|arg| arg == "pipewiresink"));
         assert!(args.iter().any(|arg| arg == "blocksize=1228800"));
         assert!(args.iter().any(|arg| arg == "rawvideoparse"));
@@ -705,7 +731,33 @@ mod tests {
         assert!(args.iter().any(|arg| arg
             .to_string_lossy()
             .contains("media.class=Stream/Output/Video")));
+        assert!(args.iter().any(|arg| arg
+            .to_string_lossy()
+            .contains("cellward.capture.id=work:main")));
         assert!(!args.iter().any(|arg| arg == "pulseaudiosink"));
+    }
+
+    #[test]
+    fn capture_ids_cannot_inject_stream_properties() {
+        for valid in ["host", "main:offline", "work-1", "a.b_c"] {
+            assert!(valid_capture_id(valid));
+        }
+        for invalid in ["", "with space", "comma,id", "line\nbreak", "ё"] {
+            assert!(!valid_capture_id(invalid));
+        }
+        let args = Args::parse(&[
+            "--fd".into(),
+            "3".into(),
+            "--pipewire".into(),
+            "/nix/store/g/bin/gst-launch-1.0".into(),
+            "--capture-id".into(),
+            "bad,id".into(),
+            "--frames".into(),
+            "1".into(),
+            "--fps".into(),
+            "30".into(),
+        ]);
+        assert!(args.is_err());
     }
 
     #[test]
