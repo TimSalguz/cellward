@@ -21,6 +21,7 @@ pub struct Config {
     pub port: u16,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub adapter: Option<String>,
     pub addresses: Vec<String>,
     pub plan: Plan,
 }
@@ -32,7 +33,7 @@ pub fn is_proxy(ini: &WgConfig) -> bool {
 impl Config {
     pub fn from_ini(ini: &WgConfig, iface: &str) -> Result<Self, String> {
         let section = ini.section(SECTION).ok_or("no [Proxy] section")?;
-        const KEYS: &[&str] = &["Type", "Server", "Port", "Username", "Password"];
+        const KEYS: &[&str] = &["Type", "Server", "Port", "Username", "Password", "Adapter"];
         if let Some(key) = section
             .entries
             .iter()
@@ -122,6 +123,7 @@ impl Config {
             port,
             username: section.get("Username").map(str::to_owned),
             password: section.get("Password").map(str::to_owned),
+            adapter: section.get("Adapter").map(str::to_owned),
             addresses: addresses.into_iter().map(|address| address.raw).collect(),
             plan: Plan {
                 iface: iface.to_owned(),
@@ -173,6 +175,32 @@ impl Config {
     }
 }
 
+pub fn attached_adapter(
+    config: &std::path::Path,
+    proxy: &Config,
+) -> Result<Option<crate::transport::Adapter>, String> {
+    let Some(name) = proxy.adapter.as_deref() else {
+        return Ok(None);
+    };
+    if !proxy.server.is_loopback() {
+        return Err("an application adapter requires a loopback [Proxy] Server".to_owned());
+    }
+    let adapter = crate::transport::inventory(config)?
+        .into_iter()
+        .find(|adapter| adapter.name == name && adapter.kind == crate::transport::Kind::Plugin)
+        .ok_or_else(|| format!("no external application transport {name}"))?;
+    let published = adapter
+        .publication
+        .as_ref()
+        .ok_or_else(|| format!("transport {name} publishes no proxy"))?;
+    if published.kind != proxy.kind || published.port != proxy.port {
+        return Err(format!(
+            "transport {name} and [Proxy] disagree about the proxy type or port"
+        ));
+    }
+    Ok(Some(adapter))
+}
+
 fn required(section: &crate::config::Section, key: &str) -> Result<String, String> {
     section
         .get(key)
@@ -185,6 +213,7 @@ fn required(section: &crate::config::Section, key: &str) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn config() -> Config {
         Config::from_ini(
@@ -221,6 +250,35 @@ mod tests {
             Some(false)
         );
         assert_eq!(Plan::parse(&cfg.plan.to_text()).unwrap(), cfg.plan);
+    }
+
+    #[test]
+    fn an_attached_adapter_must_publish_the_same_loopback_endpoint() {
+        let root =
+            std::env::temp_dir().join(format!("cellward-proxy-adapter-{}", std::process::id()));
+        let manifests = root.join(crate::transport::DIRECTORY);
+        fs::create_dir_all(&manifests).unwrap();
+        fs::write(
+            manifests.join("vendor.conf"),
+            b"[Transport]\nName = vendor\nRun = /does/not/run\nChannel = application\nProxy = socks5\nProxyPort = 1080\n",
+        )
+        .unwrap();
+        let ini = WgConfig::parse(
+            b"[Interface]\nAddress = 10.200.0.2/32\n[Proxy]\nType = socks5\nServer = 127.0.0.1\nPort = 1080\nAdapter = vendor\n",
+        )
+        .unwrap();
+        let config = Config::from_ini(&ini, "awg0").unwrap();
+        assert_eq!(
+            attached_adapter(&root, &config).unwrap().unwrap().name,
+            "vendor"
+        );
+        let mut wrong = config.clone();
+        wrong.port = 1081;
+        assert!(attached_adapter(&root, &wrong).is_err());
+        wrong.port = 1080;
+        wrong.server = "192.0.2.1".parse().unwrap();
+        assert!(attached_adapter(&root, &wrong).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

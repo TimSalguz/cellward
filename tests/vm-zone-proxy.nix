@@ -26,6 +26,87 @@ let
 
     http.server.HTTPServer((sys.argv[1], int(sys.argv[2])), Handler).serve_forever()
   '';
+  providerPeer = pkgs.writeText "cellward-provider-peer.py" ''
+    import http.server
+    import sys
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            with open(sys.argv[3], "a") as log:
+                log.write(self.path + "\n")
+            body = self.path.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *args):
+            pass
+
+    http.server.HTTPServer((sys.argv[1], int(sys.argv[2])), Handler).serve_forever()
+  '';
+  fakeProvider = pkgs.writeScript "cellward-fake-provider.py" ''
+    #!${pkgs.python3}/bin/python3
+    import os
+    import select
+    import socket
+
+    def exact(conn, size):
+        data = b""
+        while len(data) < size:
+            part = conn.recv(size - len(data))
+            if not part:
+                raise EOFError
+            data += part
+        return data
+
+    def handle(client):
+        try:
+            version, count = exact(client, 2)
+            exact(client, count)
+            client.sendall(b"\x05\x00")
+            version, command, reserved, kind = exact(client, 4)
+            if command != 1:
+                return
+            if kind == 1:
+                host = socket.inet_ntoa(exact(client, 4))
+            elif kind == 3:
+                host = exact(client, exact(client, 1)[0]).decode()
+            elif kind == 4:
+                host = socket.inet_ntop(socket.AF_INET6, exact(client, 16))
+            else:
+                return
+            port = int.from_bytes(exact(client, 2), "big")
+            upstream = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+            upstream.settimeout(5)
+            upstream.connect((host, port))
+            marker = socket.create_connection(("192.168.1.2", 8092), timeout=5)
+            marker.sendall(b"GET /provider-connected HTTP/1.1\r\nHost: provider\r\nConnection: close\r\n\r\n")
+            marker.close()
+            client.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+            upstream.settimeout(None)
+            sockets = [client, upstream]
+            while True:
+                readable, _, failed = select.select(sockets, [], sockets)
+                if failed:
+                    return
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    (upstream if source is client else client).sendall(data)
+        except (EOFError, OSError):
+            pass
+        finally:
+            client.close()
+
+    server = socket.socket(socket.AF_INET)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((os.environ["CELLWARD_PROXY_SERVER"], int(os.environ["CELLWARD_PROXY_PORT"])))
+    server.listen()
+    while True:
+        connection, _ = server.accept()
+        handle(connection)
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "cellward-zone-proxy";
@@ -63,7 +144,7 @@ pkgs.testers.runNixOSTest {
       boot.kernelModules = [ "wireguard" ];
       environment.systemPackages = [ pkgs.wireguard-tools pkgs.iproute2 pkgs.python3 pkgs.dnsmasq ];
       networking.firewall.allowedUDPPorts = [ 53 51820 ];
-      networking.firewall.allowedTCPPorts = [ 8090 8091 ];
+      networking.firewall.allowedTCPPorts = [ 8090 8091 8092 18081 ];
       networking.firewall.trustedInterfaces = [ "wg0" ];
       virtualisation.memorySize = 768;
     };
@@ -176,6 +257,72 @@ pkgs.testers.runNixOSTest {
                 "export XDG_RUNTIME_DIR=/run/user/1000; "
                 "curl --max-time 10 --proxytunnel -x http://127.0.0.1:1080 "
                 "http://selected.test:8090"
+            )
+        )
+
+    with subtest("an external SOCKS5 proxy becomes a full-tunnel TCP route"):
+        server.succeed(
+            "systemd-run --unit=provider-peer python3 ${providerPeer} "
+            f"{server_ip} 8092 /tmp/provider-requests"
+        )
+        server.wait_for_open_port(8092, server_ip)
+        server.succeed(
+            "systemd-run --unit=external-proxy "
+            "--setenv=CELLWARD_PROXY_SERVER=0.0.0.0 "
+            "--setenv=CELLWARD_PROXY_PORT=18081 ${fakeProvider}"
+        )
+        server.wait_for_open_port(18081, server_ip)
+        alice(
+            "printf '[Interface]\\nAddress = 10.200.0.2/32\\nDNS = "
+            f"{server_ip}\\nMTU = 1380\\n\\n[Proxy]\\nType = socks5\\n"
+            f"Server = {server_ip}\\nPort = 18081\\n' > /tmp/external.conf"
+        )
+        alice("cellward add external /tmp/external.conf")
+        alice("cellward zone-proxy set external 1082 zone")
+        alice("cellward up external")
+        answer = alice(
+            "curl --max-time 20 --proxytunnel -x http://127.0.0.1:1082 "
+            f"http://{server_ip}:8092/external"
+        ).strip()
+        assert answer == "/external", answer
+        server.succeed("grep -q '^/provider-connected$' /tmp/provider-requests")
+        alice("cellward down external")
+        server.succeed("systemctl stop external-proxy")
+        server.succeed("truncate -s 0 /tmp/provider-requests")
+
+    with subtest("an application provider becomes a full-tunnel route and dies with the zone"):
+        alice("mkdir -p ~/.config/vpn-zones/transports")
+        alice(
+            "printf '[Transport]\\nName = fake-provider\\nRun = ${fakeProvider}\\n"
+            "Channel = application\\nProxy = socks5\\nProxyPort = 18080\\n' "
+            "> ~/.config/vpn-zones/transports/fake-provider.conf"
+        )
+        alice(
+            "printf '[Interface]\\nAddress = 10.200.0.2/32\\nDNS = "
+            f"{server_ip}\\nMTU = 1380\\n\\n[Proxy]\\nType = socks5\\n"
+            "Server = 127.0.0.1\\nPort = 18080\\nAdapter = fake-provider\\n' "
+            "> /tmp/provider.conf"
+        )
+        alice("cellward add provided /tmp/provider.conf")
+        alice("cellward zone-proxy set provided 1081 zone")
+        alice("cellward up provided")
+        answer = alice(
+            "curl --max-time 20 --proxytunnel -x http://127.0.0.1:1081 "
+            f"http://{server_ip}:8092/through-zone"
+        ).strip()
+        assert answer == "/through-zone", answer
+        server.succeed("grep -q '^/provider-connected$' /tmp/provider-requests")
+        machine.succeed("pkill -KILL -f '[c]ellward-fake-provider.py'")
+        machine.wait_until_fails(
+            "runuser -u alice -- env XDG_RUNTIME_DIR=/run/user/1000 "
+            "systemctl --user is-active vpn-zone@provided.service"
+        )
+        machine.fail(
+            "su -l alice -c "
+            + shlex.quote(
+                "export XDG_RUNTIME_DIR=/run/user/1000; "
+                "curl --max-time 10 --proxytunnel -x http://127.0.0.1:1081 "
+                f"http://{server_ip}:8092"
             )
         )
   '';

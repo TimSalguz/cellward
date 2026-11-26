@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::process::Child;
 use std::time::Duration;
 
 use crate::proxy::{Config, Kind};
@@ -26,6 +27,23 @@ pub fn check(config: &Config) -> Result<(), String> {
         config.username.as_deref(),
         config.password.as_deref(),
     )
+}
+
+pub fn wait(config: &Config, child: &mut Child) -> Result<(), String> {
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("cannot check the application provider: {e}"))?
+        {
+            return Err(format!(
+                "application provider exited ({status}) before its proxy was ready"
+            ));
+        }
+        if check(config).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub fn handshake(

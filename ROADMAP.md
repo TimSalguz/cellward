@@ -565,7 +565,12 @@ app-ns. Общий разбор каналов утечки такого бэк�
 - [x] «зона-прокси»: `[Proxy]` SOCKS5/HTTP через sing-box в uplink, TUN в
       app-ns, pinned endpoint в firewall, смерть клиента закрывает маршрут. HTTP
       явно TCP-only, UDP SOCKS5 зависит от сервера; literal IP обязателен. GUI-форма
-      добавления и локальный endpoint GUI-VPN-адаптера — следующий слой.
+      добавления — следующий слой.
+- [x] application provider как источник локального SOCKS5/HTTP endpoint: манифест
+      транспорта, `[Proxy] Adapter`, readiness-рукопожатие, отдельный UID с явным
+      доверием, sing-box только на loopback, общий fail-closed lifecycle и VM с
+      фиктивным provider. Для GUI-клиента следующий слой — ограниченный Wayland-мост,
+      не сырой сокет композитора.
 - [ ] **зона со своим клиентом** (решение владельца 18.09, nix_cm docs/roadmap.md §13
       п. 25): одна площадка вместо N интеграций. Контейнер с FHS-окружением, куда
       человек ставит любой вендорский клиент (.deb, AppImage, rpm) и входит в его GUI;

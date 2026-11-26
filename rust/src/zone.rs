@@ -129,7 +129,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -4769,7 +4769,9 @@ pub enum Backend {
     /// TLS session stays with the process, which never leaves the uplink.
     Oc(Box<OcZone>),
     /// A sing-box process turns one pinned SOCKS5/HTTP proxy into the zone's tun.
-    Proxy(Box<crate::proxy::Config>),
+    /// An optional application provider owns that loopback endpoint and is
+    /// supervised alongside sing-box.
+    Proxy(Box<ProxyZone>),
     /// No tunnel and no uplink: pasta attaches to the app namespace and binds
     /// everything it sends to one interface of the host.
     HostIf(HostIfConfig),
@@ -4783,6 +4785,19 @@ pub enum Backend {
 }
 
 /// An OpenConnect zone, ready to be started.
+pub struct ProxyZone {
+    pub config: crate::proxy::Config,
+    pub adapter: Option<crate::transport::Adapter>,
+}
+
+impl std::ops::Deref for ProxyZone {
+    type Target = crate::proxy::Config;
+
+    fn deref(&self) -> &Self::Target {
+        &self.config
+    }
+}
+
 pub struct OcZone {
     pub cfg: OcConfig,
     /// The gateway's address: the authentication helper's exact address for
@@ -5359,8 +5374,13 @@ fn prepare_backend(zone: &Zone, raw: &[u8]) -> Result<Backend, String> {
     if crate::proxy::is_proxy(&cfg) {
         let proxy = crate::proxy::Config::from_ini(&cfg, TUN_IFACE)
             .map_err(|e| format!("{CONFIG}: {e}"))?;
+        let adapter = crate::proxy::attached_adapter(&zone.home.join(CONFIG_SUBDIR), &proxy)
+            .map_err(|e| format!("{CONFIG}: {e}"))?;
         let _ = fs::remove_file(zone.path(openconnect::PLAN_FILE));
-        return Ok(Backend::Proxy(Box::new(proxy)));
+        return Ok(Backend::Proxy(Box::new(ProxyZone {
+            config: proxy,
+            adapter,
+        })));
     }
     if openconnect::is_openconnect(&cfg) {
         return prepare_openconnect(zone, &cfg);
@@ -5586,32 +5606,33 @@ fn session_gateway(cfg: &OcConfig, session: &crate::connect::Session) -> Result<
 /// The uplink: pasta's namespace, and the namespace the tunnel is born in.
 ///
 /// A WireGuard zone parks here forever, because the tunnel is a kernel object
-/// and there is nothing left to supervise. An OpenConnect zone waits on the
-/// client instead: the client's exit becomes this process's exit, the holder
-/// sees the uplink die and takes the whole zone down with it. No retry, no
-/// fallback, nothing to fall back TO — the app namespace has one interface and
-/// it is about to disappear.
+/// and there is nothing left to supervise. A userspace zone waits on every
+/// client instead: OpenConnect, sing-box and an optional application provider.
+/// Any exit becomes this process's exit and kills the others; the holder sees
+/// the uplink die and takes the whole zone down with it. No retry, no fallback,
+/// nothing to fall back TO — the app namespace has one interface and it is
+/// about to disappear.
 fn uplink_main(zone: &Zone, links: UplinkLinks<'_>) -> u8 {
     default_signals();
     match uplink_setup(zone, links) {
-        Ok(None) => park(),
-        Ok(Some(mut client)) => {
-            let code = match client.wait() {
-                Ok(status) => {
-                    eprintln!(
-                        "zone {}: the userspace tunnel client exited ({status}) — the tunnel is gone",
-                        zone.name()
-                    );
-                    status.code().map_or(1, |c| c as u8)
-                }
-                Err(e) => {
-                    eprintln!("zone {}: cannot wait for openconnect: {e}", zone.name());
-                    1
-                }
-            };
+        Ok(clients) if clients.is_empty() => park(),
+        Ok(mut clients) => {
+            let (position, raw) = wait_for_any_client(&clients);
+            let status = std::process::ExitStatus::from_raw(raw);
+            eprintln!(
+                "zone {}: a userspace tunnel process exited ({status}) — the tunnel is gone",
+                zone.name()
+            );
+            let mut stopped = clients.remove(position);
+            let _ = stopped.wait();
+            for mut client in clients {
+                let _ = client.kill();
+                let _ = client.wait();
+            }
             // A client that quit on its own leaves a zone that cannot work,
             // whatever it thought of its own exit — this path is never reached
             // on a `systemctl stop`, which signals us straight to death.
+            let code = exit_code_of(raw);
             if code == 0 {
                 1
             } else {
@@ -5625,9 +5646,27 @@ fn uplink_main(zone: &Zone, links: UplinkLinks<'_>) -> u8 {
     }
 }
 
+fn wait_for_any_client(clients: &[Child]) -> (usize, libc::c_int) {
+    loop {
+        let mut status = 0;
+        // SAFETY: the status pointer is valid; every direct child of the uplink
+        // is in `clients`, and the caller reaps only the reported child.
+        let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if pid < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return (0, 1 << 8);
+        }
+        if let Some(position) = clients.iter().position(|client| client.id() == pid as u32) {
+            return (position, status);
+        }
+    }
+}
+
 /// Bring the uplink up; the answer is the process this namespace now lives as
 /// long as, if there is one.
-fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, String> {
+fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Vec<Child>, String> {
     let UplinkLinks {
         backend,
         zone_pid,
@@ -5734,7 +5773,16 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
     // gateway, as the kernel's WireGuard socket keeps itself to its peer. So
     // an OpenConnect zone whose rule does not load does not come up.
     if matches!(backend, Backend::Oc(_) | Backend::Proxy(_)) {
-        feed_nft(&zone.tools.nft, &uplink_ruleset(&backend.sockets())).map_err(|e| {
+        let provider = match backend {
+            Backend::Proxy(proxy) if proxy.adapter.is_some() => Some(
+                fs::metadata(&zone.dir)
+                    .map(|meta| meta.uid())
+                    .map_err(|e| format!("cannot find the provider's owner: {e}"))?,
+            ),
+            _ => None,
+        };
+        let rules = uplink_ruleset_with_provider(&backend.sockets(), provider);
+        feed_nft(&zone.tools.nft, &rules).map_err(|e| {
             format!(
                 "the uplink's filter did not load ({e}) — a userspace client would \
                  reach the whole internet from here, so the zone does not come up"
@@ -5801,7 +5849,7 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
             // Now the app namespace may configure it — and it has to be told
             // which of the two tools speaks to what we built.
             tell_the_zone(moved_w, tool)?;
-            Ok(None)
+            Ok(Vec::new())
         }
         Backend::Oc(oc) => {
             // The client gets no capabilities (`CLIENT_ID`), so what it needs
@@ -5830,29 +5878,54 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Option<Child>, St
                 return Err(e);
             }
             tell_the_zone(moved_w, TOOL_OC)?;
-            Ok(Some(client))
+            Ok(vec![client])
         }
         Backend::Proxy(proxy) => {
             let dir = client_dir()?;
             tun_for_the_client()?;
-            println!(
-                "zone {}: uplink is up (default dev {dev}), starting sing-box to {}:{}",
-                zone.name(),
-                proxy.server,
-                proxy.port
-            );
-            let mut client = spawn_sing_box(zone, proxy, &dir)?;
-            let handed = wait_for_sing_box(&mut client).and_then(|()| {
-                wait_for_app_namespace(zone_up_r)?;
-                hand_over(zone, zone_pid, &proxy.plan)
-            });
+            let mut clients = Vec::new();
+            let handed = (|| -> Result<(), String> {
+                if let Some(adapter) = proxy.adapter.as_ref() {
+                    println!(
+                        "zone {}: starting application provider {}",
+                        zone.name(),
+                        adapter.name
+                    );
+                    let mut provider = spawn_provider(zone, proxy, adapter)?;
+                    if let Err(e) = crate::provider::wait(proxy, &mut provider) {
+                        let _ = provider.kill();
+                        let _ = provider.wait();
+                        return Err(e);
+                    }
+                    clients.push(provider);
+                }
+                println!(
+                    "zone {}: uplink is up (default dev {dev}), starting sing-box to {}:{}",
+                    zone.name(),
+                    proxy.server,
+                    proxy.port
+                );
+                let mut client = spawn_sing_box(zone, &proxy.config, &dir)?;
+                let ready = wait_for_sing_box(&mut client).and_then(|()| {
+                    wait_for_app_namespace(zone_up_r)?;
+                    hand_over(zone, zone_pid, &proxy.plan)
+                });
+                if let Err(e) = ready {
+                    let _ = client.kill();
+                    let _ = client.wait();
+                    return Err(e);
+                }
+                clients.push(client);
+                tell_the_zone(moved_w, TOOL_PROXY)
+            })();
             if let Err(e) = handed {
-                let _ = client.kill();
-                let _ = client.wait();
+                for mut client in clients {
+                    let _ = client.kill();
+                    let _ = client.wait();
+                }
                 return Err(e);
             }
-            tell_the_zone(moved_w, TOOL_PROXY)?;
-            Ok(Some(client))
+            Ok(clients)
         }
         // `supervise` never starts an uplink for these.
         Backend::HostIf(_) => Err("a host-interface zone has no uplink".to_string()),
@@ -8859,6 +8932,75 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
     Ok(child)
 }
 
+const PROVIDER_DIR: &str = "/tmp/provider";
+
+fn spawn_provider(
+    zone: &Zone,
+    proxy: &crate::proxy::Config,
+    adapter: &crate::transport::Adapter,
+) -> Result<Child, String> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let run = adapter.run.as_ref().ok_or("provider has no Run")?;
+    let program = real_program(run)?;
+    let owner =
+        fs::metadata(&zone.dir).map_err(|e| format!("cannot find the provider's owner: {e}"))?;
+    let dir = PathBuf::from(PROVIDER_DIR);
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("cannot make {PROVIDER_DIR} for the provider: {e}"))?;
+    std::os::unix::fs::chown(&dir, Some(owner.uid()), Some(owner.gid()))
+        .map_err(|e| format!("cannot give {PROVIDER_DIR} to the provider: {e}"))?;
+    let mut command = Command::new(&program);
+    command
+        .current_dir(&dir)
+        .env_clear()
+        .env("HOME", &dir)
+        .env("XDG_CACHE_HOME", &dir)
+        .env("CELLWARD_PROVIDER", &adapter.name)
+        .env("CELLWARD_PROXY_SERVER", proxy.server.to_string())
+        .env("CELLWARD_PROXY_PORT", proxy.port.to_string())
+        .env(
+            "CELLWARD_PROXY_TYPE",
+            match proxy.kind {
+                crate::proxy::Kind::Socks5 => "socks5",
+                crate::proxy::Kind::Http => "http",
+            },
+        )
+        .env(
+            "CELLWARD_PROVIDER_GUI",
+            if adapter.publication.as_ref().is_some_and(|p| p.gui) {
+                "1"
+            } else {
+                "0"
+            },
+        )
+        .stdin(Stdio::null());
+    let uid = owner.uid();
+    let gid = owner.gid();
+    // SAFETY: getpid takes no arguments; the child checks the same parent again
+    // after changing ids so it cannot outlive the uplink through a race.
+    let uplink = unsafe { libc::getpid() };
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setresgid(gid, gid, gid) != 0
+                || libc::setresuid(uid, uid, uid) != 0
+                || libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0
+                || libc::getppid() != uplink
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+        .spawn()
+        .map_err(|e| format!("cannot start application provider {}: {e}", adapter.name))
+}
+
 fn spawn_sing_box(zone: &Zone, proxy: &crate::proxy::Config, dir: &Path) -> Result<Child, String> {
     let config = dir.join(crate::proxy::CONFIG_FILE);
     fs::write(&config, proxy.sing_box_config())
@@ -10733,7 +10875,16 @@ pub fn instance_closed_ruleset() -> String {
 /// ruleset, which is the fail-closed answer to a tunnel that has nowhere to go —
 /// and the holder has already said so out loud.
 pub fn uplink_ruleset(endpoints: &[EndpointSocket]) -> String {
+    uplink_ruleset_with_provider(endpoints, None)
+}
+
+fn uplink_ruleset_with_provider(endpoints: &[EndpointSocket], provider: Option<u32>) -> String {
     let mut rules = vec!["oifname \"lo\" accept".to_string()];
+    if let Some(uid) = provider {
+        // The explicitly trusted application provides the VPN itself. sing-box
+        // stays CLIENT_ID and remains pinned to its loopback endpoint.
+        rules.push(format!("meta skuid {uid} accept"));
+    }
     let mut needs_ndp = false;
     for endpoint in endpoints {
         let (family, addr) = match endpoint.addr {
@@ -12261,9 +12412,10 @@ networks:  files
                 .as_bytes(),
             )
             .unwrap();
-            let backend = Backend::Proxy(Box::new(
-                crate::proxy::Config::from_ini(&ini, TUN_IFACE).unwrap(),
-            ));
+            let backend = Backend::Proxy(Box::new(ProxyZone {
+                config: crate::proxy::Config::from_ini(&ini, TUN_IFACE).unwrap(),
+                adapter: None,
+            }));
             let rules = uplink_ruleset(&backend.sockets());
             assert!(rules.contains("ip daddr 198.51.100.7 tcp dport 1080 accept"));
             assert_eq!(rules.contains("udp dport 1080"), udp, "{kind}:\n{rules}");

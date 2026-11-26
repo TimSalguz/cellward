@@ -59,14 +59,42 @@ GUI = yes
 ```
 
 `Proxy` and `ProxyPort` are required together. `GUI` defaults to no and is
-meaningful only with a published proxy. A published endpoint is loopback-only
-by contract; the declaration alone neither starts the provider nor gives it a
-route. `rust/src/provider.rs` implements the subsequent readiness check:
-SOCKS5 method and optional username/password negotiation, or a bounded HTTP
-CONNECT response with optional Basic authentication. A refused CONNECT to
-loopback port 1 proves HTTP protocol readiness without resolving a name or
-sending application traffic; authentication refusal and malformed responses
-are errors, and credentials are never included in error text.
+meaningful only with a published proxy. Select the provider explicitly in the
+zone and use the same endpoint:
+
+```ini
+[Interface]
+Address = 10.200.0.2/32
+DNS = 1.1.1.1
+MTU = 1380
+
+[Proxy]
+Type = socks5
+Server = 127.0.0.1
+Port = 1080
+Adapter = vendor-gui
+```
+
+The endpoint must be loopback and agree with the manifest. The provider runs as
+the user in the uplink, with no capabilities there, and is the explicitly
+trusted part allowed to make its own VPN connections. sing-box stays a separate
+unprivileged client pinned to the published proxy. The provider receives only
+its name, endpoint type/address/port and GUI flag through `CELLWARD_PROVIDER`,
+`CELLWARD_PROXY_TYPE`, `CELLWARD_PROXY_SERVER`, `CELLWARD_PROXY_PORT` and
+`CELLWARD_PROVIDER_GUI`; credentials are not put into its environment or argv.
+Provider death stops the zone, and stopping the zone kills the provider.
+
+`rust/src/provider.rs` implements the readiness check: SOCKS5 method and
+optional username/password negotiation, or a bounded HTTP CONNECT response with
+optional Basic authentication. A refused CONNECT to loopback port 1 proves HTTP
+protocol readiness without resolving a name or sending application traffic;
+authentication refusal and malformed responses are errors, and credentials are
+never included in error text.
+
+The current provider runner is headless. `GUI = yes` describes the provider but
+does not pass the host compositor socket through. The restricted Wayland bridge
+for graphical providers is a separate layer; there is deliberately no raw
+`WAYLAND_DISPLAY` fallback.
 
 ## Scoped access to a zone
 

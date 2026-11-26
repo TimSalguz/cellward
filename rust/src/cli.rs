@@ -779,7 +779,11 @@ fn add(tools: &Tools, args: &[OsString]) -> u8 {
         }
     }
     if crate::proxy::is_proxy(&ini) {
-        if let Err(e) = crate::proxy::Config::from_ini(&ini, crate::zone::TUN_IFACE) {
+        let checked =
+            crate::proxy::Config::from_ini(&ini, crate::zone::TUN_IFACE).and_then(|config| {
+                crate::proxy::attached_adapter(&tools.config, &config).map(|_| config)
+            });
+        if let Err(e) = checked {
             eprintln!("{}: {e}", conf.display());
             return 1;
         }

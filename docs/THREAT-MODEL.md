@@ -129,7 +129,7 @@ whatever its network gives its containers (2026-09-28, H8).
 | N5 | Programs see the route to the endpoint or the tunnel's socket | yes | the tunnel is made in the uplink and moved down; its socket stays in the uplink | C · vm4 sm3 |
 | N6 | A zone program re-routes, adds an interface or unloads the filter | yes | no capabilities, and no rights in the zone's user namespace; a nested one owns only new, empty namespaces | C · vm38 sys2 sys3 |
 | N7 | A regression of ours adds a way out | insurance | nftables in the app namespace: `policy drop`, only `lo` and `awg0` | vm5 sm4 |
-| N8 | The uplink sends anything but the tunnel's transport | yes | uplink ruleset: the endpoint's address and port (OpenConnect: the gateway's address, any port) | vm6 vm8 sm5 sm17 sys6 |
+| N8 | The uplink sends anything but the tunnel's transport | yes | uplink ruleset: the endpoint's address and port (OpenConnect: the gateway's address, any port); an explicitly selected application provider is the sole exception — its user UID may establish the VPN itself, while sing-box remains pinned to the provider's loopback endpoint | vm6 vm8 sm5 sm17 sys6 |
 | N9 | The tunnel or its holder dies while programs run | yes, fail-closed | the uplink namespace dies with the holder; the interface stays and drops everything. A container's instance is cut when its zone ends (2026-09-27): its tap goes, `lo` and unreachable default routes are left, its programs live on; it is attached again only to the same zone (the same config and resolvers, by the zone's fingerprint) — as a new epoch where one can be made (stage 4) —, another one waits for `cellward container reattach`: never moved to another exit as a side effect (for a while stage 4 attached an instance that could make a new epoch to whatever zone came back; review 2026-09-28) | C · vm39 sys10 br3 br4 sm19 vm24 up1 vm63 vm64 vm65 |
 | N10 | A host-interface zone falls back to the host's routes | yes | every socket is bound to the interface (patched pasta); the zone goes down when the interface does | vm22 vm23 vm24 vm25 |
 | N11 | A host-interface zone goes out through a host service (proxy, Tor, sshd on a host address) | partly | the filter refuses the host's IPv4 and IPv6 (global, ULA) addresses as they are at zone start; later ones are not listed | vm22 vm40 |
@@ -253,8 +253,8 @@ Notes:
   under a running program. An OpenConnect gateway that gives out another address on reconnect
   leaves the zone dead, not open (LEAK-MODEL, OpenConnect item 11).
 - **N8.** A kernel without `nf_tables` costs a warning, not the zone, because the topology
-  carries the weight. The exception is OpenConnect, whose zone does not come up without the
-  uplink filter.
+  carries the weight. The exceptions are OpenConnect and userspace proxy zones, which do not
+  come up without the uplink filter.
 - **O1–O3.** LEAK-MODEL, OpenConnect item 15. The client can still talk to its gateway, which
   is the party that subverted it anyway.
 - **A3, A4.** Containers of one zone share its user namespace: a program outside a sandbox
