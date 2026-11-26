@@ -1,4 +1,4 @@
-use clipstore::capture_dbus::{self, Portal};
+use clipstore::capture_dbus::{self, ImplPortal, Portal};
 use clipstore::capture_portal::Registry;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -7,9 +7,14 @@ use std::sync::{Arc, Mutex};
 fn run(args: &[OsString]) -> u8 {
     let mut pw_dump = None;
     let mut address = None;
-    let mut name = "org.cellward.Capture";
+    let mut name = None;
+    let mut implementation = false;
     let mut words = args.iter();
     while let Some(word) = words.next() {
+        if word == "--impl" {
+            implementation = true;
+            continue;
+        }
         let Some(value) = words.next() else {
             eprintln!("cellward-capture-portal: {word:?} needs a value");
             return 2;
@@ -28,7 +33,7 @@ fn run(args: &[OsString]) -> u8 {
                     eprintln!("cellward-capture-portal: invalid --name");
                     return 2;
                 };
-                name = value;
+                name = Some(value);
             }
             _ => {
                 eprintln!("cellward-capture-portal: unknown option {word:?}");
@@ -55,16 +60,34 @@ fn run(args: &[OsString]) -> u8 {
             Vec::new()
         })
     });
-    let portal = Portal::new(registry, available, runtime.join("pipewire-0"));
+    let portal = Portal::new(
+        registry.clone(),
+        available.clone(),
+        runtime.join("pipewire-0"),
+    );
+    let name = name.unwrap_or(if implementation {
+        "org.freedesktop.impl.portal.desktop.cellward"
+    } else {
+        "org.cellward.Capture"
+    });
     let builder = match &address {
         Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
         None => zbus::blocking::connection::Builder::session(),
     };
-    let connection = builder.and_then(|builder| {
-        builder
-            .name(name)?
-            .serve_at(capture_dbus::desktop_path(), portal)
-    });
+    let connection = if implementation {
+        builder.and_then(|builder| {
+            builder.name(name)?.serve_at(
+                capture_dbus::desktop_path(),
+                ImplPortal::new(registry, available),
+            )
+        })
+    } else {
+        builder.and_then(|builder| {
+            builder
+                .name(name)?
+                .serve_at(capture_dbus::desktop_path(), portal)
+        })
+    };
     let _connection = match connection.and_then(|builder| builder.build()) {
         Ok(connection) => connection,
         Err(error) => {

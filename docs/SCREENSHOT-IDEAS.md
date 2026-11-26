@@ -67,9 +67,10 @@ v6: session and Request.Response lifecycles, `pipewire-serial`,
 several require `multiple` or an exact `cellward_capture_id`, never an implicit
 first container. `pw-dump` output is capped at 4 MiB and both its path and
 `gst-launch` are pinned rather than found through `PATH`. The end-to-end test
-uses a private `dbus-daemon`, never the system portal. The source is still
-started from the frame first; a container picker and activation through
-xdg-desktop-portal are the next stage.
+uses a private `dbus-daemon`, never the system portal. The `--impl` variant
+implements the synchronous `org.freedesktop.impl.portal.ScreenCast` API suitable
+for activation through xdg-desktop-portal. The source is still started from the
+frame first; a `.portal` file and a container picker are the next stages.
 
 Region and hover captures intentionally keep the composited screen view and use
 the manifest-pinned `grim`. In particular, niri's native screenshot action is

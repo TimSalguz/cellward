@@ -62,15 +62,24 @@ impl Registry {
             .checked_add(1)
             .expect("capture sessions exhausted");
         let handle = format!("/org/cellward/capture/session/{}", self.next);
+        self.create_session_with_handle(&handle)
+            .expect("a fresh capture handle is unique");
+        handle
+    }
+
+    pub fn create_session_with_handle(&mut self, handle: &str) -> Result<(), Error> {
+        if !handle.starts_with('/') || self.sessions.contains_key(handle) {
+            return Err(Error::InvalidTransition);
+        }
         self.sessions.insert(
-            handle.clone(),
+            handle.to_owned(),
             Session {
                 status: Status::Created,
                 multiple: false,
                 streams: Vec::new(),
             },
         );
-        handle
+        Ok(())
     }
 
     pub fn select_sources(&mut self, handle: &str, multiple: bool) -> Result<(), Error> {

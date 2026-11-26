@@ -272,6 +272,170 @@ impl Portal {
     }
 }
 
+struct ImplRequest;
+
+#[interface(name = "org.freedesktop.impl.portal.Request")]
+impl ImplRequest {
+    fn close(&self) {}
+}
+
+struct ImplSession {
+    registry: Arc<Mutex<Registry>>,
+    handle: String,
+}
+
+#[interface(name = "org.freedesktop.impl.portal.Session")]
+impl ImplSession {
+    fn close(&self) {
+        self.registry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .close(&self.handle);
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        6
+    }
+
+    #[zbus(signal)]
+    async fn closed(emitter: &SignalEmitter<'_>) -> zbus::Result<()>;
+}
+
+pub struct ImplPortal {
+    registry: Arc<Mutex<Registry>>,
+    available: Arc<Provider>,
+}
+
+impl ImplPortal {
+    pub fn new(registry: Arc<Mutex<Registry>>, available: Arc<Provider>) -> Self {
+        Self {
+            registry,
+            available,
+        }
+    }
+}
+
+#[interface(name = "org.freedesktop.impl.portal.ScreenCast")]
+impl ImplPortal {
+    async fn create_session(
+        &self,
+        #[zbus(connection)] connection: &Connection,
+        handle: ObjectPath<'_>,
+        session_handle: ObjectPath<'_>,
+        _app_id: String,
+        _options: Options<'_>,
+    ) -> fdo::Result<(u32, Options<'static>)> {
+        connection
+            .object_server()
+            .at(handle, ImplRequest)
+            .await
+            .map_err(failed)?;
+        let result = self
+            .registry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .create_session_with_handle(session_handle.as_str());
+        let code = result.map_or_else(transition, |()| 0);
+        if code == 0 {
+            let session = ImplSession {
+                registry: self.registry.clone(),
+                handle: session_handle.to_string(),
+            };
+            connection
+                .object_server()
+                .at(session_handle.clone(), session)
+                .await
+                .map_err(failed)?;
+        }
+        Ok((
+            code,
+            Options::from([(
+                "session_id".to_owned(),
+                Value::Str(session_handle.to_string().into()),
+            )]),
+        ))
+    }
+
+    fn select_sources(
+        &self,
+        _handle: ObjectPath<'_>,
+        session_handle: ObjectPath<'_>,
+        _app_id: String,
+        options: Options<'_>,
+    ) -> (u32, Options<'static>) {
+        let multiple = options
+            .get("multiple")
+            .and_then(|value| bool::try_from(value).ok())
+            .unwrap_or(false);
+        let result = self
+            .registry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .select_sources(session_handle.as_str(), multiple);
+        (result.map_or_else(transition, |()| 0), Options::new())
+    }
+
+    fn start(
+        &self,
+        _handle: ObjectPath<'_>,
+        session_handle: ObjectPath<'_>,
+        _app_id: String,
+        _parent_window: String,
+        options: Options<'_>,
+    ) -> (u32, Options<'static>) {
+        let capture_id = options
+            .get("cellward_capture_id")
+            .and_then(|value| String::try_from(value).ok());
+        let result = self
+            .registry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .start(
+                session_handle.as_str(),
+                &(self.available)(),
+                capture_id.as_deref(),
+            );
+        match result {
+            Ok(sources) => {
+                let streams: Vec<(u32, Options<'static>)> = sources
+                    .into_iter()
+                    .map(|source| {
+                        (
+                            source.node_id,
+                            Options::from([
+                                ("id".to_owned(), Value::Str(source.capture_id.into())),
+                                ("source_type".to_owned(), Value::U32(2)),
+                                ("pipewire-serial".to_owned(), Value::U64(source.serial)),
+                            ]),
+                        )
+                    })
+                    .collect();
+                (
+                    0,
+                    Options::from([("streams".to_owned(), Value::new(streams))]),
+                )
+            }
+            Err(error) => (transition(error), Options::new()),
+        }
+    }
+
+    #[zbus(property)]
+    fn available_source_types(&self) -> u32 {
+        2
+    }
+
+    #[zbus(property)]
+    fn available_cursor_modes(&self) -> u32 {
+        1
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        6
+    }
+}
+
 const MAX_DUMP: usize = 4 << 20;
 
 fn sources_from_json(text: &str) -> io::Result<Vec<Source>> {
@@ -483,5 +647,84 @@ mod tests {
             assert_eq!(registry.lock().unwrap().status(&session), None);
         }
         drop(listener);
+    }
+
+    #[test]
+    fn impl_screencast_backend_returns_streams_without_request_signals() {
+        let config = std::env::var("CELLWARD_TEST_DBUS_CONFIG")
+            .map(|path| format!("--config-file={path}"))
+            .unwrap_or_else(|_| "--session".to_owned());
+        let mut bus = Bus(Command::new("dbus-daemon")
+            .args([config.as_str(), "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap());
+        let mut address = String::new();
+        BufReader::new(bus.0.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let address = address.trim().to_owned();
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        let portal = ImplPortal::new(
+            registry.clone(),
+            Arc::new(|| vec![Source::new(7, 41, "work").unwrap()]),
+        );
+        let _server = zbus::blocking::connection::Builder::address(address.as_str())
+            .unwrap()
+            .name("org.freedesktop.impl.portal.desktop.cellward")
+            .unwrap()
+            .serve_at(DESKTOP, portal)
+            .unwrap()
+            .build()
+            .unwrap();
+        let client = zbus::blocking::connection::Builder::address(address.as_str())
+            .unwrap()
+            .build()
+            .unwrap();
+        let portal = Proxy::new(
+            &client,
+            "org.freedesktop.impl.portal.desktop.cellward",
+            DESKTOP,
+            "org.freedesktop.impl.portal.ScreenCast",
+        )
+        .unwrap();
+        let request = ObjectPath::try_from("/org/cellward/capture/request/impl").unwrap();
+        let session = ObjectPath::try_from("/org/cellward/capture/session/impl").unwrap();
+        let (code, results): (u32, HashMap<String, zbus::zvariant::OwnedValue>) = portal
+            .call(
+                "CreateSession",
+                &(request.clone(), session.clone(), "test.app", Options::new()),
+            )
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(
+            String::try_from(Value::from(results["session_id"].clone())).unwrap(),
+            session.as_str()
+        );
+        let (code, _): (u32, HashMap<String, zbus::zvariant::OwnedValue>) = portal
+            .call(
+                "SelectSources",
+                &(request.clone(), session.clone(), "test.app", Options::new()),
+            )
+            .unwrap();
+        assert_eq!(code, 0);
+        let start = Options::from([("cellward_capture_id".to_owned(), Value::Str("work".into()))]);
+        let (code, results): (u32, HashMap<String, zbus::zvariant::OwnedValue>) = portal
+            .call("Start", &(request, session.clone(), "test.app", "", start))
+            .unwrap();
+        assert_eq!(code, 0);
+        let streams =
+            Vec::<(u32, Options)>::try_from(Value::from(results["streams"].clone())).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(u64::try_from(&streams[0].1["pipewire-serial"]).unwrap(), 41);
+        let session_proxy = Proxy::new(
+            &client,
+            "org.freedesktop.impl.portal.desktop.cellward",
+            session.as_str(),
+            "org.freedesktop.impl.portal.Session",
+        )
+        .unwrap();
+        let _: () = session_proxy.call("Close", &()).unwrap();
+        assert_eq!(registry.lock().unwrap().status(session.as_str()), None);
     }
 }
