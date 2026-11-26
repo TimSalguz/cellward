@@ -167,7 +167,7 @@ def main():
         pointer = open(fifo, "w", buffering=1)
         files.append(pointer)
         reader = "import sys,time; open(sys.argv[1],'wb').write(sys.stdin.buffer.readline()); time.sleep(60)"
-        for mode, text in ([] if args.gui_only else [(0, "Ab Я🙂\n"), (1, "Ab! 12\n"), (2, "0123456789\n")]):
+        for mode, text in ([] if args.gui_only else [(0, "Ab Я🙂\n"), (1, "Ab! _- 12\n"), (2, "0123456789\n")]):
             output = root / f"typed-{mode}.txt"
             terminal = start([str(Path(args.core).resolve()), "wl-sandbox", f"typing-{mode}", "--frame", "ff00ff:4:always", "--",
                               args.foot, "--app-id", f"typing-target-{mode}", sys.executable, "-c", reader, str(output)], f"target-{mode}")

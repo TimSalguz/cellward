@@ -2,6 +2,9 @@
 use super::*;
 use crate::type_input::{Mode, Plan, Timing};
 
+// Some VNC servers require the Shift key event, not only the modifier mask.
+const LEFT_SHIFT: u32 = 42;
+
 #[derive(Default)]
 pub(super) struct KeyboardState {
     pub surface: Weak<WlSurface>,
@@ -391,6 +394,14 @@ impl Run {
                     stroke.key,
                     WlKeyboardKeyState::RELEASED,
                 );
+                if stroke.shift {
+                    kb.send_key(
+                        self.target.serial,
+                        crate::clip::now_ms(),
+                        LEFT_SHIFT,
+                        WlKeyboardKeyState::RELEASED,
+                    );
+                }
             }
         }
         let state = self.target.keyboard_state.borrow();
@@ -525,6 +536,14 @@ pub(crate) fn tick(now: Instant) {
         let stroke = run.plan.keys[run.at];
         if !run.down {
             kb.send_modifiers(run.target.serial, u32::from(stroke.shift), 0, 0, 0);
+            if stroke.shift {
+                kb.send_key(
+                    run.target.serial,
+                    crate::clip::now_ms(),
+                    LEFT_SHIFT,
+                    WlKeyboardKeyState::PRESSED,
+                );
+            }
             kb.send_key(
                 run.target.serial,
                 crate::clip::now_ms(),
@@ -540,6 +559,14 @@ pub(crate) fn tick(now: Instant) {
                 stroke.key,
                 WlKeyboardKeyState::RELEASED,
             );
+            if stroke.shift {
+                kb.send_key(
+                    run.target.serial,
+                    crate::clip::now_ms(),
+                    LEFT_SHIFT,
+                    WlKeyboardKeyState::RELEASED,
+                );
+            }
             kb.send_modifiers(run.target.serial, 0, 0, 0, 0);
             run.down = false;
             run.at += 1;

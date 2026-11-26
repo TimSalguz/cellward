@@ -14,8 +14,8 @@ pub enum Mode {
 impl std::fmt::Display for Mode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Unicode => "Символы Unicode",
-            Self::Keycodes => "Физические клавиши (US)",
+            Self::Unicode => "Символы Unicode (не для VNC)",
+            Self::Keycodes => "Физические клавиши (US, для VNC)",
         })
     }
 }
@@ -185,11 +185,11 @@ impl Plan {
                             symbols.len() - 1
                         }
                     };
-                    if at >= 232 {
-                        return Err("В тексте больше 232 разных символов; разделите его на части");
+                    if at >= 229 {
+                        return Err("В тексте больше 229 разных символов; разделите его на части");
                     }
                     Stroke {
-                        key: 16 + at as u32,
+                        key: unicode_key(at as u32),
                         shift: false,
                     }
                 }
@@ -200,7 +200,7 @@ impl Plan {
             let mut codes = String::new();
             let mut syms = String::new();
             for (i, c) in symbols.into_iter().enumerate() {
-                codes.push_str(&format!("<T{i:03}> = {};\n", 24 + i));
+                codes.push_str(&format!("<T{i:03}> = {};\n", unicode_key(i as u32) + 8));
                 let sym = match c { '\n' => "Return".to_owned(), '\t' => "Tab".to_owned(), c => format!("U{:04X}", c as u32) };
                 syms.push_str(&format!("key <T{i:03}> {{ type=\"ONE_LEVEL\", [ {sym} ] }};\n"));
             }
@@ -208,6 +208,13 @@ impl Plan {
         });
         Ok(Self { keys, keymap })
     }
+}
+
+/// VNC may interpret a raw keycode as a lock key even when our keymap redefines it.
+fn unicode_key(at: u32) -> u32 {
+    [58u32, 69, 70]
+        .into_iter()
+        .fold(16 + at, |key, locked| key + u32::from(key >= locked))
 }
 
 fn us_key(c: char) -> Option<Stroke> {
@@ -298,5 +305,22 @@ mod tests {
         let mut bad = bytes;
         bad[PREFIX.len() + 13..PREFIX.len() + 15].copy_from_slice(&0u16.to_le_bytes());
         assert!(Request::parse(&bad).is_none());
+    }
+
+    #[test]
+    fn unicode_never_emits_lock_keycodes() {
+        let text: String = (0..229)
+            .map(|i| char::from_u32(0x100 + i).unwrap())
+            .collect();
+        let plan = Plan::new(&text, Mode::Unicode).unwrap();
+        let map = String::from_utf8(plan.keymap.unwrap()).unwrap();
+        for (i, stroke) in plan.keys.iter().enumerate() {
+            assert!(!matches!(stroke.key, 58 | 69 | 70));
+            assert!(map.contains(&format!("<T{i:03}> = {};", stroke.key + 8)));
+        }
+        let too_many: String = (0..230)
+            .map(|i| char::from_u32(0x100 + i).unwrap())
+            .collect();
+        assert!(Plan::new(&too_many, Mode::Unicode).is_err());
     }
 }
