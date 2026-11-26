@@ -185,6 +185,7 @@ pub mod proxy;
 pub mod pulse_filter;
 pub mod pw_context;
 pub mod rebind;
+pub mod record;
 pub mod registry;
 pub mod relay;
 pub mod scheme;
