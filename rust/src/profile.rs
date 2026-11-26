@@ -676,14 +676,23 @@ fn cover_timezone(zone: &OsStr) -> Result<(), String> {
         return Err(format!("unknown IANA timezone {name:?}"));
     }
     let source = Path::new("/etc/zoneinfo").join(name);
+    let mut placeholder = None;
     let source = if source.is_file() || name != "UTC" {
         source
     } else {
-        PathBuf::from("/dev/null")
+        let dir = std::env::temp_dir().join(format!("cellward-utc-{}", std::process::id()));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let file = dir.join("UTC");
+        fs::write(&file, []).map_err(|e| e.to_string())?;
+        placeholder = Some(dir);
+        file
     };
-    if let Err(error) =
-        crate::rebind::Own::open(&source, Path::new("/etc/localtime")).and_then(|own| own.lay())
-    {
+    let laid =
+        crate::rebind::Own::open(&source, Path::new("/etc/localtime")).and_then(|own| own.lay());
+    if let Some(dir) = placeholder {
+        let _ = fs::remove_dir_all(dir);
+    }
+    if let Err(error) = laid {
         if name != "UTC" || error.raw_os_error() != Some(libc::ENOENT) {
             return Err(error.to_string());
         }
