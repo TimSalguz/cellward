@@ -302,6 +302,10 @@ fn main() -> ExitCode {
         },
         Some("doctor-probe") => ExitCode::from(vpn_zone::doctor::probe_main(&args[1..])),
         Some("pool-probe") => ExitCode::from(pool::probe_main(&args[1..])),
+        Some("zone-proxy-host") => ExitCode::from(vpn_zone::zone_proxy::host_main(&args[1..])),
+        Some("zone-proxy-connect") => {
+            ExitCode::from(vpn_zone::zone_proxy::connect_main(&args[1..]))
+        }
         Some("user-launch-handoff") => {
             ExitCode::from(vpn_zone::user_launch::handoff_main(&args[1..]))
         }

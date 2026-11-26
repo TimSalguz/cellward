@@ -219,3 +219,4 @@ pub mod wl_sandbox;
 pub mod wl_title;
 pub mod x11;
 pub mod zone;
+pub mod zone_proxy;

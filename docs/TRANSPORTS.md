@@ -45,6 +45,35 @@ clients can use this backend by exposing a local SOCKS5 endpoint inside their
 adapter's uplink; the GUI application itself is not implicitly trusted as a
 full-tunnel route.
 
+## Scoped access to a zone
+
+`cellward zone-proxy set <zone> <port> <zone|deny|host> [rules…]` enables a
+loopback-only SOCKS5 and HTTP CONNECT listener on `127.0.0.1:<port>`. Only TCP
+CONNECT is supported. The listener starts with the zone and stops with it;
+`show` prints its non-secret configuration and `off` disables it.
+
+A rule is an exact domain (`example.com`), a subdomain suffix
+(`.example.com`), an IP or an IP network (`192.0.2.0/24`). Matched connections
+always go through the zone. Domain names are classified before resolution and
+resolved inside the selected network, not reclassified from the resulting IP.
+The default controls unmatched connections:
+
+- `zone`: everything goes through the zone;
+- `deny`: unmatched connections are refused, never sent through the host;
+- `host`: unmatched connections deliberately use the host network. This weakens
+  isolation and is shown with a warning. Matched connections still have no
+  direct fallback when the zone is down.
+
+Example for FoxyProxy, with only selected sites through `nl` and the rest direct:
+
+```sh
+cellward zone-proxy set nl 1080 host youtube.com .googlevideo.com
+```
+
+Use `deny` instead of `host` to refuse every unmatched connection. The proxy is
+an explicit convenience boundary, not a reason to expose the zone's whole
+network namespace to host applications.
+
 ## Manifest
 
 Place an external manifest in `~/.config/vpn-zones/transports/<name>.conf`:
