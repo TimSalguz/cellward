@@ -42,10 +42,14 @@ const CAPTURE_ERR: u8 = b'R';
 const MAX_FRAME_BYTES: usize = 64 << 20;
 const REPLY_TIMEOUT_MS: i32 = 2_000;
 
+enum Destination {
+    Ffmpeg { ffmpeg: PathBuf, output: PathBuf },
+    RawFd(RawFd),
+}
+
 struct Args {
     fd: RawFd,
-    ffmpeg: PathBuf,
-    output: PathBuf,
+    destination: Destination,
     frames: u32,
     fps: u32,
 }
@@ -55,6 +59,7 @@ impl Args {
         let mut fd = None;
         let mut ffmpeg = None;
         let mut output = None;
+        let mut raw_fd = None;
         let mut frames = None;
         let mut fps = None;
         let mut words = args.iter();
@@ -66,18 +71,30 @@ impl Args {
                 Some("--fd") => fd = value.to_str().and_then(|v| v.parse::<RawFd>().ok()),
                 Some("--ffmpeg") => ffmpeg = Some(PathBuf::from(value)),
                 Some("--output") => output = Some(PathBuf::from(value)),
+                Some("--raw-fd") => raw_fd = value.to_str().and_then(|v| v.parse::<RawFd>().ok()),
                 Some("--frames") => frames = value.to_str().and_then(|v| v.parse::<u32>().ok()),
                 Some("--fps") => fps = value.to_str().and_then(|v| v.parse::<u32>().ok()),
                 _ => return Err(format!("unknown option {word:?}")),
             }
         }
         let fd = fd.filter(|fd| *fd >= 0).ok_or("a valid --fd is required")?;
-        let ffmpeg = ffmpeg
-            .filter(|p| p.is_absolute())
-            .ok_or("absolute --ffmpeg is required")?;
-        let output = output
-            .filter(|p| p.is_absolute())
-            .ok_or("absolute --output is required")?;
+        let destination = match raw_fd {
+            Some(raw) if raw >= 0 => {
+                if ffmpeg.is_some() || output.is_some() {
+                    return Err("--raw-fd cannot be combined with --ffmpeg or --output".into());
+                }
+                Destination::RawFd(raw)
+            }
+            _ => {
+                let ffmpeg = ffmpeg
+                    .filter(|p| p.is_absolute())
+                    .ok_or("absolute --ffmpeg is required")?;
+                let output = output
+                    .filter(|p| p.is_absolute())
+                    .ok_or("absolute --output is required")?;
+                Destination::Ffmpeg { ffmpeg, output }
+            }
+        };
         let frames = frames
             .filter(|n| (1..=100_000).contains(n))
             .ok_or("--frames must be 1..100000")?;
@@ -86,8 +103,7 @@ impl Args {
             .ok_or("--fps must be 1..60")?;
         Ok(Self {
             fd,
-            ffmpeg,
-            output,
+            destination,
             frames,
             fps,
         })
@@ -317,11 +333,80 @@ impl Drop for Encoder {
     }
 }
 
+struct Raw {
+    output: File,
+    width: i32,
+    height: i32,
+    generation: u32,
+}
+
+impl Raw {
+    fn start(fd: RawFd, frame: &Frame) -> Self {
+        // SAFETY: the caller transfers ownership of this descriptor to the agent.
+        let output = unsafe { File::from_raw_fd(fd) };
+        Self {
+            output,
+            width: frame.width,
+            height: frame.height,
+            generation: 0,
+        }
+    }
+
+    fn write(&mut self, frame: &Frame) -> Result<(), String> {
+        if frame.width != self.width || frame.height != self.height {
+            return Err("root surface changed size during recording".into());
+        }
+        let row = frame.row_bytes()?;
+        let stride = frame.stride as usize;
+        let mut header = b"CFR1".to_vec();
+        for value in [
+            frame.width,
+            frame.height,
+            frame.stride,
+            frame.format,
+            self.generation as i32,
+        ] {
+            header.extend_from_slice(&value.to_le_bytes());
+        }
+        self.output
+            .write_all(&header)
+            .map_err(|e| format!("cannot write the broker frame header: {e}"))?;
+        for line in frame.bytes.chunks_exact(stride) {
+            self.output
+                .write_all(&line[..row])
+                .map_err(|e| format!("cannot write broker pixels: {e}"))?;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        Ok(())
+    }
+}
+
+enum Sink {
+    Ffmpeg(Encoder),
+    Raw(Raw),
+}
+
+impl Sink {
+    fn write(&mut self, frame: &Frame) -> Result<(), String> {
+        match self {
+            Self::Ffmpeg(encoder) => encoder.write(frame),
+            Self::Raw(raw) => raw.write(frame),
+        }
+    }
+
+    fn finish(self) -> Result<(), String> {
+        match self {
+            Self::Ffmpeg(encoder) => encoder.finish(),
+            Self::Raw(_) => Ok(()),
+        }
+    }
+}
+
 fn run(args: &Args) -> Result<(), String> {
     install_stop_handler()?;
     // SAFETY: the supervisor transfers ownership of this descriptor to the agent.
     let mut channel = unsafe { UnixStream::from_raw_fd(args.fd) };
-    let mut encoder: Option<Encoder> = None;
+    let mut encoder: Option<Sink> = None;
     let interval = Duration::from_secs(1) / args.fps;
     let mut next = Instant::now();
     for _ in 0..args.frames {
@@ -341,7 +426,12 @@ fn run(args: &Args) -> Result<(), String> {
         let written = match &mut encoder {
             Some(encoder) => encoder.write(&frame),
             None => {
-                let mut started = Encoder::start(&args.ffmpeg, &args.output, &frame, args.fps)?;
+                let mut started = match &args.destination {
+                    Destination::Ffmpeg { ffmpeg, output } => {
+                        Sink::Ffmpeg(Encoder::start(ffmpeg, output, &frame, args.fps)?)
+                    }
+                    Destination::RawFd(fd) => Sink::Raw(Raw::start(*fd, &frame)),
+                };
                 let written = started.write(&frame);
                 encoder = Some(started);
                 written
@@ -450,6 +540,35 @@ mod tests {
         assert_eq!(frame.bytes, (0..24).collect::<Vec<u8>>());
         file.write_all_at(&3i32.to_ne_bytes(), 8).unwrap();
         assert!(read_frame(&fd).is_err());
+    }
+
+    #[test]
+    fn raw_frames_carry_a_generation_and_no_stride_padding() {
+        use std::os::fd::IntoRawFd;
+
+        let (mut read, write) = UnixStream::pair().unwrap();
+        let frame = Frame {
+            width: 2,
+            height: 1,
+            stride: 12,
+            format: 1,
+            bytes: (0..12).collect(),
+        };
+        let mut raw = Raw::start(write.into_raw_fd(), &frame);
+        raw.write(&frame).unwrap();
+        raw.write(&frame).unwrap();
+        drop(raw);
+        let mut bytes = [0u8; 64];
+        read.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes[..4], b"CFR1");
+        for (at, expected) in [(4, 2), (8, 1), (12, 12), (16, 1), (20, 0), (52, 1)] {
+            assert_eq!(
+                i32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()),
+                expected
+            );
+        }
+        assert_eq!(&bytes[24..32], &(0..8).collect::<Vec<_>>());
+        assert_eq!(&bytes[56..64], &(0..8).collect::<Vec<_>>());
     }
 
     #[test]

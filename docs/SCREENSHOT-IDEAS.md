@@ -47,6 +47,11 @@ ffmpeg finalizes the MP4 index. A size change mid-stream and an unsupported
 buffer fail without substituting desktop pixels. Recording has the same root
 surface, subsurface and non-SHM limitations as a still capture.
 
+For a capture broker, the agent also has a raw-fd mode instead of MP4 encoding.
+Each frame has a `CFR1` header (dimensions, stride, format and generation),
+followed by tightly packed BGRA rows without stride padding. This is the
+transport for a future PipeWire source, not a desktop-capture protocol.
+
 Region and hover captures intentionally keep the composited screen view and use
 the manifest-pinned `grim`. In particular, niri's native screenshot action is
 unsuitable for private copies because it also writes the desktop clipboard.
