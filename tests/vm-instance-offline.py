@@ -108,20 +108,15 @@ def live_switch_is(id_, available, reason):
     raise AssertionError(f"{id_}: never {available}/{reason}: {instance(id_)}")
 
 
-# Stage 4 (docs/LEAK-MODEL.md «Смена сети на ходу»): a launch through the
-# user's manager is put into the instance's epoch — the cgroup a live switch
-# moves, whose sockets alone the rules let out after one; a launch from a
-# login session (su here) the kernel does not let move, and while it runs
-# the instance cannot be switched live.
-with subtest("an instance's programs are in its epoch; one from a login session holds the switch"):
+# Stage 4 (docs/LEAK-MODEL.md «Смена сети на ходу»): a delegated launch is
+# put into the instance's epoch and permits a live switch. The legacy outside
+# case has its own VM with strictNetwork=false, not this strict fixture.
+with subtest("an instance's programs are in its epoch; a delegated launch permits the switch"):
     cg = alice(
         "systemctl --user show -p ControlGroup --value vpn-zone-container@vmia.service"
     ).strip()
     assert cg.endswith("/vpn-zone-container@vmia.service"), cg
-    # The unit's slice has `\x2d` in its name: quoted for the shell.
     unit_cg = shlex.quote(f"/sys/fs/cgroup{cg}")
-    # Each launch in a cgroup of its own below the epoch: none in the
-    # epoch's own.
     print(machine.succeed("journalctl --no-pager -o cat | grep -F 'container-enter' | tail -5 || true"))
     assert not machine.succeed(f"cat {unit_cg}/e1/cgroup.procs").split()
     procs = machine.succeed(f"cat {unit_cg}/e1/l*/cgroup.procs").split()
@@ -129,16 +124,13 @@ with subtest("an instance's programs are in its epoch; one from a login session 
     assert "sleep" in comms, (procs, comms)
     keeper = machine.succeed(f"cat {unit_cg}/infra/cgroup.procs").split()
     assert keeper and not set(keeper) & set(procs), (keeper, procs)
-    machine.succeed(
-        "su -l alice -c "
-        + shlex.quote(
-            "export XDG_RUNTIME_DIR=/run/user/1000; setsid cellward run offline --container "
-            "vmia -- sleep 4343 </dev/null >/dev/null 2>&1 &"
-        )
+    alice(
+        "systemd-run --user --collect --unit=vmia-delegated "
+        "cellward run offline --container vmia -- sleep 4343"
     )
-    live_switch_is("vmia", False, "outside")
+    live_switch_is("vmia", True, None)
     outsider = machine.succeed("pgrep -xf 'sleep 4343'").strip()
-    assert f"{cg}/e1" not in machine.succeed(f"cat /proc/{outsider}/cgroup"), outsider
+    assert f"{cg}/e1" in machine.succeed(f"cat /proc/{outsider}/cgroup"), outsider
     machine.succeed("pkill -xf 'sleep 4343'")
     live_switch_is("vmia", True, None)
 

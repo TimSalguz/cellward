@@ -1,7 +1,7 @@
 """tests/vm.nix, continued: helpers for containers' instances (the container
 design of 2026-09-27). Executed by the main test script with exec(), in a
-copy of its globals (machine, alice, json, shlex), before any subtest, which
-takes out ikey, instance, in_inst and in_inst_q by name — the driver
+copy of its globals (machine, alice, STATE, json, shlex), before any subtest, which
+takes out ikey, instance, in_inst_cmd, in_inst and in_inst_q by name — the driver
 type-checks the script and knows no name an exec() defines. A file of its
 own: the script is handed to the driver's build in one environment
 variable, and the kernel takes 128 KiB there (MAX_ARG_STRLEN).
@@ -35,25 +35,41 @@ def in_inst_cmd(id_, net, cmd):
 
 
 def in_inst(id_, net, cmd):
-    """A command in a running instance, entered as a launch enters it."""
-    return alice(in_inst_cmd(id_, net, cmd))
+    """A command in a running instance, entered as a registered launch."""
+    return alice(placed_cmd(id_, net, cmd))
 
 
 def in_inst_q(id_, net, cmd):
     """The same as a shell line, for machine.wait_until_…."""
     return "su -l alice -c " + shlex.quote(
-        "export XDG_RUNTIME_DIR=/run/user/1000; " + in_inst_cmd(id_, net, cmd)
+        "export XDG_RUNTIME_DIR=/run/user/1000; " + placed_cmd(id_, net, cmd)
     )
 
 
+def registry_of(id_):
+    """The instance's launch registry, as rust/src/instance.rs defines it."""
+    if id_.startswith(":tmp:"):
+        return id_.removeprefix(":tmp:")
+    name = id_.split(":", 1)[0]
+    return "__main__" if id_.startswith(":fs:") or name == "main" else name
+
+
 def placed_cmd(id_, net, cmd):
-    """Entered as a launch from the desktop is (stage 4): through the user's
-    manager, so that its program is put into the instance's epoch — one from
-    a login session (`su`, as `in_inst`) the kernel does not let move, and
-    after the instance's first new epoch it has no way out."""
+    """Entered as a launch from the desktop is: through the user's manager,
+    with the same live registry generation the CLI supplies. Unlike the CLI,
+    this fixture does not bring a down zone up."""
+    running = f"{STATE}/.running/{registry_of(id_)}"
+    started = f"{STATE}/.running/.started"
+    registered = (
+        f"mkdir -p {running} {started}; "
+        "cw_start=$(awk '{print $22}' /proc/$$$$/stat); "
+        "cw_boot=$(cat /proc/sys/kernel/random/boot_id); "
+        f"printf '%s %s\\n' \"$cw_start\" \"$cw_boot\" > {started}/$$$$; "
+        f"printf '%s %s %s\\n' \"$$$$\" \"{net}\" \"{id_}\" >> {running}/vm-placed; "
+    )
     return (
-        'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- '
-        + in_inst_cmd(id_, net, cmd)
+        'systemd-run --user --pipe --wait --quiet --collect -E PATH="$PATH" -- sh -c '
+        + shlex.quote(registered + "exec " + in_inst_cmd(id_, net, cmd))
     )
 
 

@@ -502,6 +502,14 @@ pub fn container_of(id: &str) -> Option<&str> {
     (name != MAIN).then_some(name)
 }
 
+/// The launch registry directory an instance's launches are recorded in.
+/// A throwaway layer has its own; a throwaway filesystem sandbox shares the
+/// main home's, as `launch::resolve_container` records it.
+pub fn registry_of(id: &str) -> &str {
+    id.strip_prefix(TMP_PREFIX)
+        .unwrap_or_else(|| container_of(id).unwrap_or(crate::registry::MAIN))
+}
+
 /// Whose programs an instance's are (`crate::origin::Who`): the container's
 /// its id names, the main home's for `main:<network>`, not known for a
 /// throwaway — as a launch of one is not (`crate::origin`).
@@ -685,6 +693,15 @@ mod tests {
             assert_eq!(id_of(Of::Throwaway(bad), "nl"), None, "{bad:?}");
             assert_eq!(id_of(Of::ThrowawaySandbox(bad), "nl"), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn an_instances_launch_registry_key_matches_the_launch() {
+        assert_eq!(registry_of("work"), "work");
+        assert_eq!(registry_of("docs:nl"), "docs");
+        assert_eq!(registry_of("main:offline"), crate::registry::MAIN);
+        assert_eq!(registry_of(":tmp:vpn-profile-x"), "vpn-profile-x");
+        assert_eq!(registry_of(":fs:firefox.tmp"), crate::registry::MAIN);
     }
 
     #[test]

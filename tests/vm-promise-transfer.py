@@ -191,6 +191,29 @@ def hold(host, port, log):
         time.sleep(3600)
 
 
+def udp_phases(host, port, log, tag):
+    """Three datagrams from one process, each on a fresh socket."""
+    import time
+
+    def send(word):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.sendto(f"{tag}-{word}\n".encode(), (host, int(port)))
+        s.close()
+
+    def note(word):
+        with open(log, "a") as f:
+            f.write(word + "\n")
+
+    send("before")
+    note("ready")
+    time.sleep(5)
+    send("denied")
+    note("denied")
+    time.sleep(5)
+    send("after")
+    note("done")
+
+
 def hold_closed(host, port, log):
     """hold, the process non-dumpable first: its descriptors closed to the
     user, as Chromium's network service makes itself."""
@@ -341,10 +364,18 @@ def xf_zone(zone, addr, addr6):
 
     # Up, by the same LAN address the host uses: into the tunnel with the
     # rest, and the server sees the tunnel's address.
-    out = alice(
-        f"{run} curl -sS -g -f -m 120 --upload-file {XF}/up.bin "
-        f"http://{server_ip}:{XF_PORT}/{zone}-up.bin </dev/null"
+    upload_code, out = machine.execute(
+        "su -l alice -c "
+        + shlex.quote(
+            f"export XDG_RUNTIME_DIR=/run/user/1000; {run} curl -sS -g -f -m 120 "
+            f"--upload-file {XF}/up.bin http://{server_ip}:{XF_PORT}/{zone}-up.bin </dev/null"
+        )
     )
+    if upload_code != 0:
+        print(alice(f"cellward doctor {zone} --json || true"))
+        print(alice("cellward traffic --connections --json"))
+        print(alice("journalctl --user -n 80 --no-pager -o cat"))
+    assert upload_code == 0, (zone, upload_code, out)
     assert f"peer={addr} sha256={XF_UP}" in out, f"{zone}: the upload: {out}"
     assert xf_peers("PUT", f"/{zone}-up.bin") == [addr], xf_log()
     assert xf_sha(server, f"/srv/xfer/{zone}-up.bin") == XF_UP
@@ -380,9 +411,9 @@ def xf_zone(zone, addr, addr6):
     ]
     assert to(server_ip) and max(f["out_bytes"] for f in to(server_ip)) >= 4194304, c
     assert to("10.99.0.1") and max(f["in_bytes"] for f in to("10.99.0.1")) >= 3145728, c
-    # curl is gone by now: its owner was found by the instance's keeper at
-    # the flow's first packet, as the relay said it saw it (`owners.rs`).
-    assert any(f["owner"] and f["owner"]["process"] == "curl" for f in to(server_ip)), c
+    # curl is gone by now: strict registration retains its launch identity
+    # without inventing a numeric PID or comm after the process has exited.
+    assert any(f["owner"] and f["owner"]["program"] == "curl" for f in to(server_ip)), c
     # The firewall's rules (stage 4, 2026-09-29): curl of the main home
     # denied — its connection does not leave (the relay holds its first
     # packet until the keeper decides, and drops it); forgotten — it goes.
@@ -428,9 +459,10 @@ def xf_zone(zone, addr, addr6):
     alice(f"printf 'allowed-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9999")
     server.wait_until_succeeds(f"grep -q allowed-{zone} {got}", timeout=30)
     # Launched as from the desktop — through the user's manager, into its
-    # launch's own cgroup —, a denied program is in its epoch's cgroup of
-    # denied launches (epoch::DENIED): the instance's rules drop its
-    # datagram in the kernel, before the relay, which never sees it.
+    # launch's own cgroup — the strict controller drops the denied datagram
+    # and retains a zero-byte audit record of the attempt. Unlike a legacy
+    # cgroup reject, an asynchronous NFQUEUE verdict need not make the UDP
+    # send return EPERM.
     placed = lambda cmd: (
         "systemd-run --user --pipe --wait --quiet --collect -E PATH=\"$PATH\" -- "
         + "sh -c " + shlex.quote(cmd)
@@ -440,11 +472,7 @@ def xf_zone(zone, addr, addr6):
         f"UDP-RECV:9998,bind=10.99.0.1,reuseaddr OPEN:{got},creat,append"
     )
     alice("cellward container net main deny socat")
-    # The kernel refuses the send itself: the program hears EPERM.
-    alice(
-        placed(f"printf 'kernel-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9998")
-        + " 2>&1 | grep -q 'Operation not permitted'"
-    )
+    alice(placed(f"printf 'kernel-{zone}\\n' | {run} socat -u - UDP:10.99.0.1:9998"))
     machine.sleep(3)
     server.fail(f"grep -q kernel-{zone} {got}")
     c = json.loads(alice("cellward traffic --connections --json"))
@@ -452,22 +480,36 @@ def xf_zone(zone, addr, addr6):
         f for i in c["instances"] if i["network"] == zone and i["connections"]
         for f in i["connections"] if f["remote_port"] == 9998
     ]
-    assert not seen, f"a denied launch's datagram reached the relay: {seen}"
+    assert seen and all(
+        f["out_bytes"] == 0 and f["in_bytes"] == 0 and f["owner"]["program"] == "socat"
+        for f in seen
+    ), f"a denied launch's datagram was not accounted as a strict denial: {seen}"
     alice("cellward container net main forget socat")
-    # A running program denied: moved into the denied launches' cgroup at
-    # its keeper's next round of new flows.
-    alice(f"systemd-run --user --unit=xfrg-{zone} {run} sleep 601")
-    machine.wait_until_succeeds("pgrep -u alice -f '^sleep 601$'", timeout=60)
-    pid = machine.succeed("pgrep -u alice -f '^sleep 601$' | head -1").strip()
-    assert "/denied/" not in machine.succeed(f"cat /proc/{pid}/cgroup")
-    alice("cellward container net main deny sleep")
-    alice(f"{run} getent ahostsv4 leaktest.internal")
-    machine.wait_until_succeeds(f"grep -q /denied/ /proc/{pid}/cgroup", timeout=30)
-    alice("cellward container net main forget sleep")
-    alice(f"{run} getent ahostsv4 leaktest.internal")
-    machine.wait_until_succeeds(f"! grep -q /denied/ /proc/{pid}/cgroup", timeout=30)
-    alice(f"systemctl --user stop xfrg-{zone}")
-    server.succeed(f"systemctl stop udpgot-{zone} udpgot2-{zone}")
+    # A rule changed while a program runs: strict decides each new flow by
+    # the current policy, without the legacy move into a denied cgroup. One
+    # process sends before, during and after the denial on fresh sockets.
+    phased_log = f"{XF}/phases-{zone}.log"
+    alice(f"rm -f {phased_log}")
+    server.succeed(
+        f"systemd-run --unit=udpgot3-{zone} socat -u "
+        f"UDP-RECV:9997,bind=10.99.0.1,reuseaddr OPEN:{got},creat,append"
+    )
+    server.wait_until_succeeds("ss -lun | grep -q '10.99.0.1:9997'", timeout=30)
+    alice(
+        f"systemd-run --user --collect --unit=xfrg-{zone} -E PATH=\"$PATH\" "
+        f"-E VPN_ZONE_APPID=xfrg-{zone} {run} {XF_PY} {XF}/xfer.py "
+        f"udp_phases 10.99.0.1 9997 {phased_log} {zone}"
+    )
+    machine.wait_until_succeeds(f"grep -q '^ready$' {phased_log}", timeout=60)
+    server.wait_until_succeeds(f"grep -q '^{zone}-before$' {got}", timeout=30)
+    alice(f"cellward container net main deny xfrg-{zone}")
+    machine.wait_until_succeeds(f"grep -q '^denied$' {phased_log}", timeout=30)
+    machine.sleep(1)
+    server.fail(f"grep -q '^{zone}-denied$' {got}")
+    alice(f"cellward container net main forget xfrg-{zone}")
+    server.wait_until_succeeds(f"grep -q '^{zone}-after$' {got}", timeout=30)
+    machine.wait_until_succeeds(f"grep -q '^done$' {phased_log}", timeout=30)
+    server.succeed(f"systemctl stop udpgot-{zone} udpgot2-{zone} udpgot3-{zone}")
     XF_ROWS.append((f"{zone}: a denied program's datagram, the program gone", "blocked", "-", "-"))
     # The question (2026-09-29): with "ask" and no screen to ask on, a
     # program's new connection does not leave — a question that cannot be
@@ -485,11 +527,13 @@ def xf_zone(zone, addr, addr6):
     )
     assert xf_peers("GET", f"/down.bin?from=fw-yes-{zone}") == [addr], xf_log()
     # Who holds a connection (`owners.rs`, looked up from the host as it is
-    # asked): a program of the zone that keeps one open is named.
+    # asked): a program of the zone that keeps one open is named by its
+    # registered launch, even when strict ownership has no live comm.
     held_log = f"{XF}/hold-{zone}.log"
     alice(f"rm -f {held_log}")
     alice(
         f"systemd-run --user --collect --unit=xfhold-{zone} -E PATH=\"$PATH\" "
+        f"-E VPN_ZONE_APPID=xfhold-{zone} "
         f"{run} {XF_PY} {XF}/xfer.py hold {server_ip} {XF_PORT} {held_log}"
     )
     machine.wait_until_succeeds(f"grep -q '^held ' {held_log}", timeout=90)
@@ -500,35 +544,34 @@ def xf_zone(zone, addr, addr6):
         for f in i["connections"] if (f["proto"], f["local_port"]) == ("tcp", lport)
     ]
     assert held and held[0]["owner"], c
-    assert held[0]["owner"]["process"].startswith("python"), held
+    assert held[0]["owner"]["program"] == f"xfhold-{zone}", held
     print(alice("cellward traffic --connections"))
     alice(f"systemctl --user stop xfhold-{zone}")
     # Two launches whose processes let nobody read their descriptors: no
-    # process is seen holding either socket, and the closed ones are of two
-    # launches — each connection is still its own launch's, by the cgroup
-    # its socket was made in (sock_diag, `owners.rs`).
+    # process is seen holding either socket. Strict registration still keeps
+    # the connections attributed to their two distinct launches.
     closed = {}
     for n in [1, 2]:
         log = f"{XF}/closed{n}-{zone}.log"
         alice(f"rm -f {log}")
         alice(
             f"systemd-run --user --collect --unit=xfclosed{n}-{zone} -E PATH=\"$PATH\" "
+            f"-E VPN_ZONE_APPID=xfclosed{n}-{zone} "
             f"{run} {XF_PY} {XF}/xfer.py hold_closed {server_ip} {XF_PORT} {log}"
         )
         machine.wait_until_succeeds(f"grep -q '^held ' {log}", timeout=90)
-        _, lport, pid = alice(f"cat {log}").split()
-        closed[int(lport)] = pid
+        _, lport, _ = alice(f"cat {log}").split()
+        closed[int(lport)] = n
     c = json.loads(alice("cellward traffic --connections --json"))
-    for lport, pid in closed.items():
+    for lport, n in closed.items():
         found = [
             f["owner"] for i in c["instances"] if i["network"] == zone and i["connections"]
             for f in i["connections"] if (f["proto"], f["local_port"]) == ("tcp", lport)
         ]
         assert found and found[0], (lport, c)
-        # The pid is the program's as its pid namespace has it: the
-        # owner's, as the host sees it, is of the same launch — its comm.
-        assert found[0]["process"].startswith("python"), found
-    owners = {f["owner"]["pid"] for i in c["instances"] if i["network"] == zone
+        assert found[0]["pid"] == 0 and found[0]["process"] == "", found
+        assert found[0]["program"] == f"xfclosed{n}-{zone}", found
+    owners = {f["owner"]["program"] for i in c["instances"] if i["network"] == zone
               for f in i["connections"] if f["local_port"] in closed and f["owner"]}
     assert len(owners) == 2, (owners, c)
     alice(f"systemctl --user stop xfclosed1-{zone} xfclosed2-{zone}")

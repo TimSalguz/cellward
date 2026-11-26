@@ -423,7 +423,7 @@ PulseAudio; дополнительные группы сеанса сняты; �
 - vm80 "switch: back to B from a cut instance; B stopped while bound — no fallback"
 - vm81 "switch: B back — a new epoch; a socket of the one before stays mute"
 - vm82 "switch: the keeper killed in the middle — the instance and its programs gone"
-- vm83 "an instance's programs are in its epoch; one from a login session holds the switch" (в `tests/vm-instance-offline.py`)
+- vm83 "an instance's programs are in its epoch; a delegated launch permits the switch" (в `tests/vm-instance-offline.py`); прежний случай login-сессии — в `tests/vm-legacy-outside.nix`
 - vm84 "doctor: no program in a zone's own namespaces, and one put there is named" (в `tests/vm-instance-bridge.py`)
 - vm85 "the host's resolv.conf a plain file: bound on the name, laid again after the rename"
 - vm86 "doctor: the nameservers an instance sees are its own; the host's in their stead fail, with the way out"

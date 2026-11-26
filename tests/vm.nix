@@ -692,7 +692,7 @@ let
       # exec() defines is one it does not know (red once in CI).
       _ih = dict(globals())
       exec(open("${./vm-instance-helpers.py}").read(), _ih)
-      ikey, instance, in_inst, in_inst_q, in_placed, in_placed_q = (_ih[n] for n in ("ikey", "instance", "in_inst", "in_inst_q", "in_placed", "in_placed_q"))
+      ikey, instance, in_inst_cmd, in_inst, in_inst_q, in_placed, in_placed_q = (_ih[n] for n in ("ikey", "instance", "in_inst_cmd", "in_inst", "in_inst_q", "in_placed", "in_placed_q"))
 
       # The DNS leak test needs two resolvers that disagree: the HOST's, which
       # a zone must never reach, and the tunnel's own further down. One lookup
@@ -1736,7 +1736,9 @@ let
           out = json.loads(alice("cellward status --json"))
           assert out["main"]["microphone"] == {"value": "no", "source": "local"}, out["main"]
           # …and the running filter goes by it too (below): a sound server
-          # for the zone to come up with.
+          # for the zone to come up with. The previous fake server leaves its
+          # socket behind: do not mistake that stale name for this one's readiness.
+          alice("rm -f /run/user/1000/pulse/native")
           alice("systemd-run --user --unit=fakepulseherm ${pkgs.python3}/bin/python3 ${fakePulse}")
           machine.wait_until_succeeds("test -S /run/user/1000/pulse/native")
           out = json.loads(alice("cellward status --json"))
@@ -1869,7 +1871,7 @@ let
           # (docs/LEAK-MODEL.md §11).
           machine.succeed("test -f /home/alice/.config/mimeapps.list")
           in_zone(hp, "sh -c '! echo x >> /home/alice/.config/mimeapps.list'")
-          in_zone(hp, "sh -c '! rm /home/alice/.config/mimeapps.list'")
+          in_zone(hp, "sh -c '! rm -f /home/alice/.config/mimeapps.list'")
           # Nor is the name of a directory above one of them the zone's to
           # change (review 2026-09-27: `mv ~/.config` took the covers along,
           # and a new ~/.config/autostart was the host's).
@@ -1881,8 +1883,8 @@ let
           # Made beforehand, so covered even where nothing was there.
           for path in [".local/share/wireplumber/x", ".local/state/wireplumber/x", ".config/pipewire/x"]:
               in_zone(hp, f"sh -c '! touch /home/alice/{path}'")
-          in_zone(hp, "sh -c '! mkdir -p /home/alice/.config/wireplumber/wireplumber.conf.d'")
-          in_zone(hp, "sh -c '! mkdir -p /home/alice/.local/share/wireplumber/scripts/vpn-zones'")
+          in_zone(hp, "sh -c '! mkdir -p /home/alice/.config/wireplumber/wireplumber.conf.d/x'")
+          in_zone(hp, "sh -c '! mkdir -p /home/alice/.local/share/wireplumber/scripts/vpn-zones/x'")
           alice("touch ~/.local/share/wireplumber/from-host && rm ~/.local/share/wireplumber/from-host")
           exec(open("${./vm-protect.py}").read())
           def nodes(*paths):
@@ -2457,6 +2459,7 @@ let
           )
           alice("ln -sfn ~/.local/share/vmurl/vmurl.desktop ~/.local/share/applications/vmurl.desktop")
           alice("rm -f ~/.config/mimeapps.list && printf '[Default Applications]\\nx-scheme-handler/https=vmurl.desktop\\n' > ~/.config/mimeapps.list")
+          print(in_zone(hp, "cat /home/alice/.config/mimeapps.list"))
           # xdg-open looks for a scheme handler only in a graphical session
           # (WAYLAND_DISPLAY or DISPLAY set) and goes for console browsers
           # otherwise; the VM has no compositor, only the variable is needed.
@@ -2473,7 +2476,19 @@ let
           )
           out = alice(f"WAYLAND_DISPLAY=wayland-vmtest cellward run vmherm --fs-sandbox -- {portal} ''' 'https://example.test/from-sandbox' '@a{{sv}} {{}}'")
           assert "/org/freedesktop/portal/desktop/request/" in out, out
-          machine.wait_until_succeeds("grep -q from-sandbox /home/alice/opened-urls", timeout=30)
+          try:
+              machine.wait_until_succeeds("grep -q from-sandbox /home/alice/opened-urls", timeout=30)
+          except Exception:
+              print(in_zone(hp, "xdg-mime query default x-scheme-handler/https"))
+              code, direct = machine.execute(
+                  "su -l alice -c "
+                  + shlex.quote(
+                      "export XDG_RUNTIME_DIR=/run/user/1000; WAYLAND_DISPLAY=wayland-vmtest "
+                      "cellward run vmherm -- xdg-open https://example.test/direct"
+                  )
+              )
+              print(f"direct xdg-open: rc={code}\n{direct}")
+              raise
           zone_ns = machine.succeed(f"readlink /proc/{hp}/ns/net").strip()
           host_ns = machine.succeed("readlink /proc/1/ns/net").strip()
           opened = machine.succeed("cat /home/alice/opened-urls")

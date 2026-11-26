@@ -593,9 +593,10 @@ itself and hands the link to the broker with the connection's container
   container; `setns` acts on the caller. What a live switch changes is the
   one way out of the container's own namespace (I2), not the process.
 - **A process cannot be moved between cgroups from a login session's scope**
-  into the user manager's tree (the common ancestor is root's): a program
-  launched from a tty or ssh stays out of its instance's epoch, and holds
-  the live switch while it runs.
+  into the user manager's tree (the common ancestor is root's). Strict CLI
+  launches therefore hand off through a transient user service; in legacy
+  mode a program launched from a tty or ssh stays out of its instance's
+  epoch, and any program outside the epoch holds the live switch while it runs.
 - **A host interface cannot be moved into a container** without
   `CAP_NET_ADMIN` in the host's network namespace (§3.3). Traffic *through* it
   is possible rootless; the interface *itself* inside needs a system helper.

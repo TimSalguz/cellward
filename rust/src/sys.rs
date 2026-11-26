@@ -327,7 +327,7 @@ impl Inotify {
     /// `cgroup.events` for `IN_MODIFY`, `crate::epoch::move_all`).
     pub(crate) fn watch_for(dir: &Path, mask: u32) -> io::Result<Self> {
         // SAFETY: inotify_init1 takes flags and returns a new descriptor or -1.
-        let raw = unsafe { libc::inotify_init1(libc::IN_CLOEXEC) };
+        let raw = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -364,9 +364,10 @@ impl Inotify {
         Ok(())
     }
 
-    /// Block until something appears; the names that did. When the queue
-    /// overflowed, every name in the directory — the caller cannot know what
-    /// it missed. `Err` when the watch is gone for good.
+    /// The names that appeared, or none when a poll was stale (an epoch watch
+    /// may have been replaced since that poll). When the queue overflowed,
+    /// every name in the directory — the caller cannot know what it missed.
+    /// `Err` when the watch is gone for good.
     pub fn names(&self) -> io::Result<Vec<String>> {
         let mut buf = vec![0u8; 16 * 1024];
         // SAFETY: a valid descriptor and a buffer of the length passed.
@@ -379,7 +380,10 @@ impl Inotify {
         };
         if n < 0 {
             let e = io::Error::last_os_error();
-            return if e.kind() == io::ErrorKind::Interrupted {
+            return if matches!(
+                e.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            ) {
                 Ok(Vec::new())
             } else {
                 Err(e)
@@ -966,6 +970,16 @@ mod inotify_tests {
             &dir.join("later/x")
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_inotify_read_does_not_wait() {
+        let dir = std::env::temp_dir().join(format!("vz-empty-watch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let watch = Inotify::watch_for(&dir, libc::IN_CREATE | libc::IN_DELETE).unwrap();
+        assert!(watch.names().unwrap().is_empty());
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

@@ -37,12 +37,30 @@ with subtest("a compositor without the security context: no Wayland in a zone, a
 
     # In a zone: nothing of the compositor's — at most its socket's name in
     # the environment, and no socket by that name or any other.
-    out = alice(
-        f"WAYLAND_DISPLAY={bare} cellward run vmsmoke -- sh -c "
-        "'echo D=$WAYLAND_DISPLAY; timeout 60 wayland-info 2>&1 || echo NO-WAYLAND; "
-        "ls -A $XDG_RUNTIME_DIR | grep ^wayland- || echo NO-SOCKET'"
+    code, out = machine.execute(
+        "su -l alice -c "
+        + shlex.quote(
+            f"export XDG_RUNTIME_DIR=/run/user/1000; WAYLAND_DISPLAY={bare} "
+            "cellward run vmsmoke -- sh -c "
+            "'echo D=$WAYLAND_DISPLAY; timeout 60 wayland-info 2>&1 || echo NO-WAYLAND; "
+            "ls -A $XDG_RUNTIME_DIR | grep ^wayland- || echo NO-SOCKET'"
+        )
     )
     print(out)
+    if code != 0:
+        for probe in (
+            "true",
+            "sh -c 'echo SECOND-SHELL; command -v sh; echo rc=$?'",
+        ):
+            probe_code, probe_out = machine.execute(
+                "su -l alice -c "
+                + shlex.quote(
+                    f"export XDG_RUNTIME_DIR=/run/user/1000; WAYLAND_DISPLAY={bare} "
+                    f"cellward run vmsmoke -- {probe}"
+                )
+            )
+            print(f"diagnostic {probe}: rc={probe_code}\n{probe_out}")
+    assert code == 0, (code, out)
     assert "wl_compositor" not in out and "NO-WAYLAND" in out, out
     assert "NO-SOCKET" in out, out
     # Nor through the compositor's own process: /proc/<pid>/root leads to the

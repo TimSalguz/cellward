@@ -1428,6 +1428,9 @@ fn pick_and_check(
     timeout: Option<std::time::Duration>,
 ) -> Result<Vec<OsString>, String> {
     let cmd = host_command(cmd)?;
+    if !crate::launch::has_display() {
+        return Err("спросить некого (нет графической сессии)".to_owned());
+    }
     let Ok(_asking) = ASKING.try_lock() else {
         return Err("уже открыт другой вопрос о запуске".to_owned());
     };
@@ -1447,9 +1450,6 @@ fn host_command(cmd: &[OsString]) -> Result<Vec<OsString>, String> {
         return Err(format!(
             "команда длиннее {SHOWN_WORDS} слов — целиком её не показать, а не целиком не спрашивают"
         ));
-    }
-    if !crate::launch::has_display() {
-        return Err("спросить некого (нет графической сессии)".to_owned());
     }
     // The program as the host finds it, once: what the window shows is what
     // runs — `run` finds nothing again by PATH, where a link in the home
@@ -1750,6 +1750,7 @@ fn link_answer(
             );
         }
     }
+    let mut direct = ruled.is_some();
     let id = match &ruled {
         Some(id) => id.clone(),
         None => {
@@ -1764,6 +1765,7 @@ fn link_answer(
                 &content_type,
                 default.as_deref(),
             );
+            direct |= programs.len() == 1;
             // One program for such links: nothing to choose, as on a phone.
             if let [only] = programs.as_slice() {
                 only.id.clone()
@@ -1836,21 +1838,62 @@ fn link_answer(
             Err(why) => return refused(why, &shown),
         },
     };
-    let chosen = host_command(&cmd).and_then(|cmd| {
-        ask_window(
-            zone,
-            locked,
-            &app_id,
-            &cmd,
-            &origin.name(),
-            offer.as_deref(),
-            match &asker {
-                Asker::Container(c) => Some(c.name.as_str()),
-                _ => None,
-            },
-            question_timeout(tools),
-        )
-    });
+    // An entry Cellward does not take over runs as `xdg-open` would run it
+    // in the asking zone: no network is crossed. A throwaway's link gets the
+    // zone's own profile, as before (`fef2260`).
+    if direct
+        && !crate::desktop::intercepted(&tools.home, &id)
+        && !matches!((&origin, &asker), (Origin::Zone(_), Asker::Unknown))
+    {
+        let argv = host_command(&cmd).map(|cmd| {
+            let mut argv = vec![OsString::from(zone)];
+            if let Asker::Container(c) = &asker {
+                argv.push("--container".into());
+                argv.push(c.name.clone().into());
+            }
+            argv.push("--".into());
+            argv.extend(cmd);
+            argv
+        });
+        return match argv {
+            Ok(argv) => (start(&app_id, &argv, true), zone.to_owned(), id, shown, who),
+            Err(why) => refused(why, &shown),
+        };
+    }
+    let chosen = if !crate::launch::has_display() {
+        if !direct || matches!(&asker, Asker::Unknown) {
+            return refused(
+                "спросить некого (нет графической сессии)".to_owned(),
+                &shown,
+            );
+        }
+        host_command(&cmd).map(|cmd| {
+            let mut argv = vec![OsString::from(zone)];
+            if let Asker::Container(c) = &asker {
+                argv.push("--container".into());
+                argv.push(c.name.clone().into());
+            }
+            argv.push("--".into());
+            argv.extend(cmd);
+            (argv, false)
+        })
+    } else {
+        host_command(&cmd).and_then(|cmd| {
+            ask_window(
+                zone,
+                locked,
+                &app_id,
+                &cmd,
+                &origin.name(),
+                offer.as_deref(),
+                match &asker {
+                    Asker::Container(c) => Some(c.name.as_str()),
+                    _ => None,
+                },
+                question_timeout(tools),
+            )
+        })
+    };
     let (argv, keep) = match chosen {
         Ok(chosen) => chosen,
         Err(why) => return refused(why, &shown),

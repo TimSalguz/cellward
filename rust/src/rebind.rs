@@ -72,6 +72,7 @@ use crate::sys;
 pub struct Own {
     name: PathBuf,
     file: OwnedFd,
+    refresh: bool,
 }
 
 impl Own {
@@ -96,7 +97,23 @@ impl Own {
         Ok(Self {
             name: name.to_path_buf(),
             file,
+            refresh: false,
         })
+    }
+
+    /// A copy of `file` at `copy`, kept over `name`. Where `file` is a link
+    /// whose target the host later replaces, `copy` is refreshed from `name`
+    /// before it is laid again; the host's file itself is never written.
+    pub fn copy_of(file: &Path, name: &Path, copy: &Path) -> io::Result<Self> {
+        fs::copy(file, copy)?;
+        let mut own = Self::open(copy, name)?;
+        own.refresh = true;
+        Ok(own)
+    }
+
+    fn refresh(&self) -> io::Result<()> {
+        let text = fs::read(&self.name)?;
+        fs::write(format!("/proc/self/fd/{}", self.file.as_raw_fd()), text)
     }
 
     /// The host's name it is laid over.
@@ -332,6 +349,12 @@ pub fn keep(who: String, owns: Vec<Own>) {
 /// `own` laid over its name, where it is not, and what came of it said.
 fn ensure(who: &str, own: &Own) {
     let name = own.name.display();
+    if own.refresh && !own.laid() {
+        if let Err(e) = own.refresh() {
+            eprintln!("{who}: cannot refresh its own {name} ({e}) — the previous copy is not laid");
+            return;
+        }
+    }
     match own.lay() {
         Ok(true) => println!("{who}: the host replaced {name} — its own laid over it again"),
         Ok(false) => {}

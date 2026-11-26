@@ -203,8 +203,14 @@ impl Runtime {
         let (program, panel) = if *kind == "DIAGNOSTIC" {
             (DIAGNOSTIC.to_owned(), None)
         } else {
-            let (program, panel) = registered_launch(registry, peer.pid)
-                .ok_or("launch is not registered on the host")?;
+            let (program, panel) = registered_launch(registry, peer.pid).ok_or_else(|| {
+                eprintln!(
+                    "strict controller: no live registry ancestry for waiter {} in {}",
+                    peer.pid,
+                    registry.display()
+                );
+                "launch is not registered on the host".to_owned()
+            })?;
             (program, Some(panel))
         };
         let leaf = crate::epoch::leaf_name(peer.pid, start);

@@ -2748,20 +2748,25 @@ fn keep(
         if !look {
             continue;
         }
+        // A launch holds the lock shared until its program is in. Sweeping
+        // only with the lock exclusive keeps a new, still-empty launch cgroup
+        // from being removed between mkdir and the child's write to its
+        // cgroup.procs.
+        let locked = lock.as_ref().is_some_and(lock_exclusive_now);
+        if lock.is_some() && !locked {
+            continue;
+        }
         members = crate::place::members(userns, Some(keeper), Some(space));
-        if members.is_empty() && armed && lock.as_ref().is_some_and(lock_exclusive_now) {
-            // Nobody on the way in (a launch holds the lock shared until its
-            // program is in): looked at once more, and nobody is in.
-            members = crate::place::members(userns, Some(keeper), Some(space));
-            if members.is_empty() {
-                break Ending::Idle;
-            }
+        if members.is_empty() && armed && locked {
+            break Ending::Idle;
+        }
+        outside = transport.epochs.look(&members);
+        if locked {
             if let Some(lock) = &lock {
                 // SAFETY: flock(2) on a descriptor we hold.
                 unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
             }
         }
-        outside = transport.epochs.look(&members);
     };
     WAKE.store(-1, Ordering::SeqCst);
     if doorbell.is_some() {
@@ -2906,9 +2911,10 @@ fn answer_request(
             let core = std::env::current_exe().map_err(|e| e.to_string())?;
             let space = transport.space_pidfd().ok_or("instance exited")?;
             let epoch = transport.epochs.now.as_ref().ok_or("no delegated epoch")?;
-            let registry = transport.state.join(".running").join(
-                crate::instance::container_of(&transport.id).unwrap_or(crate::registry::MAIN),
-            );
+            let registry = transport
+                .state
+                .join(".running")
+                .join(crate::instance::registry_of(&transport.id));
             let strict = transport
                 .strict
                 .as_mut()
@@ -4313,8 +4319,10 @@ impl Transport {
             // is non-blocking.
             while unsafe { libc::read(news.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) } > 0 {}
         }
-        let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
-        let registry = self.state.join(".running").join(container);
+        let registry = self
+            .state
+            .join(".running")
+            .join(crate::instance::registry_of(&self.id));
         let mut fresh = self.owners.fresh(&self.dir);
         if self.strict_requested {
             self.count_launches();
@@ -4435,8 +4443,10 @@ impl Transport {
             return;
         };
         // Each launch's program, while it is there to be found.
-        let container = crate::instance::container_of(&self.id).unwrap_or(crate::registry::MAIN);
-        let registry = self.state.join(".running").join(container);
+        let registry = self
+            .state
+            .join(".running")
+            .join(crate::instance::registry_of(&self.id));
         for path in &leaves {
             let leaf = path.rsplit('/').next().unwrap_or_default().to_owned();
             if self.leaf_programs.contains_key(&leaf) {
@@ -7749,12 +7759,24 @@ fn mimeapps_to_make(home: &Path, desktops: &str) -> Vec<PathBuf> {
 /// (`vpn-zone host-files <zone> writable`, or
 /// `programs.cellward.hostFilesWritable` in Nix).
 ///
-/// A symlink cannot be covered — a mount follows it, and the link itself
-/// stays a name in a directory the program can write: home-manager's
-/// dotfiles in the home itself (`~/.zshrc` → the store) are left as they are,
-/// and said so. A directory home-manager fills with links is covered whole.
-/// Fatal when a real one cannot be made read-only.
-fn protect_host_files(zone: &Zone) -> Result<(), String> {
+/// A link to a regular file is covered on its own name: the target is opened
+/// first, but the link itself is not followed when the read-only file is
+/// attached. The name becomes a mount point, so the zone cannot unlink it.
+/// Other links stay as they are, and are said so. A directory home-manager
+/// fills with links is covered whole. Fatal when a real one cannot be made
+/// read-only.
+fn cover_file_link(path: &Path, copy: &Path) -> io::Result<Option<crate::rebind::Own>> {
+    let target = fs::canonicalize(path)?;
+    if !target.is_file() {
+        return Ok(None);
+    }
+    let own = crate::rebind::Own::copy_of(&target, path, copy)?;
+    own.lay_on_name()?;
+    sys::remount_read_only(path)?;
+    Ok(Some(own))
+}
+
+fn protect_host_files(zone: &Zone) -> Result<Vec<crate::rebind::Own>, String> {
     pin_parents(zone)?;
     // What the person protects too (`crate::protect`), less what the
     // container is given of it — at or below a given path —, and the given
@@ -7782,9 +7804,20 @@ fn protect_host_files(zone: &Zone) -> Result<(), String> {
         .collect::<Result<_, _>>()?;
     let mut covered = 0;
     let mut links = Vec::new();
+    let mut refreshing = Vec::new();
     for path in places.iter().filter(|p| !lifted.contains(p)) {
         match fs::symlink_metadata(path) {
-            Ok(meta) if meta.file_type().is_symlink() => links.push(path.display().to_string()),
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if let Some(own) =
+                    cover_file_link(path, &zone.dir.join(format!("protected-link-{covered}")))
+                        .map_err(|e| format!("cannot cover linked {}: {e}", path.display()))?
+                {
+                    refreshing.push(own);
+                    covered += 1;
+                } else {
+                    links.push(path.display().to_string());
+                }
+            }
             Ok(_) => {
                 sys::mount(path.as_os_str(), path, "", libc::MS_BIND | libc::MS_REC, "")
                     .and_then(|()| sys::remount_read_only(path))
@@ -7819,7 +7852,7 @@ fn protect_host_files(zone: &Zone) -> Result<(), String> {
             format!("; links, which a mount cannot cover: {}", links.join(", "))
         }
     );
-    Ok(())
+    Ok(refreshing)
 }
 
 /// The directories between the home and every place a hermetic zone covers,
@@ -9189,7 +9222,7 @@ fn zone_setup(zone: &Zone, links: Option<ZoneLinks<'_>>) -> Result<(), String> {
     }
     hide_input_methods(zone)?;
     if zone.hermetic && !zone.host_files_writable {
-        protect_host_files(zone)?;
+        owns.extend(protect_host_files(zone)?);
     }
     // Its own machine-id, kept in the project's state: before that is hidden.
     own_machine_id(zone);

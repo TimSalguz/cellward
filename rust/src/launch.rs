@@ -575,9 +575,10 @@ impl TrimSlash for [u8] {
 /// answering that way for as long as the permission files have existed.
 /// The registry's file name for a program: the picker's keys as they are
 /// (`desktop::stable_key` makes them of these characters already), anything
-/// else reduced to them — never a path, never `.` or `..`, never empty.
+/// else reduced to them — never a path, never `.` or `..`, never empty. A
+/// leading dot is prefixed so an app is not mistaken for a temporary file.
 pub fn registry_key(raw: &OsStr) -> OsString {
-    let kept: Vec<u8> = raw
+    let mut kept: Vec<u8> = raw
         .as_bytes()
         .iter()
         .take(200)
@@ -591,6 +592,9 @@ pub fn registry_key(raw: &OsStr) -> OsString {
         .collect();
     if kept.is_empty() || kept.iter().all(|&b| b == b'.') {
         return OsString::from("программа");
+    }
+    if kept[0] == b'.' {
+        kept.insert(0, b'_');
     }
     OsString::from_vec(kept)
 }
@@ -5160,7 +5164,9 @@ mod tests {
             ("firefox", "firefox"),
             ("org.telegram.desktop", "org.telegram.desktop"),
             ("/run/user/1000/x", "_run_user_1000_x"),
-            ("../../.bashrc", ".._.._.bashrc"),
+            ("../../.bashrc", "_.._.._.bashrc"),
+            (".X11-unix", "_.X11-unix"),
+            (".lock", "_.lock"),
             ("..", "программа"),
             (".", "программа"),
             ("", "программа"),

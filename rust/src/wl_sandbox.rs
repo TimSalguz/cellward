@@ -768,11 +768,7 @@ pub fn run(args: Args) -> u8 {
                 "wl-sandbox: {why} — {}",
                 plain_note(&args.zone, &args.cmd[0])
             );
-            return if args.clipboard_scope.is_some() {
-                EXIT_NOT_STARTED
-            } else {
-                run_plain(&args.cmd)
-            };
+            return run_plain(&args.cmd);
         }
     };
 

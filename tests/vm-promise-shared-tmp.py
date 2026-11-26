@@ -26,7 +26,17 @@ with subtest(f"a container's /tmp in zone {TMP_ZONE}: shared by its launches: {T
     if TMP_SHARED:
         # The X server's sockets: a directory of each launch's own, over the
         # container's /tmp (a /tmp of the launch's own has none to cover).
-        alice(f"{run} sh -c 'test -d /tmp/.X11-unix'")
+        code, out = machine.execute(
+            "su -l alice -c "
+            + shlex.quote(
+                f"export XDG_RUNTIME_DIR=/run/user/1000; {run} sh -c 'test -d /tmp/.X11-unix'"
+            )
+        )
+        if code != 0:
+            print(alice("cellward status --json"))
+            print(alice("find ~/.local/state/vpn-zones/.running -maxdepth 2 -type f -print -exec cat {} \\;"))
+            print(alice("journalctl --user -n 100 --no-pager -o cat"))
+        assert code == 0, (code, out)
         # The second launch of the same container finds the first one's file.
         machine.wait_until_succeeds(
             "su -l alice -c "
