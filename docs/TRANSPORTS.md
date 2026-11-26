@@ -40,6 +40,11 @@ explicitly TCP-only. SOCKS5 UDP support depends on the proxy server; no UDP
 support is inferred for HTTP. Credentials stay in the private generated
 sing-box configuration and do not enter argv or the environment.
 
+`cellward mtu <zone> [--json]` reports configured and effective MTU for every
+published hop without changing an interface or sending probe packets. Proxy
+zones support IPv4 and an optional IPv6 address; an IPv6-only peer can be
+reached through the proxy even when the proxy's own endpoint is IPv4.
+
 The same section works in a pooled node and as the inner hop of a chain. The
 outer route must provide the address family of the proxy server. GUI-only VPN
 clients can use this backend by exposing a local SOCKS5 endpoint inside their

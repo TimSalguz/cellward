@@ -1064,6 +1064,16 @@ mod tests {
         let ipv6 = WgConfig::parse(b"[Peer]\nEndpoint = [2001:db8::1]:51820\n").unwrap();
         assert!(!ChainConfig::needs_ipv6_transport(&ipv4).unwrap());
         assert!(ChainConfig::needs_ipv6_transport(&ipv6).unwrap());
+        let proxy4 = WgConfig::parse(
+            b"[Interface]\nAddress = 10.200.0.2/32\n[Proxy]\nType = socks5\nServer = 192.0.2.1\nPort = 1080\n",
+        )
+        .unwrap();
+        let proxy6 = WgConfig::parse(
+            b"[Interface]\nAddress = 10.200.0.2/32\n[Proxy]\nType = socks5\nServer = 2001:db8::1\nPort = 1080\n",
+        )
+        .unwrap();
+        assert!(!ChainConfig::needs_ipv6_transport(&proxy4).unwrap());
+        assert!(ChainConfig::needs_ipv6_transport(&proxy6).unwrap());
     }
 
     #[test]

@@ -28,6 +28,7 @@ let
   '';
   providerPeer = pkgs.writeText "cellward-provider-peer.py" ''
     import http.server
+    import socket
     import sys
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -42,7 +43,10 @@ let
         def log_message(self, *args):
             pass
 
-    http.server.HTTPServer((sys.argv[1], int(sys.argv[2])), Handler).serve_forever()
+    class Server(http.server.HTTPServer):
+        address_family = socket.AF_INET6 if ":" in sys.argv[1] else socket.AF_INET
+
+    Server((sys.argv[1], int(sys.argv[2])), Handler).serve_forever()
   '';
   fakeProvider = pkgs.writeScript "cellward-fake-provider.py" ''
     #!${pkgs.python3}/bin/python3
@@ -157,7 +161,7 @@ pkgs.testers.runNixOSTest {
       boot.kernelModules = [ "wireguard" ];
       environment.systemPackages = [ pkgs.wireguard-tools pkgs.iproute2 pkgs.python3 pkgs.dnsmasq ];
       networking.firewall.allowedUDPPorts = [ 53 51820 ];
-      networking.firewall.allowedTCPPorts = [ 8090 8091 8092 18081 ];
+      networking.firewall.allowedTCPPorts = [ 8090 8091 8092 8094 18081 ];
       networking.firewall.trustedInterfaces = [ "wg0" ];
       virtualisation.memorySize = 768;
     };
@@ -286,7 +290,7 @@ pkgs.testers.runNixOSTest {
         )
         server.wait_for_open_port(18081, server_ip)
         alice(
-            "printf '[Interface]\\nAddress = 10.200.0.2/32\\nDNS = "
+            "printf '[Interface]\\nAddress = 10.200.0.2/32, fd00:200::2/128\\nDNS = "
             f"{server_ip}\\nMTU = 1380\\n\\n[Proxy]\\nType = socks5\\n"
             f"Server = {server_ip}\\nPort = 18081\\n' > /tmp/external.conf"
         )
@@ -299,6 +303,20 @@ pkgs.testers.runNixOSTest {
         ).strip()
         assert answer == "/external", answer
         server.succeed("grep -q '^/provider-connected$' /tmp/provider-requests")
+        mtu = alice("cellward mtu external --json")
+        assert '"zone":"external"' in mtu, mtu
+        assert '"configured_mtu":1380,"effective_mtu":1380' in mtu, mtu
+        server.succeed("ip -6 addr add fd00:7::2/64 dev eth1 nodad")
+        server.succeed(
+            "systemd-run --unit=provider-peer-v6 python3 ${providerPeer} "
+            "fd00:7::2 8094 /tmp/provider-v6-requests"
+        )
+        server.wait_for_open_port(8094, "fd00:7::2")
+        answer = alice(
+            "curl --max-time 20 --proxytunnel -x http://127.0.0.1:1082 "
+            "http://[fd00:7::2]:8094/ipv6"
+        ).strip()
+        assert answer == "/ipv6", answer
         alice("cellward down external")
         server.succeed("systemctl stop external-proxy")
         server.succeed("truncate -s 0 /tmp/provider-requests")
