@@ -3317,7 +3317,7 @@ fn serve(
             if fds[at].revents != 0 {
                 match recording.as_ref().map(answer) {
                     Some(Answer::Capture(output)) => {
-                        let ok = output.is_some_and(|output| asks.write_capture(output));
+                        let ok = output.is_some_and(|output| asks.write_record(output));
                         let sent = recording.as_ref().is_some_and(|stream| {
                             sys::send_with_fds(
                                 stream.as_raw_fd(),

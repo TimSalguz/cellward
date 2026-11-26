@@ -958,6 +958,7 @@ pub(crate) enum Ask {
 pub(crate) struct Asks {
     queue: RefCell<VecDeque<Ask>>,
     capture: RefCell<Option<Weak<RefCell<Window>>>>,
+    recording: RefCell<Option<Weak<RefCell<Window>>>>,
 }
 
 /// Asks kept at once; more in one round are not the person's clicks.
@@ -975,36 +976,54 @@ impl Asks {
         *self.capture.borrow_mut() = Some(window.clone());
     }
 
+    fn record_window(&self, window: &Weak<RefCell<Window>>) {
+        *self.recording.borrow_mut() = Some(window.clone());
+    }
+
     /// The asks to send, in their order; none are left.
     pub(crate) fn take(&self) -> Vec<Ask> {
         self.queue.borrow_mut().drain(..).collect()
     }
 
     pub(crate) fn write_capture(&self, output: OwnedFd) -> bool {
-        use std::io::Write;
-
-        let Some(window) = self.capture.borrow().as_ref().and_then(Weak::upgrade) else {
-            return false;
-        };
-        let Ok(window) = window.try_borrow() else {
-            return false;
-        };
-        let Some(pixels) = root_pixels(&window.root) else {
-            return false;
-        };
-        let mut output = std::fs::File::from(output);
-        let format = match pixels.format {
-            WlShmFormat::ARGB8888 => 0,
-            WlShmFormat::XRGB8888 => 1,
-            _ => return false,
-        };
-        for value in [pixels.width, pixels.height, pixels.stride, format] {
-            if output.write_all(&value.to_ne_bytes()).is_err() {
-                return false;
-            }
-        }
-        output.write_all(&pixels.bytes).is_ok()
+        self.capture
+            .borrow()
+            .as_ref()
+            .is_some_and(|window| write_window(window, output))
     }
+
+    pub(crate) fn write_record(&self, output: OwnedFd) -> bool {
+        self.recording
+            .borrow()
+            .as_ref()
+            .is_some_and(|window| write_window(window, output))
+    }
+}
+
+fn write_window(window: &Weak<RefCell<Window>>, output: OwnedFd) -> bool {
+    use std::io::Write;
+
+    let Some(window) = window.upgrade() else {
+        return false;
+    };
+    let Ok(window) = window.try_borrow() else {
+        return false;
+    };
+    let Some(pixels) = root_pixels(&window.root) else {
+        return false;
+    };
+    let mut output = std::fs::File::from(output);
+    let format = match pixels.format {
+        WlShmFormat::ARGB8888 => 0,
+        WlShmFormat::XRGB8888 => 1,
+        _ => return false,
+    };
+    for value in [pixels.width, pixels.height, pixels.stride, format] {
+        if output.write_all(&value.to_ne_bytes()).is_err() {
+            return false;
+        }
+    }
+    output.write_all(&pixels.bytes).is_ok()
 }
 
 /// One framed window's share of [`Frames::framed`], given back when its frame
@@ -3923,7 +3942,7 @@ impl Window {
             Some(MenuRow::Actions) => asks.push(Ask::Menu),
             Some(MenuRow::Clipboard) => asks.push(Ask::Clip),
             Some(MenuRow::Record) => {
-                asks.capture_window(&self.me);
+                asks.record_window(&self.me);
                 asks.push(Ask::Record);
             }
             Some(MenuRow::InWindow) => self.toggle_in_window(f),
