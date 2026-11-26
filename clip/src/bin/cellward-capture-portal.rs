@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 fn run(args: &[OsString]) -> u8 {
     let mut pw_dump = None;
+    let mut kdialog = None;
     let mut address = None;
     let mut name = None;
     let mut implementation = false;
@@ -21,6 +22,7 @@ fn run(args: &[OsString]) -> u8 {
         };
         match word.to_str() {
             Some("--pw-dump") => pw_dump = Some(PathBuf::from(value)),
+            Some("--kdialog") => kdialog = Some(PathBuf::from(value)),
             Some("--address") => {
                 let Some(value) = value.to_str() else {
                     eprintln!("cellward-capture-portal: --address must be UTF-8");
@@ -45,6 +47,10 @@ fn run(args: &[OsString]) -> u8 {
         eprintln!("cellward-capture-portal: an absolute --pw-dump is required");
         return 2;
     };
+    if kdialog.as_ref().is_some_and(|path| !path.is_absolute()) {
+        eprintln!("cellward-capture-portal: --kdialog must be absolute");
+        return 2;
+    }
     let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -65,6 +71,15 @@ fn run(args: &[OsString]) -> u8 {
         available.clone(),
         runtime.join("pipewire-0"),
     );
+    let portal = match &kdialog {
+        Some(path) => portal.with_kdialog(path.clone()),
+        None => portal,
+    };
+    let impl_portal = ImplPortal::new(registry, available);
+    let impl_portal = match &kdialog {
+        Some(path) => impl_portal.with_kdialog(path.clone()),
+        None => impl_portal,
+    };
     let name = name.unwrap_or(if implementation {
         "org.freedesktop.impl.portal.desktop.cellward"
     } else {
@@ -76,10 +91,9 @@ fn run(args: &[OsString]) -> u8 {
     };
     let connection = if implementation {
         builder.and_then(|builder| {
-            builder.name(name)?.serve_at(
-                capture_dbus::desktop_path(),
-                ImplPortal::new(registry, available),
-            )
+            builder
+                .name(name)?
+                .serve_at(capture_dbus::desktop_path(), impl_portal)
         })
     } else {
         builder.and_then(|builder| {

@@ -314,6 +314,35 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
             f"target-object={serial} on-disconnect=eos num-buffers=3 "
             "! video/x-raw,format=I420 ! fakesink"
         )
+        request = "/org/cellward/capture/request/impl"
+        session = "/org/cellward/capture/session/impl"
+        created = alice(
+            "gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            "--object-path /org/freedesktop/portal/desktop "
+            f"--method org.freedesktop.impl.portal.ScreenCast.CreateSession "
+            f"{request} {session} vm.test '{{}}'"
+        )
+        assert "session_id" in created and session in created, created
+        selected = alice(
+            "gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            "--object-path /org/freedesktop/portal/desktop "
+            f"--method org.freedesktop.impl.portal.ScreenCast.SelectSources "
+            f"{request} {session} vm.test '{{}}'"
+        )
+        assert selected.startswith("(uint32 0,"), selected
+        started = alice(
+            "gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            "--object-path /org/freedesktop/portal/desktop "
+            "--method org.freedesktop.impl.portal.ScreenCast.Start "
+            f"{request} {session} vm.test '' "
+            + shlex.quote(f"{{'cellward_capture_id': <'{identity}'>}}")
+        )
+        assert started.startswith("(uint32 0,"), started
+        assert "pipewire-serial" in started and serial in started, started
+        alice(
+            f"gdbus call --session --dest org.freedesktop.impl.portal.desktop.cellward "
+            f"--object-path {session} --method org.freedesktop.impl.portal.Session.Close"
+        )
         toggle_recording(139)
         machine.wait_until_fails("pgrep -f '[v]pn-zone-core record-agent'", timeout=15)
 

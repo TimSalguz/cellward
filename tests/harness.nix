@@ -158,6 +158,7 @@ let
       "offline"
     ];
     pipewirePolicy = true;
+    capturePortal.enable = true;
     desktop = {
       windowMenu.key = "Mod+Shift+Z";
       niri = {
@@ -378,6 +379,26 @@ in
 
   # Every declarative option set (docs/CONTAINERS.md §8).
   declaredActivation = hmDeclared.activationPackage;
+
+  capturePortalFiles =
+    let
+      portal = hmDeclared.config.xdg.dataFile."xdg-desktop-portal/portals/cellward.portal".text;
+      service = hmDeclared.config.xdg.dataFile."dbus-1/services/org.freedesktop.impl.portal.desktop.cellward.service".text;
+    in
+    lib.all lib.id [
+      (expect "only the impl ScreenCast interface is registered" (
+        lib.hasInfix "Interfaces=org.freedesktop.impl.portal.ScreenCast;" portal
+        && !lib.hasInfix "org.freedesktop.portal.ScreenCast" portal
+        && !lib.hasInfix "org.freedesktop.portal.Desktop" portal
+      ))
+      (expect "the backend runs through the pinned binary and pw-dump" (
+        lib.hasInfix "cellward-capture-portal --impl --pw-dump /nix/store/" service
+        && lib.hasInfix "/bin/pw-dump" service
+      ))
+      (expect "capture portal is opt-in" (
+        !(hm.config.xdg.dataFile ? "xdg-desktop-portal/portals/cellward.portal")
+      ))
+    ];
 
   # The old option names — programs.vpn-zones and services.vpn-zones, the
   # project's until 2026-09 — name every option of the new ones, and give

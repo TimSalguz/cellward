@@ -867,6 +867,7 @@ let
     "camera"
     "audioManager"
     "pipewirePolicy"
+    "capturePortal.enable"
     "hostFilesWritable"
     "microphone"
     "screencast"
@@ -1123,6 +1124,10 @@ in
       default = [ ];
       example = [ "mixer" ];
       description = "Не действует с 2026-09-29: сеть больше не решает это за свои программы (docs/PERMISSIONS.md §11.15) — defaults.permissions.audioManager, containers.<имя>.permissions.audioManager, main.permissions.audioManager. Прочитано один раз, при переносе в контейнеры. Прежнее описание: Герметичные зоны (по имени), которым вместо ограниченного PipeWire отдаётся pipewire-0 хоста как есть — для микшера или коммутатора (pavucontrol, qpwgraph, EasyEffects). По умолчанию ни одной: такая зона слышит всё, что играет хост, записывает микрофон мимо microphone, двигает и глушит чужие потоки и меняет права других клиентов PipeWire; cellward status и doctor говорят об этом громко. Обычная (негерметичная) зона получает pipewire-0 хоста и без этого — у неё и так systemd --user. Без пересборки — cellward audio-manager <зона> on (со следующего подъёма экземпляров контейнеров этой сети). Сами зоны в Nix не описываются: здесь только имена.";
+    };
+
+    capturePortal = {
+      enable = lib.mkEnableOption "the Cellward ScreenCast backend. Registers org.freedesktop.impl.portal.desktop.cellward for org.freedesktop.impl.portal.ScreenCast only; the public portal is not replaced. Start a root-surface source from the frame before casting. Disabled by default";
     };
 
     pipewirePolicy = lib.mkOption {
@@ -1784,9 +1789,23 @@ in
     })
   ];
 
-  xdg.dataFile = lib.mkIf cfg.pipewirePolicy {
-    "wireplumber/scripts/vpn-zones/policy.lua".source = ./wireplumber/policy.lua;
-  };
+  xdg.dataFile = lib.mkMerge [
+    (lib.mkIf cfg.pipewirePolicy {
+      "wireplumber/scripts/vpn-zones/policy.lua".source = ./wireplumber/policy.lua;
+    })
+    (lib.mkIf cfg.capturePortal.enable {
+      "xdg-desktop-portal/portals/cellward.portal".text = ''
+        [portal]
+        DBusName=org.freedesktop.impl.portal.desktop.cellward
+        Interfaces=org.freedesktop.impl.portal.ScreenCast;
+      '';
+      "dbus-1/services/org.freedesktop.impl.portal.desktop.cellward.service".text = ''
+        [D-BUS Service]
+        Name=org.freedesktop.impl.portal.desktop.cellward
+        Exec=${cellward-clip}/bin/cellward-capture-portal --impl --pw-dump ${pkgs.pipewire}/bin/pw-dump --kdialog ${pkgs.kdePackages.kdialog}/bin/kdialog
+      '';
+    })
+  ];
 
   xdg.desktopEntries."vpn-zone-open" = lib.mkIf (hostLinkTypes != [ ]) {
     name = "Cellward — открыть ссылку";

@@ -59,6 +59,7 @@ let
         home-manager.users.alice = {
           imports = [ ../module ];
           programs.cellward.enable = true;
+          programs.cellward.capturePortal.enable = true;
           # The frame in one colour nothing else on the screen has (`full`),
           # a border of 4 under the title strip, and the corners inside it
           # niri's.
@@ -82,6 +83,7 @@ let
           pkgs.foot
           pkgs.wtype
           pkgs.jq
+          pkgs.glib.bin
         ];
         services.pipewire.enable = true;
         # sway plain: no bar, no borders — niri's window is all of its

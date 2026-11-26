@@ -28,6 +28,39 @@ fn transition(error: Error) -> u32 {
     }
 }
 
+fn choose_capture_id(
+    available: &[Source],
+    multiple: bool,
+    capture_id: Option<&str>,
+    kdialog: Option<&Path>,
+) -> Result<Option<String>, Error> {
+    if capture_id.is_some() || multiple || available.len() == 1 {
+        return Ok(capture_id.map(str::to_owned));
+    }
+    if available.len() > 64 {
+        return Err(Error::AmbiguousSource);
+    }
+    let Some(program) = kdialog else {
+        return Err(Error::AmbiguousSource);
+    };
+    let mut command = Command::new(program);
+    command
+        .arg("--menu")
+        .arg("Choose a Cellward capture source");
+    for source in available {
+        command.arg(&source.capture_id).arg(&source.capture_id);
+    }
+    let output = command.output().map_err(|_| Error::AmbiguousSource)?;
+    if !output.status.success() {
+        return Err(Error::AmbiguousSource);
+    }
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if selected.is_empty() || !available.iter().any(|source| source.capture_id == selected) {
+        return Err(Error::AmbiguousSource);
+    }
+    Ok(Some(selected))
+}
+
 fn token(options: &Options<'_>, name: &str) -> fdo::Result<String> {
     let token = options
         .get(name)
@@ -102,6 +135,7 @@ pub struct Portal {
     registry: Arc<Mutex<Registry>>,
     available: Arc<Provider>,
     pipewire: PathBuf,
+    kdialog: Option<PathBuf>,
 }
 
 impl Portal {
@@ -114,7 +148,13 @@ impl Portal {
             registry,
             available,
             pipewire,
+            kdialog: None,
         }
+    }
+
+    pub fn with_kdialog(mut self, path: PathBuf) -> Self {
+        self.kdialog = Some(path);
+        self
     }
 
     pub fn pipewire(&self) -> &Path {
@@ -199,15 +239,23 @@ impl Portal {
         let capture_id = options
             .get("cellward_capture_id")
             .and_then(|value| String::try_from(value).ok());
-        let result = self
-            .registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .start(
-                session_handle.as_str(),
-                &(self.available)(),
-                capture_id.as_deref(),
-            );
+        let available = (self.available)();
+        let selected = choose_capture_id(
+            &available,
+            self.registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .multiple(session_handle.as_str())
+                .unwrap_or(false),
+            capture_id.as_deref(),
+            self.kdialog.as_deref(),
+        );
+        let result = selected.and_then(|capture_id| {
+            self.registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .start(session_handle.as_str(), &available, capture_id.as_deref())
+        });
         let emitter = emitter_for(connection, request.clone());
         match result {
             Ok(sources) => {
@@ -305,6 +353,7 @@ impl ImplSession {
 pub struct ImplPortal {
     registry: Arc<Mutex<Registry>>,
     available: Arc<Provider>,
+    kdialog: Option<PathBuf>,
 }
 
 impl ImplPortal {
@@ -312,7 +361,13 @@ impl ImplPortal {
         Self {
             registry,
             available,
+            kdialog: None,
         }
+    }
+
+    pub fn with_kdialog(mut self, path: PathBuf) -> Self {
+        self.kdialog = Some(path);
+        self
     }
 }
 
@@ -387,15 +442,23 @@ impl ImplPortal {
         let capture_id = options
             .get("cellward_capture_id")
             .and_then(|value| String::try_from(value).ok());
-        let result = self
-            .registry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .start(
-                session_handle.as_str(),
-                &(self.available)(),
-                capture_id.as_deref(),
-            );
+        let available = (self.available)();
+        let selected = choose_capture_id(
+            &available,
+            self.registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .multiple(session_handle.as_str())
+                .unwrap_or(false),
+            capture_id.as_deref(),
+            self.kdialog.as_deref(),
+        );
+        let result = selected.and_then(|capture_id| {
+            self.registry
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .start(session_handle.as_str(), &available, capture_id.as_deref())
+        });
         match result {
             Ok(sources) => {
                 let streams: Vec<(u32, Options<'static>)> = sources
@@ -535,6 +598,31 @@ mod tests {
     }
 
     #[test]
+    fn chooser_selects_only_an_advertised_container_and_cancel_is_closed() {
+        let program = std::env::temp_dir().join(format!("cellward-chooser-{}", std::process::id()));
+        std::fs::write(&program, "#!/bin/sh\nprintf 'two\\n'\n").unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        let available = [
+            Source::new(1, 1, "one").unwrap(),
+            Source::new(2, 2, "two").unwrap(),
+        ];
+        assert_eq!(
+            choose_capture_id(&available, false, None, Some(&program)).unwrap(),
+            Some("two".to_owned())
+        );
+        assert_eq!(
+            choose_capture_id(&available, false, None, None),
+            Err(Error::AmbiguousSource)
+        );
+        assert_eq!(
+            choose_capture_id(&available, false, Some("missing"), Some(&program)),
+            Ok(Some("missing".to_owned()))
+        );
+    }
+
+    #[test]
     fn pw_dump_keeps_only_complete_capture_sources() {
         let dump = r#"[
             {"id":7,"type":"PipeWire:Interface:Node","info":{"props":{"object.serial":41,"cellward.capture.id":"work"}}},
@@ -665,10 +753,22 @@ mod tests {
             .unwrap();
         let address = address.trim().to_owned();
         let registry = Arc::new(Mutex::new(Registry::default()));
+        let chooser =
+            std::env::temp_dir().join(format!("cellward-impl-chooser-{}", std::process::id()));
+        std::fs::write(&chooser, "#!/bin/sh\nprintf 'two\\n'\n").unwrap();
+        let mut permissions = std::fs::metadata(&chooser).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(&chooser, permissions).unwrap();
         let portal = ImplPortal::new(
             registry.clone(),
-            Arc::new(|| vec![Source::new(7, 41, "work").unwrap()]),
-        );
+            Arc::new(|| {
+                vec![
+                    Source::new(7, 41, "work").unwrap(),
+                    Source::new(8, 42, "two").unwrap(),
+                ]
+            }),
+        )
+        .with_kdialog(chooser);
         let _server = zbus::blocking::connection::Builder::address(address.as_str())
             .unwrap()
             .name("org.freedesktop.impl.portal.desktop.cellward")
@@ -708,7 +808,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(code, 0);
-        let start = Options::from([("cellward_capture_id".to_owned(), Value::Str("work".into()))]);
+        let start = Options::new();
         let (code, results): (u32, HashMap<String, zbus::zvariant::OwnedValue>) = portal
             .call("Start", &(request, session.clone(), "test.app", "", start))
             .unwrap();
@@ -716,7 +816,8 @@ mod tests {
         let streams =
             Vec::<(u32, Options)>::try_from(Value::from(results["streams"].clone())).unwrap();
         assert_eq!(streams.len(), 1);
-        assert_eq!(u64::try_from(&streams[0].1["pipewire-serial"]).unwrap(), 41);
+        assert_eq!(u64::try_from(&streams[0].1["pipewire-serial"]).unwrap(), 42);
+        assert_eq!(String::try_from(&streams[0].1["id"]).unwrap(), "two");
         let session_proxy = Proxy::new(
             &client,
             "org.freedesktop.impl.portal.desktop.cellward",

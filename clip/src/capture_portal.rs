@@ -125,6 +125,10 @@ impl Registry {
         self.sessions.get(handle).map(|session| session.status)
     }
 
+    pub fn multiple(&self, handle: &str) -> Option<bool> {
+        self.sessions.get(handle).map(|session| session.multiple)
+    }
+
     pub fn streams(&self, handle: &str) -> Option<&[Source]> {
         self.sessions
             .get(handle)
