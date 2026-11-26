@@ -50,7 +50,16 @@ surface, subsurface and non-SHM limitations as a still capture.
 For a capture broker, the agent also has a raw-fd mode instead of MP4 encoding.
 Each frame has a `CFR1` header (dimensions, stride, format and generation),
 followed by tightly packed BGRA rows without stride padding. This is the
-transport for a future PipeWire source, not a desktop-capture protocol.
+broker's internal transport, not a desktop-capture protocol.
+
+A separate frame-menu item publishes the same root surface as the PipeWire node
+`cellward_capture`. GStreamer receives tightly packed BGRA frames;
+`rawvideoparse` assembles complete frames across short pipe reads, and
+`pipewiresink` supplies I420 to the consumer. The manifest pins `gst-launch` and
+every plugin instead of searching `PATH`. `tests/vm-niri-question.py` selects
+this item and receives frames with a real `pipewiresrc`. This is the lower level
+for OBS and a future `org.freedesktop.portal.ScreenCast` implementation, not yet
+a D-Bus portal with a container picker.
 
 Region and hover captures intentionally keep the composited screen view and use
 the manifest-pinned `grim`. In particular, niri's native screenshot action is
