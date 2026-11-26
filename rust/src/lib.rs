@@ -136,6 +136,7 @@ pub mod egress;
 pub mod enter;
 pub mod epoch;
 pub mod explain;
+pub mod file_chooser;
 pub mod flows;
 pub mod focus;
 pub mod folder_rules;
