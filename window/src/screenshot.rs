@@ -469,10 +469,15 @@ pub fn run(whole: bool) -> iced::Result {
         .is_err()
         || input.len() > LIMIT
     {
+        eprintln!("vpn-zone-window screenshot: input is unreadable or exceeds {LIMIT} bytes");
         std::process::exit(3);
     }
-    let Ok(pixels) = crate::thumb::full_png(&input) else {
-        std::process::exit(3)
+    let pixels = match crate::thumb::full_png(&input) {
+        Ok(pixels) => pixels,
+        Err(error) => {
+            eprintln!("vpn-zone-window screenshot: cannot decode input: {error}");
+            std::process::exit(3);
+        }
     };
     let handle =
         iced::widget::image::Handle::from_rgba(pixels.width, pixels.height, pixels.rgba.clone());

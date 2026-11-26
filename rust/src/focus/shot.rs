@@ -3,6 +3,7 @@ use super::*;
 use crate::clipboard_client::{Client, Reply, Request, Selection};
 use crate::clipboard_endpoint as endpoint;
 use crate::i18n::{self, Key, Language};
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::time::{Duration, Instant};
@@ -293,6 +294,119 @@ fn image_command(
     }
 }
 
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
+        }
+    }
+    !crc
+}
+
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for byte in bytes {
+        a = (a + u32::from(*byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    b << 16 | a
+}
+
+fn png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    output.extend_from_slice(kind);
+    output.extend_from_slice(data);
+    let mut checked = kind.to_vec();
+    checked.extend_from_slice(data);
+    output.extend_from_slice(&crc32(&checked).to_be_bytes());
+}
+
+fn rgba_png(
+    width: i32,
+    height: i32,
+    stride: i32,
+    format: i32,
+    bytes: &[u8],
+) -> Result<Vec<u8>, ()> {
+    if width <= 0 || height <= 0 || !matches!(format, 0 | 1) {
+        return Err(());
+    }
+    let row = width.checked_mul(4).ok_or(())?;
+    if stride < row {
+        return Err(());
+    }
+    let width = width as usize;
+    let height = height as usize;
+    let stride = stride as usize;
+    let required = stride.checked_mul(height).ok_or(())?;
+    if required > LIMIT || bytes.len() != required {
+        return Err(());
+    }
+    let mut raw = Vec::with_capacity((width * 4 + 1) * height);
+    for y in 0..height {
+        raw.push(0);
+        for x in 0..width {
+            let at = y * stride + x * 4;
+            let word = u32::from_ne_bytes(bytes[at..at + 4].try_into().map_err(|_| ())?);
+            raw.extend_from_slice(&[
+                (word >> 16) as u8,
+                (word >> 8) as u8,
+                word as u8,
+                if format == 0 { (word >> 24) as u8 } else { 255 },
+            ]);
+        }
+    }
+    let mut zlib = vec![0x78, 0x01];
+    let chunks = raw.chunks(65_535);
+    let count = chunks.len();
+    for (index, chunk) in chunks.enumerate() {
+        zlib.push(u8::from(index + 1 == count));
+        let len = chunk.len() as u16;
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(chunk);
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = Vec::new();
+    header.extend_from_slice(&(width as u32).to_be_bytes());
+    header.extend_from_slice(&(height as u32).to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    png_chunk(&mut png, b"IHDR", &header);
+    png_chunk(&mut png, b"IDAT", &zlib);
+    png_chunk(&mut png, b"IEND", &[]);
+    Ok(png)
+}
+
+fn proxy_capture(path: &OsStr) -> Result<Vec<u8>, ()> {
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        eprintln!("window-screenshot: cannot open the proxy memfd: {error}");
+    })?;
+    let mut header = [0; 16];
+    file.read_exact(&mut header).map_err(|error| {
+        eprintln!("window-screenshot: cannot read the proxy header: {error}");
+    })?;
+    let values: Vec<i32> = header
+        .chunks_exact(4)
+        .map(|word| i32::from_ne_bytes(word.try_into().unwrap()))
+        .collect();
+    let [width, height, stride, format] = values.try_into().map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    file.take(LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            eprintln!("window-screenshot: cannot read the proxy pixels: {error}");
+        })?;
+    rgba_png(width, height, stride, format, &bytes).map_err(|_| {
+        eprintln!(
+            "window-screenshot: invalid proxy image: {width}x{height}, stride {stride}, format {format}, {} bytes",
+            bytes.len()
+        );
+    })
+}
+
 fn exchange(client: &mut Client, request: Request<'_>) -> Result<Reply, ()> {
     client
         .start(Selection::Clipboard, request, Instant::now())
@@ -310,30 +424,44 @@ fn exchange(client: &mut Client, request: Request<'_>) -> Result<Reply, ()> {
 }
 
 pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
-    if args.len() != 2 {
-        return 2;
-    }
-    let Some(pid) = args[0]
+    let (pid, mode, proxy_fd) = match args {
+        [pid, mode] => (pid, mode, None),
+        [pid, mode, flag, path] if flag == "--proxy-fd" => (pid, mode, Some(path)),
+        _ => return 2,
+    };
+    let Some(pid) = pid
         .to_str()
         .and_then(|s| s.parse::<i32>().ok())
         .filter(|p| *p > 1)
     else {
         return 2;
     };
-    let Some(mode @ ("window" | "area" | "hover")) = args[1].to_str() else {
+    let Some(mode @ ("window" | "area" | "hover")) = mode.to_str() else {
         return 2;
     };
     let attempt = (|| -> Result<bool, ()> {
         let owner = crate::sys::pidfd_open(pid).ok_or(())?;
-        let scope = private_clipboard_scope(tools, pid).ok_or(())?;
-        let target = paste::Target::focused(pid).ok_or(())?;
-        let grim = tools.grim.as_ref().filter(|p| p.is_absolute()).ok_or(())?;
-        let geometry = (mode == "window")
-            .then(|| window_geometry(target))
-            .flatten();
-        let png = if mode == "window" {
-            capture_window(grim, target, geometry.as_deref(), owner.as_fd())?
+        let scope = private_clipboard_scope(tools, pid)
+            .ok_or_else(|| eprintln!("window-screenshot: no private clipboard scope"))?;
+        let target = if proxy_fd.is_some() {
+            None
         } else {
+            Some(
+                paste::Target::focused(pid)
+                    .ok_or_else(|| eprintln!("window-screenshot: no focused target"))?,
+            )
+        };
+        let geometry = (proxy_fd.is_none() && mode == "window")
+            .then(|| window_geometry(target?))
+            .flatten();
+        let png = if let Some(path) = proxy_fd {
+            proxy_capture(path)
+                .map_err(|_| eprintln!("window-screenshot: cannot decode the proxy memfd"))?
+        } else if mode == "window" {
+            let grim = tools.grim.as_ref().filter(|p| p.is_absolute()).ok_or(())?;
+            capture_window(grim, target.ok_or(())?, geometry.as_deref(), owner.as_fd())?
+        } else {
+            let grim = tools.grim.as_ref().filter(|p| p.is_absolute()).ok_or(())?;
             let mut capture = Command::new(grim);
             capture.args(["-t", "png", "-"]);
             image_command(capture, None, Duration::from_secs(5), owner.as_fd())?.ok_or(())?
@@ -345,18 +473,26 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
             if mode == "window" {
                 editor.arg("--whole");
             }
-            match image_command(editor, Some(png), Duration::from_secs(90), owner.as_fd())? {
+            let edited = image_command(editor, Some(png), Duration::from_secs(90), owner.as_fd())
+                .map_err(|_| eprintln!("window-screenshot: the image editor failed"))?;
+            match edited {
                 Some(png) => png,
                 None => return Ok(false),
             }
         };
         if !endpoint::alive(owner.as_fd()) {
+            eprintln!("window-screenshot: the launch exited");
             return Err(());
         }
         let runtime = crate::broker::runtime_dir();
-        let bound = endpoint::lookup(&runtime, &scope).map_err(|_| ())?;
-        let mut client = Client::new(bound.data).map_err(|_| ())?;
-        let Reply::Begun(epoch) = exchange(&mut client, Request::BeginCapture { user_copy: true })?
+        let bound = endpoint::lookup(&runtime, &scope).map_err(|_| {
+            eprintln!("window-screenshot: cannot find the private clipboard");
+        })?;
+        let mut client = Client::new(bound.data).map_err(|_| {
+            eprintln!("window-screenshot: cannot connect to the private clipboard");
+        })?;
+        let Reply::Begun(epoch) = exchange(&mut client, Request::BeginCapture { user_copy: true })
+            .map_err(|_| eprintln!("window-screenshot: cannot begin the clipboard capture"))?
         else {
             return Err(());
         };
@@ -373,7 +509,9 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
                 return Err(());
             }
         }
-        let _ = target.restore();
+        if let Some(target) = target {
+            let _ = target.restore();
+        }
         crate::dialog::notify(
             &tools.notify_send,
             None,
@@ -586,5 +724,22 @@ mod tests {
             args(&window_command(Path::new("/grim"), sway, Some("1,2 3x4"), false).unwrap()),
             ["-g", "1,2 3x4", "-t", "png", "-"]
         );
+    }
+
+    #[test]
+    fn wayland_shm_becomes_png_without_a_compositor() {
+        let png = rgba_png(1, 1, 4, 0, &[0x11, 0x22, 0x33, 0x44]).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(u32::from_be_bytes(png[8..12].try_into().unwrap()), 13);
+        assert_eq!(&png[12..16], b"IHDR");
+        assert_eq!(&png[37..41], b"IDAT");
+        assert!(png.windows(12).any(|part| {
+            part == [
+                0x78, 0x01, 0x01, 0x05, 0x00, 0xfa, 0xff, 0x00, 0x33, 0x22, 0x11, 0x44,
+            ]
+        }));
+        assert!(rgba_png(1, 1, 3, 0, &[0; 3]).is_err());
+        assert!(rgba_png(i32::MAX, 1, 4, 0, &[]).is_err());
+        assert!(rgba_png(1, 1, 4, 99, &[0; 4]).is_err());
     }
 }

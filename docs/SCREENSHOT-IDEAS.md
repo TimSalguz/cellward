@@ -24,24 +24,27 @@ or to the desktop clipboard, and no screen-capture protocol is granted to the
 container. A dead source, failed capture, oversized image, editor cancellation
 or broker refusal must preserve the previous selection.
 
-The visible-window path currently has verified geometry only through Sway IPC.
-Other compositors use the region editor on a full frozen frame rather than
-guessing a window position. In particular, niri's native screenshot action is
+For a launch through the current proxy, `▧` reads the selected window's
+committed root `wl_surface` directly. The SHM pool and attached `wl_buffer`
+stay owned by the proxy; the host editor receives a bounded memfd copy, not a
+compositor screenshot. This path needs no focused-window query, output
+geometry, crop or screen-capture protocol, and Cellward's own frame is not part
+of the source surface. `tests/vm-niri-question.py` checks this path and rejects
+frame-coloured pixels in the captured image.
+
+This first direct backend accepts ARGB8888 and XRGB8888 SHM buffers within the
+documented size bounds. An unsupported buffer fails closed: it never falls back
+to the desktop. The root surface does not include separately owned popups or a
+composition of application subsurfaces. Those cases, non-SHM buffers and alpha
+presentation remain follow-up work, not claimed support.
+
+Region and hover captures intentionally keep the composited screen view and use
+the manifest-pinned `grim`. In particular, niri's native screenshot action is
 unsuitable for private copies because it also writes the desktop clipboard.
-The host tools manifest pins `grim`; older manifests without it fail closed.
-
-Current captures read the composited output, not application buffers from the
-proxy. Even the visible-window mode crops an output rectangle. Compositor opacity,
-blur, shadows, overlapping windows and background visible through transparency
-can therefore appear in the result. Cropping does not remove those pixels.
-
-The desired isolated-window mode must capture only the application's content
-and its owned popups, without the desktop, unrelated windows, Cellward frame or
-compositor decorations. Desktop-only opacity must not expose background pixels.
-If application content itself contains alpha, preserve it explicitly or flatten
-it against a chosen solid background; never fill it from the desktop. Verify
-this with a high-contrast unrelated window behind a semitransparent target.
-Ordinary screen-region capture intentionally keeps the composited screen view.
+The desired complete isolated-window mode must additionally capture owned
+popups and subsurfaces without the desktop, unrelated windows, Cellward frame
+or compositor decorations. Application alpha must be preserved explicitly or
+flattened against a chosen solid background, never against desktop pixels.
 Niri's clipboard behaviour is documented in its
 [screenshot actions](https://github.com/niri-wm/niri/blob/main/docs/wiki/Configuration%3A-Key-Bindings.md#screenshot-screenshot-screen-screenshot-window).
 

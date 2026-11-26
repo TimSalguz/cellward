@@ -853,7 +853,8 @@ fn surface_size(s: &Committed) -> Option<(i32, i32)> {
     if let Some(dest) = s.destination {
         return Some(dest);
     }
-    let (bw, bh) = s.buffer?;
+    let attached = s.buffer.as_ref()?;
+    let (bw, bh) = (attached.width, attached.height);
     if let Some(src) = s.source {
         return Some(src);
     }
@@ -953,22 +954,55 @@ pub(crate) enum Ask {
 /// Asks the proxy's loop has not sent yet. A few at most: a click is one,
 /// and the proxy sends them after every round of its loop.
 #[derive(Default)]
-pub(crate) struct Asks(RefCell<VecDeque<Ask>>);
+pub(crate) struct Asks {
+    queue: RefCell<VecDeque<Ask>>,
+    capture: RefCell<Option<Weak<RefCell<Window>>>>,
+}
 
 /// Asks kept at once; more in one round are not the person's clicks.
 const MAX_ASKS: usize = 4;
 
 impl Asks {
     fn push(&self, ask: Ask) {
-        let mut asks = self.0.borrow_mut();
+        let mut asks = self.queue.borrow_mut();
         if asks.len() < MAX_ASKS {
             asks.push_back(ask);
         }
     }
 
+    fn capture_window(&self, window: &Weak<RefCell<Window>>) {
+        *self.capture.borrow_mut() = Some(window.clone());
+    }
+
     /// The asks to send, in their order; none are left.
     pub(crate) fn take(&self) -> Vec<Ask> {
-        self.0.borrow_mut().drain(..).collect()
+        self.queue.borrow_mut().drain(..).collect()
+    }
+
+    pub(crate) fn write_capture(&self, output: OwnedFd) -> bool {
+        use std::io::Write;
+
+        let Some(window) = self.capture.borrow().as_ref().and_then(Weak::upgrade) else {
+            return false;
+        };
+        let Ok(window) = window.try_borrow() else {
+            return false;
+        };
+        let Some(pixels) = root_pixels(&window.root) else {
+            return false;
+        };
+        let mut output = std::fs::File::from(output);
+        let format = match pixels.format {
+            WlShmFormat::ARGB8888 => 0,
+            WlShmFormat::XRGB8888 => 1,
+            _ => return false,
+        };
+        for value in [pixels.width, pixels.height, pixels.stride, format] {
+            if output.write_all(&value.to_ne_bytes()).is_err() {
+                return false;
+            }
+        }
+        output.write_all(&pixels.bytes).is_ok()
     }
 }
 
@@ -3363,7 +3397,10 @@ impl Window {
             Button::Network => f.asks.push(Ask::Network),
             Button::Fullscreen => self.toggle_fullscreen(),
             Button::InWindow => self.toggle_in_window(f),
-            Button::ScreenshotWindow => f.asks.push(Ask::ScreenshotWindow),
+            Button::ScreenshotWindow => {
+                f.asks.capture_window(&self.me);
+                f.asks.push(Ask::ScreenshotWindow);
+            }
             Button::ScreenshotArea => f.asks.push(Ask::ScreenshotArea),
             Button::ScreenshotHover => screenshot::arm(self.root.clone()),
         }
@@ -4850,15 +4887,21 @@ enum Layer {
 /// committed.
 #[derive(Default)]
 struct Pending {
-    buffer: Option<Option<(i32, i32)>>,
+    buffer: Option<Option<Attached>>,
     scale: Option<i32>,
     transform: Option<u32>,
     destination: Option<Option<(i32, i32)>>,
     source: Option<Option<(i32, i32)>>,
 }
 
+struct Attached {
+    object: Option<Rc<WlBuffer>>,
+    width: i32,
+    height: i32,
+}
+
 struct Committed {
-    buffer: Option<(i32, i32)>,
+    buffer: Option<Attached>,
     scale: i32,
     transform: u32,
     destination: Option<(i32, i32)>,
@@ -4977,7 +5020,11 @@ impl WlSurfaceHandler for Surface {
         self.pending.buffer = Some(buffer.and_then(|b| {
             b.try_get_handler_ref::<BufferSize>()
                 .ok()
-                .map(|s| (s.width, s.height))
+                .map(|s| Attached {
+                    object: Some(b.clone()),
+                    width: s.width,
+                    height: s.height,
+                })
         }));
     }
 
@@ -5615,15 +5662,29 @@ impl XdgToplevelDragV1Handler for Drag {
 // Only for a window without a geometry of its own: its root surface's size is
 // its buffer's. Kept on the buffer as its handler, so it goes with it.
 
+#[derive(Clone)]
+struct ShmBuffer {
+    pool: Rc<OwnedFd>,
+    pool_size: i32,
+    offset: i32,
+    stride: i32,
+    format: WlShmFormat,
+}
+
 struct BufferSize {
     width: i32,
     height: i32,
+    shm: Option<ShmBuffer>,
 }
 
 impl WlBufferHandler for BufferSize {}
 
 fn sized(buffer: &Rc<WlBuffer>, width: i32, height: i32) {
-    buffer.set_handler(BufferSize { width, height });
+    sized_with_storage(buffer, width, height, None);
+}
+
+fn sized_with_storage(buffer: &Rc<WlBuffer>, width: i32, height: i32, shm: Option<ShmBuffer>) {
+    buffer.set_handler(BufferSize { width, height, shm });
 }
 
 struct Shm;
@@ -5637,11 +5698,17 @@ impl WlShmHandler for Shm {
         size: i32,
     ) {
         slf.send_create_pool(id, fd, size);
-        id.set_handler(Pool);
+        id.set_handler(Pool {
+            fd: fd.clone(),
+            size,
+        });
     }
 }
 
-struct Pool;
+struct Pool {
+    fd: Rc<OwnedFd>,
+    size: i32,
+}
 
 impl WlShmPoolHandler for Pool {
     fn handle_create_buffer(
@@ -5655,8 +5722,71 @@ impl WlShmPoolHandler for Pool {
         format: WlShmFormat,
     ) {
         slf.send_create_buffer(id, offset, width, height, stride, format);
-        sized(id, width, height);
+        sized_with_storage(
+            id,
+            width,
+            height,
+            Some(ShmBuffer {
+                pool: self.fd.clone(),
+                pool_size: self.size,
+                offset,
+                stride,
+                format,
+            }),
+        );
     }
+}
+
+pub(crate) struct ShmPixels {
+    pub width: i32,
+    pub height: i32,
+    pub stride: i32,
+    pub format: WlShmFormat,
+    pub bytes: Vec<u8>,
+}
+
+fn read_shm(width: i32, height: i32, shm: &ShmBuffer) -> Option<ShmPixels> {
+    const MAX_BYTES: usize = 256 << 20;
+    let width = usize::try_from(width).ok()?;
+    let height = usize::try_from(height).ok()?;
+    let stride = usize::try_from(shm.stride).ok()?;
+    let row = width.checked_mul(4)?;
+    if row == 0 || stride < row {
+        return None;
+    }
+    let len = stride.checked_mul(height)?;
+    let offset = usize::try_from(shm.offset).ok()?;
+    let end = offset.checked_add(len)?;
+    let pool_size = usize::try_from(shm.pool_size).ok()?;
+    if len > MAX_BYTES || end > pool_size {
+        return None;
+    }
+    let mut bytes = vec![0; len];
+    // The pool is held by the buffer's handler for this read; the offset and
+    // complete extent were checked against its declared size.
+    use std::os::unix::fs::FileExt;
+    std::fs::File::from(shm.pool.try_clone().ok()?)
+        .read_exact_at(&mut bytes, offset as u64)
+        .ok()?;
+    Some(ShmPixels {
+        width: width as i32,
+        height: height as i32,
+        stride: shm.stride,
+        format: shm.format,
+        bytes,
+    })
+}
+
+pub(crate) fn root_pixels(root: &Weak<WlSurface>) -> Option<ShmPixels> {
+    let root = root.upgrade()?;
+    let surface = root.try_get_handler_ref::<Surface>().ok()?;
+    let attached = surface.committed.buffer.as_ref()?;
+    let buffer = attached
+        .object
+        .as_ref()?
+        .try_get_handler_ref::<BufferSize>()
+        .ok()?;
+    read_shm(attached.width, attached.height, buffer.shm.as_ref()?)
 }
 
 struct Dmabuf;
@@ -7680,7 +7810,11 @@ mod tests {
     fn a_surface_without_geometry_is_its_buffer_scaled_turned_or_viewported() {
         let mut c = Committed::default();
         assert_eq!(surface_size(&c), None, "no buffer, no size");
-        c.buffer = Some((1200, 800));
+        c.buffer = Some(Attached {
+            object: None,
+            width: 1200,
+            height: 800,
+        });
         assert_eq!(surface_size(&c), Some((1200, 800)));
         c.scale = 2;
         assert_eq!(surface_size(&c), Some((600, 400)));
@@ -7698,6 +7832,26 @@ mod tests {
             Some((1000, 700)),
             "a destination is the size even before the buffer's is known"
         );
+    }
+
+    #[test]
+    fn a_shm_pool_is_read_only_within_its_checked_extent() {
+        let path = std::env::temp_dir().join(format!("cellward-shm-{}", std::process::id()));
+        let input: Vec<u8> = (0..80).collect();
+        std::fs::write(&path, input).unwrap();
+        let pool = std::fs::File::open(&path).unwrap();
+        let shm = ShmBuffer {
+            pool: Rc::new(pool.into()),
+            pool_size: 80,
+            offset: 4,
+            stride: 32,
+            format: WlShmFormat::XRGB8888,
+        };
+        let pixels = read_shm(2, 2, &shm).unwrap();
+        assert_eq!(pixels.bytes, (4..68).collect::<Vec<u8>>());
+        assert!(read_shm(9, 2, &shm).is_none());
+        assert!(read_shm(2, 3, &shm).is_none());
+        std::fs::remove_file(path).unwrap();
     }
 
     /// The dropdown hangs from the ≡'s cell, in the geometry the compositor

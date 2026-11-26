@@ -149,7 +149,7 @@
 //! ([`ASK_NO`], [`ASK_YES`]), or that there was no usable window
 //! ([`ASK_WINDOW`], [`ASK_NOWHERE`]). The filter is as it was.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
@@ -410,6 +410,11 @@ const CLIPBOARD_REFUSED: u8 = b'N';
 const SCREENSHOT_WINDOW: u8 = b'I';
 const SCREENSHOT_AREA: u8 = b'J';
 const SCREENSHOT_HOVER: u8 = b'K';
+/// Supervisor → proxy: write the selected root surface into this memfd.
+const CAPTURE: u8 = b'P';
+/// Proxy → supervisor: a complete root-surface image, or an unsupported buffer.
+const CAPTURE_OK: u8 = b'Q';
+const CAPTURE_ERR: u8 = b'R';
 /// A frame's line at most.
 const MAX_FRAME_ARG: usize = 512;
 
@@ -1754,6 +1759,30 @@ impl Proxy {
         }
     }
 
+    fn capture_handshake(&self) -> Option<(OwnedFd, String)> {
+        // SAFETY: the new descriptor is owned here; the proxy gets a duplicate
+        // over the private channel and writes only the captured root surface.
+        let fd = unsafe { libc::memfd_create(c"cellward-capture".as_ptr(), libc::MFD_CLOEXEC) };
+        if fd < 0 {
+            return None;
+        }
+        // SAFETY: just returned by memfd_create.
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut channel = self.channel.as_ref()?;
+        sys::send_with_fds(channel.as_raw_fd(), &[CAPTURE], &[fd.as_raw_fd()]).ok()?;
+        let mut fds = [pollfd(channel.as_raw_fd())];
+        if poll(&mut fds, 5_000).ok()? == 0 {
+            return None;
+        }
+        let mut answer = [0];
+        channel.read_exact(&mut answer).ok()?;
+        if answer[0] != CAPTURE_OK {
+            return None;
+        }
+        let path = format!("/proc/{}/fd/{}", std::process::id(), fd.as_raw_fd());
+        Some((fd, path))
+    }
+
     /// A click on the frame's ≡ or ⇄ (`crate::wl_frame`): the window menu of
     /// this launch, for the person to choose in — `cellward window-menu
     /// --pid <this process>`, and for ⇄ straight to the restart with a
@@ -1770,6 +1799,23 @@ impl Proxy {
     /// writing the byte in a loop gets one `systemd-run`, not a flood of
     /// them (review 2026-09-27).
     fn ask(&self, ask: Ask) {
+        if ask == Ask::ScreenshotWindow {
+            let Some((fd, path)) = self.capture_handshake() else {
+                eprintln!("wl-sandbox: root-surface capture is unavailable for this buffer");
+                return;
+            };
+            *self.shots.capture.borrow_mut() = Some(fd);
+            return self.start_unit(&self.shots, "screenshot preview", |tools, manifest| {
+                menu_capture_argv(
+                    &tools.systemd_run,
+                    &tools.core,
+                    manifest,
+                    self.display.as_deref(),
+                    std::process::id(),
+                    Some(path),
+                )
+            });
+        }
         let shot = matches!(
             ask,
             Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover
@@ -1880,6 +1926,7 @@ impl Proxy {
 #[derive(Default)]
 struct MenuStart {
     pid: Cell<Option<libc::pid_t>>,
+    capture: RefCell<Option<OwnedFd>>,
 }
 
 impl MenuStart {
@@ -1934,6 +1981,7 @@ impl MenuStart {
     fn reaped(&self, pid: libc::pid_t) {
         if self.pid.get() == Some(pid) {
             self.pid.set(None);
+            self.capture.borrow_mut().take();
         }
     }
 }
@@ -2008,6 +2056,29 @@ pub(crate) fn menu_argv(
         },
         verb,
     )
+}
+
+fn menu_capture_argv(
+    systemd_run: &Path,
+    core: &Path,
+    manifest: &OsStr,
+    display: Option<&OsStr>,
+    pid: u32,
+    capture: Option<String>,
+) -> Vec<OsString> {
+    let mut argv = menu_argv(
+        systemd_run,
+        core,
+        manifest,
+        display,
+        pid,
+        Ask::ScreenshotWindow,
+    );
+    if let Some(path) = capture {
+        argv.push("--proxy-fd".into());
+        argv.push(path.into());
+    }
+    argv
 }
 
 /// The command that tells the person of a request for the focus of the
@@ -3060,6 +3131,14 @@ fn serve(
                             crate::wl_frame::typing::start(seq, token, timing, mode, &text, fd);
                         }
                     },
+                    Answer::Capture(output) => {
+                        let ok = output.is_some_and(|output| asks.write_capture(output));
+                        let _ = sys::send_with_fds(
+                            c.as_raw_fd(),
+                            &[if ok { CAPTURE_OK } else { CAPTURE_ERR }],
+                            &[],
+                        );
+                    }
                     // The frame changed on the fly: every connection's
                     // windows laid anew, and the next connection's too.
                     Answer::Frame(frame, pixel, title) => {
@@ -3191,6 +3270,7 @@ enum Answer {
     Clipboard(crate::clipboard_endpoint::Bound),
     ClipboardFailed,
     TypeControl(u64, crate::type_input::Request, Option<OwnedFd>),
+    Capture(Option<OwnedFd>),
     /// The frame changed on the fly, and the memfd of its new colours when
     /// they, the look or the title's mode changed.
     Frame(Frame, Option<OwnedFd>, Option<String>),
@@ -3232,6 +3312,7 @@ fn answer(channel: &UnixStream) -> Answer {
         Ok((1, _, false)) if byte[0] == CLIPBOARD_REBOUND || byte[0] == CLIPBOARD_REFUSED => {
             Answer::ClipboardFailed
         }
+        Ok((1, mut fds, _)) if byte[0] == CAPTURE => Answer::Capture(fds.pop()),
         Ok((1, mut fds, _)) if byte[0] == TYPE_CONTROL => {
             let mut head = [0u8; 10];
             if !recv_exact(channel.as_raw_fd(), &mut head) {
