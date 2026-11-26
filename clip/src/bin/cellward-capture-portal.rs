@@ -1,0 +1,84 @@
+use clipstore::capture_dbus::{self, Portal};
+use clipstore::capture_portal::Registry;
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+fn run(args: &[OsString]) -> u8 {
+    let mut pw_dump = None;
+    let mut address = None;
+    let mut name = "org.cellward.Capture";
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        let Some(value) = words.next() else {
+            eprintln!("cellward-capture-portal: {word:?} needs a value");
+            return 2;
+        };
+        match word.to_str() {
+            Some("--pw-dump") => pw_dump = Some(PathBuf::from(value)),
+            Some("--address") => {
+                let Some(value) = value.to_str() else {
+                    eprintln!("cellward-capture-portal: --address must be UTF-8");
+                    return 2;
+                };
+                address = Some(value.to_owned());
+            }
+            Some("--name") => {
+                let Some(value) = value.to_str().filter(|value| !value.is_empty()) else {
+                    eprintln!("cellward-capture-portal: invalid --name");
+                    return 2;
+                };
+                name = value;
+            }
+            _ => {
+                eprintln!("cellward-capture-portal: unknown option {word:?}");
+                return 2;
+            }
+        }
+    }
+    let Some(pw_dump) = pw_dump.filter(|path| path.is_absolute()) else {
+        eprintln!("cellward-capture-portal: an absolute --pw-dump is required");
+        return 2;
+    };
+    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    else {
+        eprintln!("cellward-capture-portal: XDG_RUNTIME_DIR is required");
+        return 2;
+    };
+    let registry = Arc::new(Mutex::new(Registry::default()));
+    let available = Arc::new(move || {
+        capture_dbus::sources(&pw_dump).unwrap_or_else(|error| {
+            eprintln!("cellward-capture-portal: cannot enumerate sources: {error}");
+            Vec::new()
+        })
+    });
+    let portal = Portal::new(registry, available, runtime.join("pipewire-0"));
+    let builder = match &address {
+        Some(address) => zbus::blocking::connection::Builder::address(address.as_str()),
+        None => zbus::blocking::connection::Builder::session(),
+    };
+    let connection = builder.and_then(|builder| {
+        builder
+            .name(name)?
+            .serve_at(capture_dbus::desktop_path(), portal)
+    });
+    let _connection = match connection.and_then(|builder| builder.build()) {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("cellward-capture-portal: cannot start D-Bus backend: {error}");
+            return 1;
+        }
+    };
+    eprintln!("cellward-capture-portal: {name} is ready");
+    loop {
+        std::thread::park();
+    }
+}
+
+fn main() {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    std::process::exit(i32::from(run(&args)));
+}

@@ -94,6 +94,8 @@ mod segment;
 pub mod broker;
 /// Scoped socket-pair transport for the active-selection model (not wired to UI yet).
 pub mod broker_transport;
+/// D-Bus ScreenCast v6 adapter.
+pub mod capture_dbus;
 /// ScreenCast lifecycle and source identity, before D-Bus/PipeWire adapters.
 pub mod capture_portal;
 /// Nonblocking FD client; graphic adapters are still a separate integration step.

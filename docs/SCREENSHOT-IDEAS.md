@@ -59,9 +59,17 @@ without one. GStreamer receives tightly packed BGRA frames;
 `rawvideoparse` assembles complete frames across short pipe reads, and
 `pipewiresink` supplies I420 to the consumer. The manifest pins `gst-launch` and
 every plugin instead of searching `PATH`. `tests/vm-niri-question.py` selects
-this item and receives frames with a real `pipewiresrc`. This is the lower level
-for OBS and a future `org.freedesktop.portal.ScreenCast` implementation, not yet
-a D-Bus portal with a container picker.
+this item and receives frames with a real `pipewiresrc`.
+
+`cellward-capture-portal` already implements `org.freedesktop.portal.ScreenCast`
+v6: session and Request.Response lifecycles, `pipewire-serial`,
+`OpenPipeWireRemote` and `Session.Close`. One active source is accepted directly;
+several require `multiple` or an exact `cellward_capture_id`, never an implicit
+first container. `pw-dump` output is capped at 4 MiB and both its path and
+`gst-launch` are pinned rather than found through `PATH`. The end-to-end test
+uses a private `dbus-daemon`, never the system portal. The source is still
+started from the frame first; a container picker and activation through
+xdg-desktop-portal are the next stage.
 
 Region and hover captures intentionally keep the composited screen view and use
 the manifest-pinned `grim`. In particular, niri's native screenshot action is

@@ -43,5 +43,9 @@ zbus = { version = "5.19", default-features = false, features = ["async-io", "bl
 name = "cellward-clip"
 path = "src/bin/cellward-clip.rs"
 
+[[bin]]
+name = "cellward-capture-portal"
+path = "src/bin/cellward-capture-portal.rs"
+
 [profile.release]
 debug = false
