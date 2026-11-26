@@ -943,9 +943,14 @@ fn private_clipboard_scope(tools: &Tools, pid: i32) -> Option<String> {
         .iter()
         .map(|w| Some(OsString::from(std::str::from_utf8(w).ok()?)))
         .collect::<Option<_>>()?;
-    let (scope, _, _) = crate::wl_sandbox::Args::parse(&args)
-        .ok()?
-        .clipboard_scope?;
+    let parsed = crate::wl_sandbox::Args::parse(&args).ok()?;
+    let scope = match parsed.clipboard_scope {
+        Some((scope, _, _)) => scope,
+        None if parsed.zone == crate::wl_sandbox::NO_ZONE && parsed.proxy => {
+            crate::wl_sandbox::unconfined_clipboard_scope_id(pid)
+        }
+        None => return None,
+    };
     use std::os::fd::AsFd;
     crate::clipboard_endpoint::alive(held.as_fd()).then_some(scope)
 }

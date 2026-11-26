@@ -68,12 +68,61 @@ with subtest("network switch preserves the same active clipboard"):
             assert clipboard_body("vmclip", name, mime, "host") == body
     assert json.loads(machine.succeed("cat /tmp/clip-host.json"))["types"] == []
 
+with subtest("unconfined launches join the real-home clipboard without a filesystem sandbox"):
+    alice("systemctl --user stop clip-owner.service")
+    clipboard_start(
+        "clip-main-owner",
+        f"cellward run host -- python3 {clipboard_fixtures}/private-clipboard-smoke.py owner",
+    )
+    clipboard_start(
+        "clip-main-reader",
+        f"cellward run host -- {reader} /tmp/clip-main.json",
+    )
+    import time
+    deadline = time.monotonic() + 60
+    while True:
+        current = clipboard_status("main", "clip-main", "host") or {}
+        if all(current.get("bodies", {}).get(mime) == body for mime, body in expected.items()):
+            break
+        assert time.monotonic() < deadline, current
+        machine.sleep(1)
+    clipboard_start(
+        "clip-main-terminal",
+        "cellward run host -- foot --app-id clip-main-terminal "
+        "sh -c 'cat > /tmp/clip-main-input'",
+    )
+    mapped("clip-main-terminal")
+    machine.sleep(2)
+    alice(f"WAYLAND_DISPLAY={display} python3 {clipboard_fixtures}/clipboard-reverse-smoke.py paste $(cat {clipboard_fixtures}/xkbcommon.path)")
+    machine.wait_until_succeeds(
+        "su -l alice -c "
+        + shlex.quote(
+            "export XDG_RUNTIME_DIR=/run/user/1000; "
+            "cellward run host -- grep -qF 'synthetic private clipboard' /tmp/clip-main-input"
+        ),
+        timeout=30,
+    )
+    alice("systemctl --user stop clip-main-terminal.service")
+    clipboard_start(
+        "clip-unconfined",
+        "cellward run unconfined -- foot --app-id clip-unconfined "
+        "sh -c 'cat > /tmp/clip-unconfined-input'",
+    )
+    mapped("clip-unconfined")
+    machine.sleep(2)
+    alice(f"WAYLAND_DISPLAY={display} python3 {clipboard_fixtures}/clipboard-reverse-smoke.py paste $(cat {clipboard_fixtures}/xkbcommon.path)")
+    machine.wait_until_succeeds(
+        "grep -qF 'synthetic private clipboard' /tmp/clip-unconfined-input",
+        timeout=30,
+    )
+    machine.succeed("test -f /tmp/clip-unconfined-input")
+
 with subtest("disabling history leaves active isolation enabled and no disk store"):
     # No history service exists in this VM: the active broker is independent.
     alice("systemctl --user is-active cellward-clipboard.service")
     machine.fail("su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active cellward-clip.service'")
     machine.fail(f"test -e {state}/.clipboard")
 
-for unit in ("clip-owner", "clip-same", "clip-primary", "clip-other", "clip-observer"):
+for unit in ("clip-owner", "clip-same", "clip-primary", "clip-other", "clip-observer", "clip-main-owner", "clip-main-reader", "clip-main-terminal", "clip-unconfined"):
     alice(f"systemctl --user stop {unit}.service")
 print("PASS: actual default container launches, native CLIPBOARD/PRIMARY, host/foreign isolation, network switch, history disabled")

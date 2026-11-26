@@ -1101,6 +1101,10 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                 wrap.push(name.into());
             }
         }
+        if zone == UNCONFINED && wayland_proxy_wanted(tools, &appbin, unasked) {
+            wrap.push("--frame".into());
+            wrap.push("000000:0:off".into());
+        }
         // What becomes of the program's asking for the focus
         // (`crate::wl_focus`): its container's policy. `input`, the
         // default, is wl-sandbox's own and not said.
@@ -1751,16 +1755,7 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
     // and history name are not clipboard identities. Headless launches have
     // no compositor/selection to isolate.
     if has_display() {
-        if let (Some(id), Some(wrapped)) = (&instance_id, &mut compositor_wrap) {
-            let owner = crate::instance::up(&tools.state, id)
-                .and_then(|pid| crate::sys::process_stamp(pid).map(|stamp| (pid, stamp)));
-            let Some((pid, stamp)) = owner else {
-                refuse(
-                    tools,
-                    "Контейнер остановился до подключения приватного буфера обмена",
-                );
-                return EXIT_NOT_STARTED;
-            };
+        if compositor_wrap.is_some() {
             let runtime = crate::broker::runtime_dir();
             if !crate::clipboard_endpoint::path(&runtime).exists() {
                 let started = Command::new(&tools.systemctl)
@@ -1781,6 +1776,17 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
             }
+        }
+        if let (Some(id), Some(wrapped)) = (&instance_id, &mut compositor_wrap) {
+            let owner = crate::instance::up(&tools.state, id)
+                .and_then(|pid| crate::sys::process_stamp(pid).map(|stamp| (pid, stamp)));
+            let Some((pid, stamp)) = owner else {
+                refuse(
+                    tools,
+                    "Запуск остановился до подключения приватного буфера обмена",
+                );
+                return EXIT_NOT_STARTED;
+            };
             wrapped.splice(
                 wrapped.len() - 1..wrapped.len() - 1,
                 [

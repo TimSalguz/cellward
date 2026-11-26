@@ -131,6 +131,10 @@ pub fn session_compositor() {
 /// The directory for launches that enter no zone.
 pub const NO_ZONE: &str = "unconfined";
 
+pub(crate) fn unconfined_clipboard_scope_id(pid: i32) -> String {
+    format!("main:u{pid}")
+}
+
 /// The descriptor a launch may carry for whoever wants to hear of the
 /// program's first window (`crate::picker`'s hand-over): its number, in this
 /// variable, and [`OPENED_FD`] is the one the picker uses.
@@ -875,7 +879,9 @@ pub fn run(args: Args) -> u8 {
         forget_upstream(&upstream);
         return match refused {
             // Already confined: on the socket it came through, as before.
-            Refused::Nested if !args.proxy_required() => run_plain(&args.cmd),
+            Refused::Nested if !(args.proxy_required() || (args.zone == NO_ZONE && args.proxy)) => {
+                run_plain(&args.cmd)
+            }
             Refused::Nested => not_started("a confined Wayland proxy is required"),
             Refused::Other(why) => {
                 eprintln!("wl-sandbox: {why} — the program is not started");
@@ -898,13 +904,21 @@ pub fn run(args: Args) -> u8 {
         proxy_speaks = word.is_some();
         // Its instance's mark, for the clipboard by container (`crate::clip`):
         // the restricted sockets' directory is the instance's.
-        let clip = if args.clipboard_scope.is_some() {
+        let clipboard_scope = match &args.clipboard_scope {
+            Some(scope) => Some(scope.clone()),
+            None if args.zone == NO_ZONE && args.proxy => {
+                let pid = std::process::id() as i32;
+                sys::process_stamp(pid)
+                    .map(|stamp| (unconfined_clipboard_scope_id(pid), pid, stamp))
+            }
+            None => None,
+        };
+        let clip = if clipboard_scope.is_some() {
             None
         } else {
             crate::clip::token_for(&runtime_dir, &args.zone, &args.clip_history)
         };
-        let private = match args
-            .clipboard_scope
+        let private = match clipboard_scope
             .as_ref()
             .map(|(id, pid, stamp)| {
                 let owner =
@@ -937,7 +951,7 @@ pub fn run(args: Args) -> u8 {
         ) {
             Ok(started) => proxy = Some((started, up.path)),
             Err(e) => {
-                if args.proxy_required() {
+                if args.proxy_required() || clipboard_scope.is_some() {
                     return not_started(&format!("restricted Wayland proxy failed ({e})"));
                 }
                 // The second rung: the proxy did not start. The context made
@@ -1338,6 +1352,17 @@ mod tests {
             &["foot", "--camera", "grey", "--", "x"],
         ] {
             assert_eq!(Args::parse(&argv(bad)), Err(ArgError::BadCamera), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn unconfined_clipboard_scopes_are_unique_legacy_main_ids() {
+        assert_eq!(unconfined_clipboard_scope_id(101), "main:u101");
+        assert_eq!(unconfined_clipboard_scope_id(102), "main:u102");
+        for pid in [101, 102] {
+            assert!(crate::clipboard_endpoint::valid_label(
+                &unconfined_clipboard_scope_id(pid)
+            ));
         }
     }
 

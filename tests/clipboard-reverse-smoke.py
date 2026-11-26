@@ -184,6 +184,18 @@ def reader(output, control='no', primary='no'):
             last = time.monotonic()
 
 
+def paste(library):
+    keyboard = wire.keyboard(dict(os.environ), library)
+    time.sleep(.5)
+    wire.packet(keyboard, 6, 2, struct.pack('=IIII', 5, 0, 0, 0))
+    wire.packet(keyboard, 6, 1, struct.pack('=III', int(time.monotonic() * 1000) & 0xffffffff, 47, 1))
+    time.sleep(.05)
+    wire.packet(keyboard, 6, 1, struct.pack('=III', int(time.monotonic() * 1000) & 0xffffffff, 47, 0))
+    wire.packet(keyboard, 6, 2, struct.pack('=IIII', 0, 0, 0, 0))
+    time.sleep(5)
+    keyboard.close()
+
+
 def launch(satellite, display, foot, output):
     processes = [subprocess.Popen([satellite, display]),
                  subprocess.Popen([foot, '--app-id', 'reverse-native', 'sh', '-c', 'sleep 120']),
@@ -368,5 +380,7 @@ if __name__ == '__main__':
         reader(*sys.argv[2:])
     elif sys.argv[1:2] == ['launch']:
         launch(*sys.argv[2:])
+    elif sys.argv[1:2] == ['paste']:
+        paste(*sys.argv[2:])
     else:
         main()

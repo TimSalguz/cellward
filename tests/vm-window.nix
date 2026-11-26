@@ -39,6 +39,7 @@ let
     cp ${./clipboard-bridge-smoke.py} $out/clipboard-bridge-smoke.py
     cp ${./typing-smoke.py} $out/typing-smoke.py
     cp ${./x11-selection-reader.py} $out/x11-selection-reader.py
+    printf '%s' '${pkgs.libxkbcommon}/lib/libxkbcommon.so.0' > $out/xkbcommon.path
   '';
 
   test = pkgs.testers.runNixOSTest {
@@ -179,6 +180,7 @@ let
       machine.copy_from_vm("/tmp/cellward-startup.trace", "")
       machine.fail("test -e /tmp/startup-must-not-run")
     '' + pkgs.lib.optionalString clipboardOnly ''
+      assert json is not None
       clipboard_fixtures = "${clipboardFixtures}"
       exec(open("${./vm-private-clipboard.py}").read())
     '' + pkgs.lib.optionalString (!loginOnly && !startupOnly && !clipboardOnly) (''

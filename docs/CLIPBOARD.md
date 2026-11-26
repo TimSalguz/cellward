@@ -41,10 +41,12 @@ cross-instance transfer operation. Prepare/commit are authenticated host-only
 controller operations. Older brokers without the capability retain ordinary
 copying and do not enable the new shortcut interception.
 
-This shortcut handles running private instances. Unconfined desktop applications
-keep their desktop clipboard behaviour; host export/import remains an explicit
-manager action. It does not merge or rebroadcast Noctalia's clipboard. Existing
-proxies must be restarted through the updated launcher to gain this behaviour.
+This shortcut handles running private instances. An unconfined launch through the
+updated launcher gets a `main:u<PID>` scope without filesystem or network
+sandboxing. Its canonical history is the real home, so current `main:*` clips are
+available to it. Applications started outside Cellward keep the ordinary desktop
+clipboard; Noctalia's clipboard is not merged or rebroadcast. Existing proxies
+must be restarted through the updated launcher to gain this behaviour.
 
 The manager's **Copy to** selector explicitly chooses a running instance or
 the shared host clipboard. Changing history tabs does not transfer anything.
@@ -68,7 +70,8 @@ clipboard is never enabled as a fallback. A private launch requires its proxy.
 **Upgrade:** already-running programs retain their old proxies. Restart them
 through the updated launcher to get private active selections. History paste
 refuses an unverified isolated target rather than exporting to the host.
-Unconfined programs continue to use the desktop clipboard.
+Unconfined programs launched through Cellward join the real-home scope; programs
+started outside it continue to use the desktop clipboard.
 
 The history tray icon exposes a standard D-Bus menu on right click with an
 Open Cellward clipboards action. Panels such as Noctalia can add their own

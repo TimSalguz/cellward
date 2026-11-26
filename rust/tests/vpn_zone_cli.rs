@@ -3292,9 +3292,11 @@ fn a_zone_gets_its_border_colour_width_and_switch() {
         line.contains("--frame-title Сеть: nl · Контейнер: разовый "),
         "{line}"
     );
-    // No border for the host's own session: it is no zone.
+    // No visible border for the host's own session: the invisible frame is
+    // only the physical clipboard gesture's infrastructure.
     let line = stdout(&home.run_with(&["run", "unconfined", "--", "foot"], &dry));
-    assert!(!line.contains("--frame"), "{line}");
+    assert!(line.contains("--frame 000000:0:off"), "{line}");
+    assert!(!line.contains("--frame-title"), "{line}");
 
     let out = home.run(&["frame", "color", "nl", "#3366FF"]);
     assert!(out.status.success(), "{}", stderr(&out));
