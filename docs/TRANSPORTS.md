@@ -91,10 +91,13 @@ protocol readiness without resolving a name or sending application traffic;
 authentication refusal and malformed responses are errors, and credentials are
 never included in error text.
 
-The current provider runner is headless. `GUI = yes` describes the provider but
-does not pass the host compositor socket through. The restricted Wayland bridge
-for graphical providers is a separate layer; there is deliberately no raw
-`WAYLAND_DISPLAY` fallback.
+With `GUI = yes`, the uplink opens the compositor as the real user before
+covering the runtime with a private tmpfs. It passes that one descriptor to
+`wl-sandbox --require-proxy`, never `WAYLAND_DISPLAY` or the host socket path.
+The sandbox registers a security-context connection and consumes the original
+descriptor before the provider starts. The provider sees only the restricted
+Wayland socket; missing compositor support, nesting or proxy startup failure
+prevents the zone from coming up rather than allowing an unrestricted fallback.
 
 ## Scoped access to a zone
 

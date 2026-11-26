@@ -569,8 +569,10 @@ app-ns. Общий разбор каналов утечки такого бэк�
 - [x] application provider как источник локального SOCKS5/HTTP endpoint: манифест
       транспорта, `[Proxy] Adapter`, readiness-рукопожатие, отдельный UID с явным
       доверием, sing-box только на loopback, общий fail-closed lifecycle и VM с
-      фиктивным provider. Для GUI-клиента следующий слой — ограниченный Wayland-мост,
-      не сырой сокет композитора.
+      фиктивным provider. GUI provider получает restricted Wayland через
+      `wl-sandbox --require-proxy`: исходный compositor-FD уничтожается до запуска,
+      raw socket/fallback не выдаётся; VM проверяет `wayland-info` и отсутствие
+      capture/security-context глобалов.
 - [ ] **зона со своим клиентом** (решение владельца 18.09, nix_cm docs/roadmap.md §13
       п. 25): одна площадка вместо N интеграций. Контейнер с FHS-окружением, куда
       человек ставит любой вендорский клиент (.deb, AppImage, rpm) и входит в его GUI;
@@ -586,8 +588,8 @@ app-ns. Общий разбор каналов утечки такого бэк�
 - [x] «VPN-клиент в контейнере»: произвольный клиент целиком в uplink-ns — на
       входе pasta, на выходе tun для app-ns; приложения не видят ни клиента, ни
       его трафика (см. `docs/LEAK-MODEL.md`). Сделано и проверено на
-      OpenConnect; для GUI-клиента остаётся открытым вопрос композитора внутри
-      uplink-ns
+      OpenConnect; для GUI-клиента композитор в uplink-ns подключён через
+      restricted Wayland без сырого сокета
 - [ ] импорт по ссылкам: `vpn://` (Amnezia), `vless://`, `ss://`; подписки — исследовать
 - [x] цепочка VPN поверх системной зоны: `cellward add inner inner.conf --via
       outer`; pasta внутреннего uplink запускается в `outer`, оба звена

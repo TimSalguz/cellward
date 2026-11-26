@@ -1,9 +1,9 @@
 //! End-to-end checks of `vpn-zone-core wl-sandbox`.
 //!
 //! What can be checked without a compositor is exactly the part that matters
-//! most: the FALLBACKS. Losing the Wayland restriction is acceptable, losing
-//! the program is not — every "it did not work out" path has to still start the
-//! command and say so on stderr. The sandboxed path itself needs a compositor
+//! most: the FALLBACKS. Ordinary launches may lose the Wayland restriction but
+//! not the program; `--require-proxy` must instead refuse to run it. The
+//! sandboxed path itself needs a compositor
 //! with `wp_security_context_v1` and is verified by hand (niri, KWin).
 //!
 //! The environment is scrubbed on purpose in every case: the developer machine
@@ -51,6 +51,31 @@ fn without_a_compositor_the_program_still_runs() {
         stderr.contains("compositor"),
         "the weakened protection must be reported: {stderr}"
     );
+}
+
+#[test]
+fn require_proxy_never_runs_the_program_without_a_restricted_display() {
+    for runtime in [None, Some("/tmp")] {
+        let out = run(
+            &["test-app", "--require-proxy", "--", "echo", "must-not-run"],
+            runtime,
+        );
+        assert_eq!(out.status.code(), Some(127));
+        assert!(out.stdout.is_empty(), "the program ran: {out:?}");
+    }
+    let conflict = run(
+        &[
+            "test-app",
+            "--require-proxy",
+            "--no-proxy",
+            "--",
+            "echo",
+            "must-not-run",
+        ],
+        None,
+    );
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(conflict.stdout.is_empty());
 }
 
 #[test]

@@ -25,6 +25,7 @@
 //! [`run_plain`] is, the shared "it did not work out" exit of this module.
 //!
 //! Usage: `vpn-zone-core wl-sandbox <app-id> [--zone <zone>] [--no-proxy]
+//! [--require-proxy]
 //! [--frame <rrggbb>:<width>:<always|hover|off>[:<buttons>:<style>:<radius>]
 //! --frame-title <text> --frame-switch <settings dir>]
 //! [--focus input|notify|ask|allow] -- <command> [args…]`.
@@ -291,6 +292,8 @@ pub struct Args {
     pub clip_history: String,
     /// Host-only binding to a live instance: id, holder pid and start stamp.
     pub clipboard_scope: Option<(String, i32, String)>,
+    /// Never run the program without a restricted compositor/proxy connection.
+    pub require_proxy: bool,
     /// The program and its arguments.
     pub cmd: Vec<OsString>,
 }
@@ -343,7 +346,7 @@ impl fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 impl Args {
-    /// Parse `<app-id> [--zone <zone>] [--no-proxy] [--frame
+    /// Parse `<app-id> [--zone <zone>] [--no-proxy] [--require-proxy] [--frame
     /// <rrggbb>:<w>[:<mode>]] [--frame-title <text>] [--frame-switch <dir>]
     /// [--focus <policy>] -- cmd...`.
     ///
@@ -373,10 +376,13 @@ impl Args {
         let mut camera = None;
         let mut clip_history = crate::container::MAIN_RECORD.to_owned();
         let mut clipboard_scope = None;
+        let mut require_proxy = false;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
             if word == "--no-proxy" {
                 proxy = false;
+            } else if word == "--require-proxy" {
+                require_proxy = true;
             } else if word == "--frame" {
                 let value = words.next().ok_or(ArgError::BadFrame)?.to_string_lossy();
                 frame = Some(crate::frame::Frame::parse_arg(&value).ok_or(ArgError::BadFrame)?);
@@ -460,7 +466,7 @@ impl Args {
                 positional.push(word);
             }
         }
-        if clipboard_scope.is_some() && !proxy {
+        if (clipboard_scope.is_some() || require_proxy) && !proxy {
             return Err(ArgError::BadFrame);
         }
         if positional.len() > 1 {
@@ -499,8 +505,13 @@ impl Args {
             camera,
             clip_history,
             clipboard_scope,
+            require_proxy,
             cmd,
         })
+    }
+
+    fn proxy_required(&self) -> bool {
+        self.require_proxy || self.clipboard_scope.is_some()
     }
 }
 
@@ -753,7 +764,7 @@ pub fn run(args: Args) -> u8 {
             "wl-sandbox: no XDG_RUNTIME_DIR — {}",
             plain_note(&args.zone, &args.cmd[0])
         );
-        return if args.clipboard_scope.is_some() {
+        return if args.proxy_required() {
             EXIT_NOT_STARTED
         } else {
             run_plain(&args.cmd)
@@ -768,7 +779,11 @@ pub fn run(args: Args) -> u8 {
                 "wl-sandbox: {why} — {}",
                 plain_note(&args.zone, &args.cmd[0])
             );
-            return run_plain(&args.cmd);
+            return if args.proxy_required() {
+                not_started(&why)
+            } else {
+                run_plain(&args.cmd)
+            };
         }
     };
 
@@ -814,8 +829,8 @@ pub fn run(args: Args) -> u8 {
         match wl_proxy::Upstream::bind(&runtime_dir, std::process::id()) {
             Ok(upstream) => Some(upstream),
             Err(e) => {
-                if args.clipboard_scope.is_some() {
-                    return not_started(&format!("private clipboard socket failed ({e})"));
+                if args.proxy_required() {
+                    return not_started(&format!("restricted Wayland socket failed ({e})"));
                 }
                 eprintln!(
                     "wl-sandbox: cannot create the proxy's socket ({e}) — the compositor listens \
@@ -857,8 +872,8 @@ pub fn run(args: Args) -> u8 {
         forget_upstream(&upstream);
         return match refused {
             // Already confined: on the socket it came through, as before.
-            Refused::Nested if args.clipboard_scope.is_none() => run_plain(&args.cmd),
-            Refused::Nested => not_started("private clipboard requires a confined Wayland proxy"),
+            Refused::Nested if !args.proxy_required() => run_plain(&args.cmd),
+            Refused::Nested => not_started("a confined Wayland proxy is required"),
             Refused::Other(why) => {
                 eprintln!("wl-sandbox: {why} — the program is not started");
                 not_started(&why)
@@ -919,8 +934,8 @@ pub fn run(args: Args) -> u8 {
         ) {
             Ok(started) => proxy = Some((started, up.path)),
             Err(e) => {
-                if args.clipboard_scope.is_some() {
-                    return not_started(&format!("private clipboard proxy failed ({e})"));
+                if args.proxy_required() {
+                    return not_started(&format!("restricted Wayland proxy failed ({e})"));
                 }
                 // The second rung: the proxy did not start. The context made
                 // for it is switched off, and the zone's path is registered

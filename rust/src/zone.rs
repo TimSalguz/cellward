@@ -5719,6 +5719,18 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Vec<Child>, Strin
     // by path, and its queues, which open(2) reaches by name whatever IPC
     // namespace the opener is in.
     let runtime = host_runtime_dir(zone);
+    let provider_display = match backend {
+        Backend::Proxy(proxy)
+            if proxy
+                .adapter
+                .as_ref()
+                .and_then(|adapter| adapter.publication.as_ref())
+                .is_some_and(|published| published.gui) =>
+        {
+            Some(open_provider_display(zone, &runtime)?)
+        }
+        _ => None,
+    };
     for (dir, options) in [
         (Path::new("/run/dbus"), "mode=0755,size=16k"),
         (runtime.as_path(), "mode=0700,size=16k"),
@@ -5736,6 +5748,12 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Vec<Child>, Strin
             )
             .map_err(|e| format!("cannot close {} for the uplink: {e}", dir.display()))?;
         }
+    }
+    if provider_display.is_some() {
+        let owner = fs::metadata(&zone.dir)
+            .map_err(|e| format!("cannot find the GUI provider's owner: {e}"))?;
+        std::os::unix::fs::chown(&runtime, Some(owner.uid()), Some(owner.gid()))
+            .map_err(|e| format!("cannot give the provider's runtime to its user: {e}"))?;
     }
     // And what every zone hides from its programs, hidden from the client as
     // well — the least trusted program of all, whatever the gateway made of
@@ -5891,7 +5909,7 @@ fn uplink_setup(zone: &Zone, links: UplinkLinks<'_>) -> Result<Vec<Child>, Strin
                         zone.name(),
                         adapter.name
                     );
-                    let mut provider = spawn_provider(zone, proxy, adapter)?;
+                    let mut provider = spawn_provider(zone, proxy, adapter, provider_display)?;
                     if let Err(e) = crate::provider::wait(proxy, &mut provider) {
                         let _ = provider.kill();
                         let _ = provider.wait();
@@ -8934,10 +8952,56 @@ fn spawn_openconnect(zone: &Zone, oc: &OcZone, dir: &Path) -> Result<Child, Stri
 
 const PROVIDER_DIR: &str = "/tmp/provider";
 
+fn open_provider_display(zone: &Zone, runtime: &Path) -> Result<OwnedFd, String> {
+    use std::os::unix::net::UnixStream;
+
+    let display = std::env::var_os("WAYLAND_DISPLAY")
+        .filter(|display| !display.is_empty())
+        .ok_or("a GUI provider needs WAYLAND_DISPLAY in the user manager")?;
+    let display = PathBuf::from(display);
+    let path = if display.is_absolute() {
+        display
+    } else {
+        runtime.join(display)
+    };
+    let owner = fs::metadata(&zone.dir)
+        .map_err(|e| format!("cannot find the GUI provider's owner: {e}"))?;
+    // The raw connection is opened synchronously as the real user before the
+    // private runtime is mounted. Only this uplink owns the returned descriptor;
+    // wl-sandbox consumes it while registering the restricted connection.
+    // Changing effective ids clears dumpability; the holder outside needs its
+    // original value back to open this process's netns for pasta.
+    let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+    let connected = unsafe {
+        if libc::setegid(owner.gid()) != 0 || libc::seteuid(owner.uid()) != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            UnixStream::connect(&path)
+        }
+    };
+    // Root of this user namespace can always regain these effective ids. A
+    // failure is fatal rather than continuing with an unclear identity.
+    let uid_restored = unsafe { libc::seteuid(0) } == 0;
+    let gid_restored = unsafe { libc::setegid(0) } == 0;
+    let dumpable_restored =
+        dumpable >= 0 && unsafe { libc::prctl(libc::PR_SET_DUMPABLE, dumpable, 0, 0, 0) } == 0;
+    if !uid_restored || !gid_restored || !dumpable_restored {
+        return Err("cannot restore the uplink's ids after opening the compositor".to_owned());
+    }
+    let stream = connected.map_err(|e| {
+        format!(
+            "cannot open the compositor for the GUI provider at {}: {e}",
+            path.display()
+        )
+    })?;
+    Ok(stream.into())
+}
+
 fn spawn_provider(
     zone: &Zone,
     proxy: &crate::proxy::Config,
     adapter: &crate::transport::Adapter,
+    display: Option<OwnedFd>,
 ) -> Result<Child, String> {
     use std::os::unix::fs::DirBuilderExt;
 
@@ -8952,7 +9016,26 @@ fn spawn_provider(
         .map_err(|e| format!("cannot make {PROVIDER_DIR} for the provider: {e}"))?;
     std::os::unix::fs::chown(&dir, Some(owner.uid()), Some(owner.gid()))
         .map_err(|e| format!("cannot give {PROVIDER_DIR} to the provider: {e}"))?;
-    let mut command = Command::new(&program);
+    let graphical = adapter.publication.as_ref().is_some_and(|p| p.gui);
+    if graphical && display.is_none() {
+        return Err("a GUI provider has no compositor connection".to_owned());
+    }
+    let display_fd = display.as_ref().map(AsRawFd::as_raw_fd);
+    let mut command = if graphical {
+        let core = std::env::current_exe().map_err(|e| format!("cannot find the core: {e}"))?;
+        let mut command = Command::new(core);
+        command
+            .arg("wl-sandbox")
+            .arg(format!("provider-{}", adapter.name))
+            .arg("--zone")
+            .arg(&zone.name)
+            .arg("--require-proxy")
+            .arg("--")
+            .arg(&program);
+        command
+    } else {
+        Command::new(&program)
+    };
     command
         .current_dir(&dir)
         .env_clear()
@@ -8968,15 +9051,13 @@ fn spawn_provider(
                 crate::proxy::Kind::Http => "http",
             },
         )
-        .env(
-            "CELLWARD_PROVIDER_GUI",
-            if adapter.publication.as_ref().is_some_and(|p| p.gui) {
-                "1"
-            } else {
-                "0"
-            },
-        )
+        .env("CELLWARD_PROVIDER_GUI", if graphical { "1" } else { "0" })
         .stdin(Stdio::null());
+    if let Some(fd) = display_fd {
+        command
+            .env("XDG_RUNTIME_DIR", host_runtime_dir(zone))
+            .env("WAYLAND_SOCKET", fd.to_string());
+    }
     let uid = owner.uid();
     let gid = owner.gid();
     // SAFETY: getpid takes no arguments; the child checks the same parent again
@@ -8984,6 +9065,9 @@ fn spawn_provider(
     let uplink = unsafe { libc::getpid() };
     unsafe {
         command.pre_exec(move || {
+            if display_fd.is_some_and(|fd| libc::fcntl(fd, libc::F_SETFD, 0) != 0) {
+                return Err(io::Error::last_os_error());
+            }
             if libc::setgroups(0, std::ptr::null()) != 0
                 || libc::setresgid(gid, gid, gid) != 0
                 || libc::setresuid(uid, uid, uid) != 0
@@ -8996,9 +9080,11 @@ fn spawn_provider(
             Ok(())
         });
     }
-    command
+    let child = command
         .spawn()
-        .map_err(|e| format!("cannot start application provider {}: {e}", adapter.name))
+        .map_err(|e| format!("cannot start application provider {}: {e}", adapter.name));
+    drop(display);
+    child
 }
 
 fn spawn_sing_box(zone: &Zone, proxy: &crate::proxy::Config, dir: &Path) -> Result<Child, String> {

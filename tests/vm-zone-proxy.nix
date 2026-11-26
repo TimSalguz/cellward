@@ -49,6 +49,13 @@ let
     import os
     import select
     import socket
+    import subprocess
+
+    if os.environ.get("CELLWARD_PROVIDER_GUI") == "1":
+        display = subprocess.check_output(["${pkgs.wayland-utils}/bin/wayland-info"], text=True)
+        assert "wl_compositor" in display
+        assert "zwlr_screencopy_manager_v1" not in display
+        assert "wp_security_context_manager_v1" not in display
 
     def exact(conn, size):
         data = b""
@@ -131,7 +138,13 @@ pkgs.testers.runNixOSTest {
       };
       boot.extraModulePackages = [ config.boot.kernelPackages.amneziawg ];
       boot.kernelModules = [ "amneziawg" "wireguard" "tun" "nf_tables" ];
-      environment.systemPackages = [ pkgs.wireguard-tools pkgs.iproute2 pkgs.curl ];
+      environment.systemPackages = [
+        pkgs.wireguard-tools
+        pkgs.iproute2
+        pkgs.curl
+        pkgs.sway
+        pkgs.wayland-utils
+      ];
       virtualisation.vlans = [ 1 ];
       virtualisation.cores = 2;
       virtualisation.memorySize = 1536;
@@ -290,11 +303,11 @@ pkgs.testers.runNixOSTest {
         server.succeed("systemctl stop external-proxy")
         server.succeed("truncate -s 0 /tmp/provider-requests")
 
-    with subtest("an application provider becomes a full-tunnel route and dies with the zone"):
+    with subtest("a GUI application provider gets restricted Wayland and dies with the zone"):
         alice("mkdir -p ~/.config/vpn-zones/transports")
         alice(
             "printf '[Transport]\\nName = fake-provider\\nRun = ${fakeProvider}\\n"
-            "Channel = application\\nProxy = socks5\\nProxyPort = 18080\\n' "
+            "Channel = application\\nProxy = socks5\\nProxyPort = 18080\\nGUI = yes\\n' "
             "> ~/.config/vpn-zones/transports/fake-provider.conf"
         )
         alice(
@@ -305,6 +318,16 @@ pkgs.testers.runNixOSTest {
         )
         alice("cellward add provided /tmp/provider.conf")
         alice("cellward zone-proxy set provided 1081 zone")
+        alice(
+            "systemd-run --user --unit=vmsway "
+            "--setenv=WLR_BACKENDS=headless --setenv=WLR_LIBINPUT_NO_DEVICES=1 "
+            "--setenv=WLR_RENDERER=pixman --setenv=WLR_HEADLESS_OUTPUTS=1 sway"
+        )
+        machine.wait_until_succeeds("ls /run/user/1000/sway-ipc.*.sock", timeout=60)
+        display = machine.succeed(
+            "ls /run/user/1000 | grep -E '^wayland-[0-9]+$' | head -1"
+        ).strip()
+        alice(f"systemctl --user set-environment WAYLAND_DISPLAY={display}")
         alice("cellward up provided")
         answer = alice(
             "curl --max-time 20 --proxytunnel -x http://127.0.0.1:1081 "
@@ -325,5 +348,7 @@ pkgs.testers.runNixOSTest {
                 f"http://{server_ip}:8092"
             )
         )
+        alice("systemctl --user unset-environment WAYLAND_DISPLAY")
+        alice("systemctl --user stop vmsway")
   '';
 }
