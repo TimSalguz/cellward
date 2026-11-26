@@ -48,6 +48,7 @@ with subtest("a compositor without the security context: no Wayland in a zone, a
     )
     print(out)
     if code != 0:
+        print(alice("journalctl --user --no-pager -n 40"))
         for probe in (
             "true",
             "sh -c 'echo SECOND-SHELL; command -v sh; echo rc=$?'",

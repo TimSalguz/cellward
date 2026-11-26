@@ -779,9 +779,12 @@ pub fn run(args: Args) -> u8 {
                 "wl-sandbox: {why} — {}",
                 plain_note(&args.zone, &args.cmd[0])
             );
-            return if args.proxy_required() {
+            return if args.require_proxy {
                 not_started(&why)
             } else {
+                // No compositor also means no clipboard to scope. An ordinary
+                // headless program still runs; only a GUI provider requires
+                // the restricted display itself.
                 run_plain(&args.cmd)
             };
         }

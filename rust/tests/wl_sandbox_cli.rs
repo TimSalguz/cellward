@@ -42,15 +42,19 @@ fn without_a_runtime_dir_the_program_still_runs() {
 
 #[test]
 fn without_a_compositor_the_program_still_runs() {
-    // A real runtime directory, but nothing listening in it.
-    let out = run(&["test-app", "--", "echo", "hi"], Some("/tmp"));
-    assert!(out.status.success(), "status {:?}", out.status.code());
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("compositor"),
-        "the weakened protection must be reported: {stderr}"
-    );
+    // A real runtime directory, but nothing listening in it. A scoped
+    // clipboard changes nothing when there is no display or clipboard at all.
+    for scope in [&[][..], &["--clipboard-scope", "main", "1:test"][..]] {
+        let args = [&["test-app"][..], scope, &["--", "echo", "hi"][..]].concat();
+        let out = run(&args, Some("/tmp"));
+        assert!(out.status.success(), "status {:?}", out.status.code());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("compositor"),
+            "the weakened protection must be reported: {stderr}"
+        );
+    }
 }
 
 #[test]
