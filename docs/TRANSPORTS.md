@@ -12,8 +12,9 @@ check <file>` validates one manifest. Neither command executes the adapter;
 
 A `[Proxy]` zone turns one explicitly configured proxy into a full-tunnel
 network through sing-box. Its client runs unprivileged in the uplink, with only
-`CAP_NET_ADMIN` for the pre-created TUN; the uplink firewall accepts only the
-configured proxy address and port. The TUN moves into the application
+`CAP_NET_ADMIN` for the pre-created TUN; the uplink firewall accepts only TCP
+to the configured proxy address and port (plus UDP for a SOCKS5 endpoint). The
+TUN moves into the application
 namespace, and client death takes the whole zone down without a direct-route
 fallback.
 

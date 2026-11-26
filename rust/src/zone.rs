@@ -4811,10 +4811,15 @@ impl Backend {
             Self::Oc(oc) => vec![EndpointSocket {
                 addr: oc.addr,
                 port: None,
+                protocol: EndpointProtocol::Any,
             }],
             Self::Proxy(proxy) => vec![EndpointSocket {
                 addr: proxy.server,
                 port: Some(proxy.port),
+                protocol: match proxy.kind {
+                    crate::proxy::Kind::Socks5 => EndpointProtocol::TcpAndUdp,
+                    crate::proxy::Kind::Http => EndpointProtocol::Tcp,
+                },
             }],
             // No uplink exists to be filtered.
             Self::HostIf(_) | Self::HostNet | Self::SysZone(_) => Vec::new(),
@@ -10348,9 +10353,18 @@ pub fn v6_plan(kernel_has_v6: bool, tunnel_has_v6: bool) -> V6Plan {
 /// One endpoint as the uplink's filter sees it: an address the tunnel may talk
 /// to and, when the config bothered to say so, the port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointProtocol {
+    Udp,
+    Tcp,
+    TcpAndUdp,
+    Any,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointSocket {
     pub addr: IpAddr,
     pub port: Option<u16>,
+    pub protocol: EndpointProtocol,
 }
 
 /// Every endpoint of a config that has already been through
@@ -10376,6 +10390,7 @@ pub fn endpoint_sockets(cfg: &WgConfig) -> Vec<EndpointSocket> {
             let socket = EndpointSocket {
                 addr,
                 port: endpoint.port,
+                protocol: EndpointProtocol::Udp,
             };
             // Several peers of one server are one rule, not three.
             if !out.contains(&socket) {
@@ -10731,9 +10746,19 @@ pub fn uplink_ruleset(endpoints: &[EndpointSocket]) -> String {
         // A port is what the config wrote; without one `setconf` would have
         // rejected the endpoint anyway, so the rule stays as wide as the
         // address and no wider.
-        rules.push(match endpoint.port {
-            Some(port) => format!("{family} daddr {addr} udp dport {port} accept"),
-            None => format!("{family} daddr {addr} accept"),
+        if let (EndpointProtocol::TcpAndUdp, Some(port)) = (endpoint.protocol, endpoint.port) {
+            rules.push(format!("{family} daddr {addr} tcp dport {port} accept"));
+            rules.push(format!("{family} daddr {addr} udp dport {port} accept"));
+            continue;
+        }
+        rules.push(match (endpoint.protocol, endpoint.port) {
+            (EndpointProtocol::Udp, Some(port)) => {
+                format!("{family} daddr {addr} udp dport {port} accept")
+            }
+            (EndpointProtocol::Tcp, Some(port)) => {
+                format!("{family} daddr {addr} tcp dport {port} accept")
+            }
+            _ => format!("{family} daddr {addr} accept"),
         });
     }
     if needs_ndp {
@@ -12226,6 +12251,25 @@ networks:  files
         assert!(uplink_ruleset(&wg.sockets()).contains("ip daddr 198.51.100.7 udp dport 51820"));
     }
 
+    #[test]
+    fn a_proxy_uplink_allows_its_transport_to_the_pinned_proxy() {
+        for (kind, udp) in [("socks5", true), ("http", false)] {
+            let ini = WgConfig::parse(
+                format!(
+                    "[Interface]\nAddress = 10.200.0.2/32\n[Proxy]\nType = {kind}\nServer = 198.51.100.7\nPort = 1080\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+            let backend = Backend::Proxy(Box::new(
+                crate::proxy::Config::from_ini(&ini, TUN_IFACE).unwrap(),
+            ));
+            let rules = uplink_ruleset(&backend.sockets());
+            assert!(rules.contains("ip daddr 198.51.100.7 tcp dport 1080 accept"));
+            assert_eq!(rules.contains("udp dport 1080"), udp, "{kind}:\n{rules}");
+        }
+    }
+
     /// A guard over a security invariant rather than over an algorithm: every
     /// entry in this table is a measured DNS leak (`docs/GOTCHAS.md` §3), and
     /// dropping one gives every program in every zone a resolver in the host's
@@ -12480,6 +12524,7 @@ networks:  files
         let v4 = [EndpointSocket {
             addr: "198.51.100.7".parse().unwrap(),
             port: Some(51820),
+            protocol: EndpointProtocol::Udp,
         }];
         assert_eq!(
             uplink_ruleset(&v4),
@@ -12511,6 +12556,7 @@ networks:  files
         let v6 = [EndpointSocket {
             addr: "2001:db8::1".parse().unwrap(),
             port: Some(443),
+            protocol: EndpointProtocol::Udp,
         }];
         assert_eq!(
             uplink_ruleset(&v6),
@@ -12532,10 +12578,12 @@ networks:  files
             EndpointSocket {
                 addr: "198.51.100.7".parse().unwrap(),
                 port: Some(51820),
+                protocol: EndpointProtocol::Udp,
             },
             EndpointSocket {
                 addr: "2001:db8::1".parse().unwrap(),
                 port: Some(51820),
+                protocol: EndpointProtocol::Udp,
             },
         ]);
         assert_eq!(both.matches("icmpv6 type").count(), 1);
@@ -12547,6 +12595,7 @@ networks:  files
         let portless = uplink_ruleset(&[EndpointSocket {
             addr: "198.51.100.7".parse().unwrap(),
             port: None,
+            protocol: EndpointProtocol::Any,
         }]);
         assert!(portless.contains("\t\tip daddr 198.51.100.7 accept\n"));
         assert!(!portless.contains("dport"));
@@ -12573,10 +12622,12 @@ networks:  files
                 EndpointSocket {
                     addr: "198.51.100.7".parse().unwrap(),
                     port: Some(51820),
+                    protocol: EndpointProtocol::Udp,
                 },
                 EndpointSocket {
                     addr: "2001:db8::1".parse().unwrap(),
                     port: Some(51820),
+                    protocol: EndpointProtocol::Udp,
                 },
             ]
         );
