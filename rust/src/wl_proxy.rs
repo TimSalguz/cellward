@@ -417,6 +417,7 @@ const CAPTURE_OK: u8 = b'Q';
 const CAPTURE_ERR: u8 = b'R';
 /// Proxy → supervisor: toggle recording of the selected root surface.
 const RECORD: u8 = b'y';
+const RECORD_PIPEWIRE: u8 = b'W';
 /// Supervisor → proxy: a dedicated record-agent channel.
 const RECORD_ATTACH: u8 = b'z';
 /// A frame's line at most.
@@ -433,6 +434,7 @@ fn ask_byte(ask: Ask) -> u8 {
         Ask::ScreenshotArea => SCREENSHOT_AREA,
         Ask::ScreenshotHover => SCREENSHOT_HOVER,
         Ask::Record => RECORD,
+        Ask::RecordPipeWire => RECORD_PIPEWIRE,
     }
 }
 
@@ -447,6 +449,7 @@ fn ask_of(byte: u8) -> Option<Ask> {
         SCREENSHOT_AREA => Some(Ask::ScreenshotArea),
         SCREENSHOT_HOVER => Some(Ask::ScreenshotHover),
         RECORD => Some(Ask::Record),
+        RECORD_PIPEWIRE => Some(Ask::RecordPipeWire),
         _ => None,
     }
 }
@@ -1808,12 +1811,12 @@ impl Proxy {
     fn stop_recording(&self) {
         if let Some(recording) = self.recording.take() {
             // SAFETY: the agent is started in its own process group. SIGINT
-            // reaches both it and ffmpeg, which finalizes the MP4 index.
+            // reaches both it and the encoder, which finalizes the MP4 index.
             unsafe { libc::kill(-recording.pid, libc::SIGINT) };
         }
     }
 
-    fn record(&self) {
+    fn record(&self, pipewire: bool) {
         if self.recording.get().is_some() {
             self.stop_recording();
             return;
@@ -1825,19 +1828,53 @@ impl Proxy {
                 return;
             }
         };
-        let Some(ffmpeg) = tools.ffmpeg.as_ref().filter(|path| path.is_absolute()) else {
-            eprintln!("wl-sandbox: recording is unavailable: ffmpeg is not in the tools manifest");
-            return;
+        let (destination, description) = if pipewire {
+            let Some(gst_launch) = tools.gst_launch.as_ref().filter(|path| path.is_absolute())
+            else {
+                eprintln!(
+                    "wl-sandbox: PipeWire is unavailable: gst-launch is not in the tools manifest"
+                );
+                return;
+            };
+            let Some(plugin_path) = tools.gst_plugin_path.as_ref() else {
+                eprintln!("wl-sandbox: PipeWire is unavailable: gst-plugin-path is not in the tools manifest");
+                return;
+            };
+            (
+                vec![
+                    "--pipewire".into(),
+                    gst_launch.as_os_str().to_owned(),
+                    "--gst-plugin-path".into(),
+                    plugin_path.clone(),
+                ],
+                "PipeWire node cellward_capture".to_owned(),
+            )
+        } else {
+            let Some(ffmpeg) = tools.ffmpeg.as_ref().filter(|path| path.is_absolute()) else {
+                eprintln!(
+                    "wl-sandbox: recording is unavailable: ffmpeg is not in the tools manifest"
+                );
+                return;
+            };
+            let directory = tools.home.join("Videos");
+            if let Err(error) = std::fs::create_dir_all(&directory) {
+                eprintln!("wl-sandbox: cannot create the recording directory: {error}");
+                return;
+            }
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos());
+            let output = directory.join(format!("cellward-{}-{stamp}.mp4", std::process::id()));
+            (
+                vec![
+                    "--ffmpeg".into(),
+                    ffmpeg.as_os_str().to_owned(),
+                    "--output".into(),
+                    output.as_os_str().to_owned(),
+                ],
+                format!("to {}", output.display()),
+            )
         };
-        let directory = tools.home.join("Videos");
-        if let Err(error) = std::fs::create_dir_all(&directory) {
-            eprintln!("wl-sandbox: cannot create the recording directory: {error}");
-            return;
-        }
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
-        let output = directory.join(format!("cellward-{}-{stamp}.mp4", std::process::id()));
         let (proxy_side, agent_side) = match UnixStream::pair() {
             Ok(pair) => pair,
             Err(error) => {
@@ -1852,10 +1889,7 @@ impl Proxy {
             .arg("record-agent")
             .arg("--fd")
             .arg(fd.to_string())
-            .arg("--ffmpeg")
-            .arg(ffmpeg)
-            .arg("--output")
-            .arg(&output)
+            .args(destination)
             .arg("--frames")
             .arg("100000")
             .arg("--fps")
@@ -1906,10 +1940,7 @@ impl Proxy {
             return;
         }
         self.recording.set(Some(Recording { pid }));
-        eprintln!(
-            "wl-sandbox: recording the root surface to {}",
-            output.display()
-        );
+        eprintln!("wl-sandbox: recording the root surface {description}");
     }
 
     /// A click on the frame's ≡ or ⇄ (`crate::wl_frame`): the window menu of
@@ -1928,8 +1959,8 @@ impl Proxy {
     /// writing the byte in a loop gets one `systemd-run`, not a flood of
     /// them (review 2026-09-27).
     fn ask(&self, ask: Ask) {
-        if ask == Ask::Record {
-            self.record();
+        if matches!(ask, Ask::Record | Ask::RecordPipeWire) {
+            self.record(ask == Ask::RecordPipeWire);
             return;
         }
         if ask == Ask::ScreenshotWindow {
@@ -2152,7 +2183,7 @@ pub(crate) fn menu_argv(
         Ask::Network => verb.push("--network".into()),
         Ask::Restart => verb.push("--restart".into()),
         Ask::Clip => verb[0] = "clip-window".into(),
-        Ask::Record => {}
+        Ask::Record | Ask::RecordPipeWire => {}
         Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover => {
             let mode = match ask {
                 Ask::ScreenshotWindow => "window",
@@ -6516,7 +6547,7 @@ mod tests {
                 &mut compositor,
                 &[
                     leave(60, buttons),
-                    enter(61, popup, 100, 1 + 4 * 28 + 14),
+                    enter(61, popup, 100, 1 + 5 * 28 + 14),
                     button(62, true),
                     button(63, false),
                 ],
@@ -6625,6 +6656,7 @@ mod tests {
             Ask::ScreenshotArea,
             Ask::ScreenshotHover,
             Ask::Record,
+            Ask::RecordPipeWire,
         ] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");

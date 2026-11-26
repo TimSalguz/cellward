@@ -1,7 +1,7 @@
-//! Bounded raw-frame recording from a dedicated proxy channel to host ffmpeg.
+//! Bounded raw-frame recording from a dedicated proxy channel to a host sink.
 //! No compositor capture, clipboard access or output-path overwrite.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -43,8 +43,15 @@ const MAX_FRAME_BYTES: usize = 64 << 20;
 const REPLY_TIMEOUT_MS: i32 = 2_000;
 
 enum Destination {
-    Ffmpeg { ffmpeg: PathBuf, output: PathBuf },
+    Ffmpeg {
+        ffmpeg: PathBuf,
+        output: PathBuf,
+    },
     RawFd(RawFd),
+    PipeWire {
+        gst_launch: PathBuf,
+        plugin_path: Option<OsString>,
+    },
 }
 
 struct Args {
@@ -60,6 +67,8 @@ impl Args {
         let mut ffmpeg = None;
         let mut output = None;
         let mut raw_fd = None;
+        let mut pipewire = None;
+        let mut gst_plugin_path = None;
         let mut frames = None;
         let mut fps = None;
         let mut words = args.iter();
@@ -72,27 +81,42 @@ impl Args {
                 Some("--ffmpeg") => ffmpeg = Some(PathBuf::from(value)),
                 Some("--output") => output = Some(PathBuf::from(value)),
                 Some("--raw-fd") => raw_fd = value.to_str().and_then(|v| v.parse::<RawFd>().ok()),
+                Some("--pipewire") => pipewire = Some(PathBuf::from(value)),
+                Some("--gst-plugin-path") => gst_plugin_path = Some(value.to_owned()),
                 Some("--frames") => frames = value.to_str().and_then(|v| v.parse::<u32>().ok()),
                 Some("--fps") => fps = value.to_str().and_then(|v| v.parse::<u32>().ok()),
                 _ => return Err(format!("unknown option {word:?}")),
             }
         }
         let fd = fd.filter(|fd| *fd >= 0).ok_or("a valid --fd is required")?;
-        let destination = match raw_fd {
-            Some(raw) if raw >= 0 => {
-                if ffmpeg.is_some() || output.is_some() {
-                    return Err("--raw-fd cannot be combined with --ffmpeg or --output".into());
-                }
-                Destination::RawFd(raw)
+        if pipewire.is_some() && (raw_fd.is_some() || ffmpeg.is_some() || output.is_some()) {
+            return Err("--pipewire cannot be combined with other destinations".into());
+        }
+        let destination = if let Some(gst_launch) = pipewire {
+            if !gst_launch.is_absolute() {
+                return Err("absolute --pipewire is required".into());
             }
-            _ => {
-                let ffmpeg = ffmpeg
-                    .filter(|p| p.is_absolute())
-                    .ok_or("absolute --ffmpeg is required")?;
-                let output = output
-                    .filter(|p| p.is_absolute())
-                    .ok_or("absolute --output is required")?;
-                Destination::Ffmpeg { ffmpeg, output }
+            Destination::PipeWire {
+                gst_launch,
+                plugin_path: gst_plugin_path,
+            }
+        } else {
+            match raw_fd {
+                Some(raw) if raw >= 0 => {
+                    if ffmpeg.is_some() || output.is_some() {
+                        return Err("--raw-fd cannot be combined with --ffmpeg or --output".into());
+                    }
+                    Destination::RawFd(raw)
+                }
+                _ => {
+                    let ffmpeg = ffmpeg
+                        .filter(|p| p.is_absolute())
+                        .ok_or("absolute --ffmpeg is required")?;
+                    let output = output
+                        .filter(|p| p.is_absolute())
+                        .ok_or("absolute --output is required")?;
+                    Destination::Ffmpeg { ffmpeg, output }
+                }
             }
         };
         let frames = frames
@@ -148,6 +172,17 @@ impl Frame {
     }
 }
 
+fn write_rows(output: &mut dyn Write, frame: &Frame) -> Result<(), String> {
+    let row = frame.row_bytes()?;
+    let stride = frame.stride as usize;
+    for line in frame.bytes.chunks_exact(stride) {
+        output
+            .write_all(&line[..row])
+            .map_err(|e| format!("cannot send raw pixels: {e}"))?;
+    }
+    Ok(())
+}
+
 fn memfd() -> Result<OwnedFd, String> {
     // SAFETY: memfd_create returns a new owned descriptor.
     let fd = unsafe { libc::memfd_create(c"cellward-record".as_ptr(), libc::MFD_CLOEXEC) };
@@ -194,6 +229,9 @@ fn capture(channel: &mut UnixStream) -> Result<Option<Frame>, String> {
     };
     // SAFETY: pfd points to one initialized pollfd for the duration of poll.
     let ready = unsafe { libc::poll(&mut pfd, 1, REPLY_TIMEOUT_MS) };
+    if STOP.load(Ordering::Acquire) {
+        return Ok(None);
+    }
     if ready <= 0 {
         let error = std::io::Error::last_os_error();
         if ready < 0
@@ -301,15 +339,8 @@ impl Encoder {
         if frame.width != self.width || frame.height != self.height {
             return Err("root surface changed size during recording".into());
         }
-        let row = frame.row_bytes()?;
-        let stride = frame.stride as usize;
         let input = self.child.stdin.as_mut().ok_or("ffmpeg input is closed")?;
-        for line in frame.bytes.chunks_exact(stride) {
-            input
-                .write_all(&line[..row])
-                .map_err(|e| format!("cannot send a frame to ffmpeg: {e}"))?;
-        }
-        Ok(())
+        write_rows(input, frame)
     }
 
     fn finish(mut self) -> Result<(), String> {
@@ -356,8 +387,6 @@ impl Raw {
         if frame.width != self.width || frame.height != self.height {
             return Err("root surface changed size during recording".into());
         }
-        let row = frame.row_bytes()?;
-        let stride = frame.stride as usize;
         let mut header = b"CFR1".to_vec();
         for value in [
             frame.width,
@@ -371,19 +400,128 @@ impl Raw {
         self.output
             .write_all(&header)
             .map_err(|e| format!("cannot write the broker frame header: {e}"))?;
-        for line in frame.bytes.chunks_exact(stride) {
-            self.output
-                .write_all(&line[..row])
-                .map_err(|e| format!("cannot write broker pixels: {e}"))?;
-        }
+        write_rows(&mut self.output, frame)?;
         self.generation = self.generation.wrapping_add(1);
         Ok(())
+    }
+}
+
+fn pipewire_args(width: i32, height: i32, fps: u32) -> Vec<OsString> {
+    vec![
+        "-q".into(),
+        "fdsrc".into(),
+        "fd=0".into(),
+        format!("blocksize={}", width * height * 4).into(),
+        "is-live=true".into(),
+        "!".into(),
+        "rawvideoparse".into(),
+        "format=bgra".into(),
+        format!("width={width}").into(),
+        format!("height={height}").into(),
+        format!("framerate={fps}/1").into(),
+        "!".into(),
+        format!("video/x-raw,format=BGRA,width={width},height={height},framerate={fps}/1").into(),
+        "!".into(),
+        "videoconvert".into(),
+        "!".into(),
+        "video/x-raw,format=I420".into(),
+        "!".into(),
+        "pipewiresink".into(),
+        "mode=provide".into(),
+        "sync=false".into(),
+        "enable-last-sample=false".into(),
+        "stream-properties=props,media.class=Stream/Output/Video,node.name=cellward_capture,node.description=Cellward-root-surface".into(),
+        "client-properties=props,application.name=cellward-capture".into(),
+    ]
+}
+
+struct GStreamer {
+    child: Child,
+    width: i32,
+    height: i32,
+    finished: bool,
+}
+
+impl GStreamer {
+    fn start(
+        program: &Path,
+        plugin_path: Option<&OsStr>,
+        frame: &Frame,
+        fps: u32,
+    ) -> Result<Self, String> {
+        let mut command = Command::new(program);
+        command
+            .args(pipewire_args(frame.width, frame.height, fps))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        if let Some(path) = plugin_path {
+            command
+                .env("GST_PLUGIN_PATH", path)
+                .env("GST_PLUGIN_SYSTEM_PATH", path);
+        }
+        // SAFETY: the child only asks for a parent-death signal before exec.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGINT) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("cannot start the PipeWire broker: {e}"))?;
+        if child.stdin.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the PipeWire broker has no raw-frame input".into());
+        }
+        Ok(Self {
+            child,
+            width: frame.width,
+            height: frame.height,
+            finished: false,
+        })
+    }
+
+    fn write(&mut self, frame: &Frame) -> Result<(), String> {
+        if frame.width != self.width || frame.height != self.height {
+            return Err("root surface changed size during recording".into());
+        }
+        let input = self
+            .child
+            .stdin
+            .as_mut()
+            .ok_or("PipeWire broker input is closed")?;
+        write_rows(input, frame)
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        drop(self.child.stdin.take());
+        let status = self.child.wait().map_err(|e| e.to_string())?;
+        self.finished = true;
+        if status.success() || STOP.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(format!("PipeWire broker exited with {status}"))
+        }
+    }
+}
+
+impl Drop for GStreamer {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
 enum Sink {
     Ffmpeg(Encoder),
     Raw(Raw),
+    PipeWire(GStreamer),
 }
 
 impl Sink {
@@ -391,6 +529,7 @@ impl Sink {
         match self {
             Self::Ffmpeg(encoder) => encoder.write(frame),
             Self::Raw(raw) => raw.write(frame),
+            Self::PipeWire(gstreamer) => gstreamer.write(frame),
         }
     }
 
@@ -398,6 +537,7 @@ impl Sink {
         match self {
             Self::Ffmpeg(encoder) => encoder.finish(),
             Self::Raw(_) => Ok(()),
+            Self::PipeWire(gstreamer) => gstreamer.finish(),
         }
     }
 }
@@ -431,6 +571,15 @@ fn run(args: &Args) -> Result<(), String> {
                         Sink::Ffmpeg(Encoder::start(ffmpeg, output, &frame, args.fps)?)
                     }
                     Destination::RawFd(fd) => Sink::Raw(Raw::start(*fd, &frame)),
+                    Destination::PipeWire {
+                        gst_launch,
+                        plugin_path,
+                    } => Sink::PipeWire(GStreamer::start(
+                        gst_launch,
+                        plugin_path.as_deref(),
+                        &frame,
+                        args.fps,
+                    )?),
                 };
                 let written = started.write(&frame);
                 encoder = Some(started);
@@ -540,6 +689,23 @@ mod tests {
         assert_eq!(frame.bytes, (0..24).collect::<Vec<u8>>());
         file.write_all_at(&3i32.to_ne_bytes(), 8).unwrap();
         assert!(read_frame(&fd).is_err());
+    }
+
+    #[test]
+    fn pipewire_is_a_named_video_source_without_a_file_or_audio() {
+        let args = pipewire_args(640, 480, 30);
+        assert!(args.iter().any(|arg| arg == "pipewiresink"));
+        assert!(args.iter().any(|arg| arg == "blocksize=1228800"));
+        assert!(args.iter().any(|arg| arg == "rawvideoparse"));
+        assert!(args.iter().any(|arg| arg == "format=bgra"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "video/x-raw,format=BGRA,width=640,height=480,framerate=30/1"));
+        assert!(args.iter().any(|arg| arg == "video/x-raw,format=I420"));
+        assert!(args.iter().any(|arg| arg
+            .to_string_lossy()
+            .contains("media.class=Stream/Output/Video")));
+        assert!(!args.iter().any(|arg| arg == "pulseaudiosink"));
     }
 
     #[test]

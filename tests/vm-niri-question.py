@@ -258,13 +258,13 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
         menu_x = target[2] + 1 - 8 * 24 + 12
         menu_y = target[1] + 4 + 10
 
-        def toggle_recording():
+        def toggle_recording(row_offset=111):
             pointer("move", menu_x, menu_y)
             pointer("press")
             pointer("release")
             machine.sleep(0.5)
             shot("niri-record-menu")
-            pointer("move", menu_x - 100, menu_y + 111)
+            pointer("move", menu_x - 100, menu_y + row_offset)
             pointer("press")
             pointer("release")
             shot("niri-record-after-keys")
@@ -286,6 +286,30 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
         assert info["codec_name"] == "h264", info
         assert info["r_frame_rate"] == "30/1", info
         assert int(info["nb_frames"]) >= 10, info
+
+    with subtest("root surface is a PipeWire source selected from the frame menu"):
+        toggle_recording(139)
+        query = (
+            f"{PW_DUMP} | jq -r '.[] | select(.type == \"PipeWire:Interface:Node\" "
+            "and .info.props[\"node.name\"] == \"cellward_capture\") "
+            "| .info.props[\"object.serial\"]'"
+        )
+        machine.wait_until_succeeds(
+            "su -l alice -c "
+            + shlex.quote(
+                f"export XDG_RUNTIME_DIR=/run/user/1000; {query} | grep -qE '^[0-9]+$'"
+            ),
+            timeout=20,
+        )
+        serial = alice(query).strip()
+        alice(
+            f"GST_PLUGIN_PATH={GST_PLUGIN_PATH} GST_PLUGIN_SYSTEM_PATH={GST_PLUGIN_PATH} "
+            f"{GST} -q pipewiresrc "
+            f"target-object={serial} on-disconnect=eos num-buffers=3 "
+            "! video/x-raw,format=I420 ! fakesink"
+        )
+        toggle_recording(139)
+        machine.wait_until_fails("pgrep -f '[v]pn-zone-core record-agent'", timeout=15)
 
     alice("cellward frame title hover")
     second_box = boxes[1]

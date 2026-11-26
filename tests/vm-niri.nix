@@ -81,7 +81,9 @@ let
           pkgs.ffmpeg
           pkgs.foot
           pkgs.wtype
+          pkgs.jq
         ];
+        services.pipewire.enable = true;
         # sway plain: no bar, no borders — niri's window is all of its
         # output.
         environment.etc."vm-niri/sway.conf".text = ''
@@ -119,6 +121,15 @@ let
       import shlex
       import base64
       import gzip
+
+      GST = "${pkgs.lib.getBin pkgs.gst_all_1.gstreamer}/bin/gst-launch-1.0"
+      GST_PLUGIN_PATH = "${pkgs.lib.makeSearchPath "lib/gstreamer-1.0" [
+        pkgs.gst_all_1.gstreamer.out
+        pkgs.gst_all_1.gst-plugins-base
+        pkgs.gst_all_1.gst-plugins-good
+        pkgs.pipewire
+      ]}"
+      PW_DUMP = "${pkgs.pipewire}/bin/pw-dump"
 
       def alice(cmd):
           return machine.succeed(

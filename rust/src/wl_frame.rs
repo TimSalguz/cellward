@@ -950,6 +950,7 @@ pub(crate) enum Ask {
     ScreenshotArea,
     ScreenshotHover,
     Record,
+    RecordPipeWire,
 }
 
 /// Asks the proxy's loop has not sent yet. A few at most: a click is one,
@@ -3944,6 +3945,10 @@ impl Window {
             Some(MenuRow::Record) => {
                 asks.record_window(&self.me);
                 asks.push(Ask::Record);
+            }
+            Some(MenuRow::RecordPipeWire) => {
+                asks.record_window(&self.me);
+                asks.push(Ask::RecordPipeWire);
             }
             Some(MenuRow::InWindow) => self.toggle_in_window(f),
             Some(MenuRow::Close) => {
@@ -7943,7 +7948,7 @@ mod tests {
         assert_eq!(menu_key(KEY_ESC, 4, Some(1)), MenuKey::Close);
         assert_eq!(menu_key(30, 4, Some(1)), MenuKey::Nothing);
         assert_eq!(menu_key(KEY_DOWN, 0, None), MenuKey::Close);
-        assert_eq!(crate::wl_title::MENU.len(), 6, "the rows of the dropdown");
+        assert_eq!(crate::wl_title::MENU.len(), 7, "the rows of the dropdown");
     }
 
     /// The buttons at the look's end of the strip, the text in the rest with

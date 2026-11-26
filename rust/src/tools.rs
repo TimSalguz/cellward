@@ -30,6 +30,7 @@
 //! generations, and guessing would start a program in the wrong network.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -111,6 +112,9 @@ pub struct Tools {
     pub grim: Option<PathBuf>,
     /// Optional for old manifests: host-side root-surface video encoding.
     pub ffmpeg: Option<PathBuf>,
+    /// Optional for old manifests: the PipeWire broker and its pinned plugins.
+    pub gst_launch: Option<PathBuf>,
+    pub gst_plugin_path: Option<OsString>,
 }
 
 /// The keys of the manifest, in the order they are reported. Kept next to the
@@ -236,6 +240,8 @@ impl Tools {
             nft: take("nft")?,
             grim: entries.get("grim").map(PathBuf::from),
             ffmpeg: entries.get("ffmpeg").map(PathBuf::from),
+            gst_launch: entries.get("gst-launch").map(PathBuf::from),
+            gst_plugin_path: entries.get("gst-plugin-path").map(OsString::from),
         })
     }
 

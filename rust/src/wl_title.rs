@@ -117,6 +117,7 @@ pub enum MenuRow {
     /// into the window (`cellward clip-window`).
     Clipboard,
     Record,
+    RecordPipeWire,
     Actions,
     Close,
 }
@@ -128,7 +129,8 @@ impl MenuRow {
             Self::Restart => "Перезапустить с выбором сети…",
             Self::InWindow => "Во весь экран внутри окна",
             Self::Clipboard => "Вставить из истории буфера…",
-            Self::Record => "Запись окна (старт/стоп)",
+            Self::Record => "Запись окна в MP4 (старт/стоп)",
+            Self::RecordPipeWire => "Окно как источник PipeWire (старт/стоп)",
             Self::Actions => "Все действия окна…",
             Self::Close => "Закрыть окно",
         }
@@ -136,22 +138,24 @@ impl MenuRow {
 }
 
 /// The dropdown's rows, top to bottom.
-pub const MENU: [MenuRow; 6] = [
+pub const MENU: [MenuRow; 7] = [
     MenuRow::Network,
     MenuRow::Restart,
     MenuRow::Clipboard,
     MenuRow::Record,
+    MenuRow::RecordPipeWire,
     MenuRow::Actions,
     MenuRow::Close,
 ];
 /// ... with fullscreen inside the window among them, where the buttons put
 /// it there.
-const MENU_IN_WINDOW: [MenuRow; 7] = [
+const MENU_IN_WINDOW: [MenuRow; 8] = [
     MenuRow::Network,
     MenuRow::Restart,
     MenuRow::InWindow,
     MenuRow::Clipboard,
     MenuRow::Record,
+    MenuRow::RecordPipeWire,
     MenuRow::Actions,
     MenuRow::Close,
 ];
@@ -2779,7 +2783,7 @@ mod tests {
         let Some(bytes) = font() else { return };
         let prepared = Prepared::new(bytes, "nl · work").expect("a font");
         let (w, h) = menu_size(&prepared.menu);
-        assert!(w >= MENU_MIN_WIDTH && h == 6 * MENU_ROW + 2 * MENU_EDGE);
+        assert!(w >= MENU_MIN_WIDTH && h == 7 * MENU_ROW + 2 * MENU_EDGE);
         let (dw, dh, pixels) =
             render_menu(&prepared.font, &prepared.menu, 480, Rgb(0x30, 0x60, 0x90));
         assert_eq!(
@@ -2787,7 +2791,7 @@ mod tests {
             (device(w, MENU_MAX_SCALE), device(h, MENU_MAX_SCALE))
         );
         let image = (dw * dh * 4) as usize;
-        assert_eq!(pixels.len(), image * 7);
+        assert_eq!(pixels.len(), image * 8);
         let row = |variant: usize, r: i32| {
             let y = device(MENU_EDGE, 240) + r * device(MENU_ROW, 240) + 1;
             let at = variant * image + ((y * dw + dw - 3) * 4) as usize;
@@ -2795,7 +2799,7 @@ mod tests {
         };
         assert_ne!(row(0, 1), row(2, 1), "row 1 lit in image 2");
         assert_eq!(row(0, 0), row(2, 0), "row 0 not");
-        assert!(prepared.menu_bytes() >= image * 6);
+        assert!(prepared.menu_bytes() >= image * 7);
     }
 
     /// The regions: a scale drawn once is reused; one held by the compositor
@@ -3154,6 +3158,7 @@ mod tests {
                 MenuRow::InWindow,
                 MenuRow::Clipboard,
                 MenuRow::Record,
+                MenuRow::RecordPipeWire,
                 MenuRow::Actions,
                 MenuRow::Close
             ][..]

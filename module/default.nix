@@ -312,6 +312,13 @@ let
       grim = "${pkgs.grim}/bin/grim";
       # Host-side encoding of the proxy's root-surface frames, never desktop capture.
       ffmpeg = "${pkgs.ffmpeg}/bin/ffmpeg";
+      gst-launch = "${lib.getBin pkgs.gst_all_1.gstreamer}/bin/gst-launch-1.0";
+      gst-plugin-path = lib.makeSearchPath "lib/gstreamer-1.0" [
+        pkgs.gst_all_1.gstreamer.out
+        pkgs.gst_all_1.gst-plugins-base
+        pkgs.gst_all_1.gst-plugins-good
+        pkgs.pipewire
+      ];
       # Прежний путь к бэкендам AppChooser остаётся для совместимости;
       # брокер и cellward open используют собственное окно (rust/src/links.rs).
       busctl = "${pkgs.systemd}/bin/busctl";
