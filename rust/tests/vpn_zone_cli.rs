@@ -273,6 +273,18 @@ fn transport_inventory_and_manifest_check_never_execute_the_adapter() {
     assert!(checked.status.success(), "{}", stderr(&checked));
     assert!(stdout(&checked).starts_with("reticulum\tplugin\tdatagram"));
     fs::write(
+        manifests.join("gui.conf"),
+        "[Transport]\nName = gui-vpn\nRun = /nonexistent/gui\nChannel = application\nProxy = http\nProxyPort = 8080\nGUI = yes\n",
+    )
+    .unwrap();
+    let listed = home.run(&["transport", "list", "--json"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let text = stdout(&listed);
+    assert!(
+        text.contains("\"publication\":{\"proxy\":\"http\",\"port\":8080,\"gui\":true}"),
+        "{text}"
+    );
+    fs::write(
         manifests.join("broken.conf"),
         "[Transport]\nUnknown = value\n",
     )

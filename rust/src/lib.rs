@@ -180,6 +180,7 @@ pub mod pool;
 pub mod presets;
 pub mod profile;
 pub mod protect;
+pub mod provider;
 pub mod proxy;
 pub mod pulse_filter;
 pub mod pw_context;

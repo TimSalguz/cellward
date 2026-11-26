@@ -83,12 +83,21 @@ impl Capabilities {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publication {
+    pub kind: crate::proxy::Kind,
+    pub port: u16,
+    pub gui: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Adapter {
     pub name: String,
     pub kind: Kind,
     pub channel: Channel,
     pub capabilities: Capabilities,
     pub run: Option<PathBuf>,
+    /// A loopback proxy an application adapter can publish to a proxy zone.
+    pub publication: Option<Publication>,
     /// Run the deterministic lifecycle adapter instead of the normal protocol.
     pub fake: bool,
 }
@@ -101,6 +110,7 @@ impl Adapter {
             channel,
             capabilities: Capabilities::new(ipv6),
             run: None,
+            publication: None,
             fake: false,
         }
     }
@@ -129,6 +139,9 @@ impl Adapter {
             "Multiplex",
             "MTU",
             "Fake",
+            "Proxy",
+            "ProxyPort",
+            "GUI",
         ];
         if let Some(key) = section
             .entries
@@ -175,12 +188,46 @@ impl Adapter {
         if !capabilities.ipv4 && !capabilities.ipv6 {
             return Err("a transport needs IPv4 or IPv6".to_owned());
         }
+        let kind = match section.get("Proxy").map(str::trim) {
+            Some("socks5") => Some(crate::proxy::Kind::Socks5),
+            Some("http") => Some(crate::proxy::Kind::Http),
+            Some(_) => return Err("transport Proxy must be socks5 or http".to_owned()),
+            None => None,
+        };
+        let port = section
+            .get("ProxyPort")
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port != 0)
+                    .ok_or("transport ProxyPort must be a number 1..65535".to_owned())
+            })
+            .transpose()?;
+        let gui = boolean(section, "GUI", false)?;
+        let publication = match (kind, port, gui, channel) {
+            (Some(kind), Some(port), gui, Channel::Application) => {
+                Some(Publication { kind, port, gui })
+            }
+            (Some(_), Some(_), _, _) => {
+                return Err("a proxy transport needs Channel = application".to_owned())
+            }
+            (None, None, false, _) => None,
+            _ => {
+                return Err(
+                    "transport Proxy and ProxyPort are required together; GUI needs a proxy"
+                        .to_owned(),
+                )
+            }
+        };
         Ok(Self {
             name,
             kind: Kind::Plugin,
             channel,
             capabilities,
             run: Some(run),
+            publication,
             fake: boolean(section, "Fake", false)?,
         })
     }
@@ -188,7 +235,7 @@ impl Adapter {
     fn json(&self) -> String {
         use crate::status::string;
         format!(
-            "{{\"name\":{},\"kind\":{},\"channel\":{},\"capabilities\":{{\"ipv4\":{},\"ipv6\":{},\"asymmetric\":{},\"multiplex\":{},\"mtu\":{}}},\"run\":{}}}",
+            "{{\"name\":{},\"kind\":{},\"channel\":{},\"capabilities\":{{\"ipv4\":{},\"ipv6\":{},\"asymmetric\":{},\"multiplex\":{},\"mtu\":{}}},\"run\":{},\"publication\":{}}}",
             string(&self.name),
             string(self.kind.text()),
             string(self.channel.text()),
@@ -201,6 +248,17 @@ impl Adapter {
                 .map_or("null".to_owned(), |mtu| mtu.to_string()),
             self.run.as_ref().map_or("null".to_owned(), |path| {
                 string(&path.as_os_str().to_string_lossy())
+            }),
+            self.publication.as_ref().map_or("null".to_owned(), |published| {
+                format!(
+                    "{{\"proxy\":{},\"port\":{},\"gui\":{}}}",
+                    string(match published.kind {
+                        crate::proxy::Kind::Socks5 => "socks5",
+                        crate::proxy::Kind::Http => "http",
+                    }),
+                    published.port,
+                    published.gui,
+                )
             })
         )
     }
@@ -345,7 +403,7 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
                 } else {
                     for adapter in adapters {
                         println!(
-                            "{}\t{}\t{}\tipv4={} ipv6={} asymmetric={} multiplex={} mtu={}{}",
+                            "{}\t{}\t{}\tipv4={} ipv6={} asymmetric={} multiplex={} mtu={}{}{}",
                             adapter.name,
                             adapter.kind.text(),
                             adapter.channel.text(),
@@ -357,6 +415,20 @@ pub fn run(tools: &Tools, args: &[OsString]) -> u8 {
                                 .capabilities
                                 .mtu
                                 .map_or("unknown".to_owned(), |mtu| mtu.to_string()),
+                            adapter
+                                .publication
+                                .as_ref()
+                                .map_or(String::new(), |published| {
+                                    format!(
+                                        " proxy={}:{} gui={}",
+                                        match published.kind {
+                                            crate::proxy::Kind::Socks5 => "socks5",
+                                            crate::proxy::Kind::Http => "http",
+                                        },
+                                        published.port,
+                                        published.gui,
+                                    )
+                                }),
                             adapter.run.as_ref().map_or(String::new(), |run| {
                                 format!(" run={}", run.as_os_str().to_string_lossy())
                             })
@@ -451,6 +523,27 @@ mod tests {
             &b"[Transport]\nName = x\nRun = /bin/true\nChannel = datagram\nMTU = 2\n"[..],
             &b"[Transport]\nName = x\nRun = /bin/true\nChannel = datagram\nIPv4 = no\nIPv6 = no\n"
                 [..],
+        ] {
+            assert!(Adapter::from_manifest(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_application_adapter_declares_a_loopback_proxy_without_publishing_it() {
+        let adapter = Adapter::from_manifest(
+            b"[Transport]\nName = gui-vpn\nRun = /does/not/run\nChannel = application\nProxy = socks5\nProxyPort = 1080\nGUI = yes\n",
+        )
+        .unwrap();
+        let published = adapter.publication.unwrap();
+        assert_eq!(published.kind, crate::proxy::Kind::Socks5);
+        assert_eq!(published.port, 1080);
+        assert!(published.gui);
+        for bad in [
+            &b"[Transport]\nName = x\nRun = /bin/true\nChannel = datagram\nProxy = socks5\nProxyPort = 1080\n"[..],
+            &b"[Transport]\nName = x\nRun = /bin/true\nChannel = application\nProxy = socks5\n"[..],
+            &b"[Transport]\nName = x\nRun = /bin/true\nChannel = application\nProxyPort = 1080\n"[..],
+            &b"[Transport]\nName = x\nRun = /bin/true\nChannel = application\nProxyPort = 0\nProxy = http\n"[..],
+            &b"[Transport]\nName = x\nRun = /bin/true\nChannel = application\nGUI = yes\n"[..],
         ] {
             assert!(Adapter::from_manifest(bad).is_err(), "{bad:?}");
         }

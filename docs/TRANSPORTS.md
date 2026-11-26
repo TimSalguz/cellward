@@ -4,9 +4,9 @@ Cellward has three built-in adapters: WireGuard (`wg`), AmneziaWG (`awg`) and
 OpenConnect. External adapters use the same inventory but are not granted a
 route merely by being installed.
 
-This first slice is deliberately read-only: `cellward transport list [--json]`
-shows the inventory and `cellward transport check <file>` validates one
-manifest. Neither command executes the adapter.
+`cellward transport list [--json]` shows the inventory and `cellward transport
+check <file>` validates one manifest. Neither command executes the adapter;
+`selftest`, explicitly requested below, is the exception.
 
 ## SOCKS5 and HTTP CONNECT zones
 
@@ -44,6 +44,28 @@ outer route must provide the address family of the proxy server. GUI-only VPN
 clients can use this backend by exposing a local SOCKS5 endpoint inside their
 adapter's uplink; the GUI application itself is not implicitly trusted as a
 full-tunnel route.
+
+An application adapter declares that endpoint in its manifest:
+
+```ini
+[Transport]
+Name = vendor-gui
+Run = /absolute/path/to/provider
+Channel = application
+Proxy = socks5
+ProxyPort = 1080
+GUI = yes
+```
+
+`Proxy` and `ProxyPort` are required together. `GUI` defaults to no and is
+meaningful only with a published proxy. A published endpoint is loopback-only
+by contract; the declaration alone neither starts the provider nor gives it a
+route. `rust/src/provider.rs` implements the subsequent readiness check:
+SOCKS5 method and optional username/password negotiation, or a bounded HTTP
+CONNECT response with optional Basic authentication. A refused CONNECT to
+loopback port 1 proves HTTP protocol readiness without resolving a name or
+sending application traffic; authentication refusal and malformed responses
+are errors, and credentials are never included in error text.
 
 ## Scoped access to a zone
 
