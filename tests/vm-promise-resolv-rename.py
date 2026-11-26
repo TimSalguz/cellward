@@ -70,7 +70,19 @@ def held_cmd(cmd):
 
 
 def in_held(cmd):
-    return alice(held_cmd(cmd))
+    # nsenter changes namespaces, not the caller's cgroup. A raw probe from the
+    # driver's backdoor is therefore an unknown, correctly dropped by strict
+    # ownership. Put the probe into the held launch's birth cgroup first, then
+    # inspect that launch's mount namespace exactly as before.
+    held = machine.succeed(HELD).strip()
+    membership = machine.succeed(f"cat /proc/{held}/cgroup").strip()
+    assert membership.startswith("0::/"), membership
+    procs = f"/sys/fs/cgroup{membership[3:]}/cgroup.procs"
+    enter = "export XDG_RUNTIME_DIR=/run/user/1000; " + held_cmd(cmd)
+    return machine.succeed(
+        f"printf '%s\\n' $$ > {shlex.quote(procs)}; "
+        f"exec su -l alice -c {shlex.quote(enter)}"
+    )
 
 
 def held_q(cmd):
@@ -100,7 +112,7 @@ def end_instance():
     machine.wait_until_fails(f"test -e {STATE}/.instances/{ikey(D2)}", timeout=60)
 
 
-def own_everywhere(zp, tag):
+def own_everywhere_checked(zp, tag):
     """The zone, the program launched before and one launched now: each
     reads its own file — laid again, once, on the name — and asks the
     tunnel's DNS, which answers 10.99.0.9."""
@@ -131,6 +143,52 @@ def own_everywhere(zp, tag):
         print(f"{name}: {out}")
         assert "10.66.66.66" not in out, f"DNS LEAK: the host's resolver answered {where}: {out}"
         assert "10.99.0.9" in out, f"the tunnel's DNS does not answer {where}: {out}"
+
+
+def own_everywhere(zp, tag):
+    try:
+        own_everywhere_checked(zp, tag)
+    except Exception:
+        # Keep the first failure and all of its attempts visible. In particular,
+        # do not retry a held probe until it happens to pass.
+        print(f"D2 FAILURE {tag}: preserving resolver, packet and strict-owner state")
+        try:
+            print(f"--- held launch cgroup ---\n{machine.succeed(f'cat /proc/$({HELD})/cgroup')}")
+        except Exception as error:
+            print(f"--- held launch cgroup: capture failed: {error} ---")
+        for label, command in (
+            ("held nsswitch.conf", in_held),
+            ("held strict-owner rules", lambda c: alice(
+                f"nsenter -U -m -n -p -t $({HELD}) -- {c}"
+            )),
+            ("zone strict-owner rules", lambda c: in_zone_root(zp, c)),
+        ):
+            try:
+                inspect = "sh -c 'cat /etc/nsswitch.conf; cat /proc/self/cgroup; nft list ruleset'"
+                print(f"--- {label} ---\n{command(inspect)}")
+            except Exception as error:
+                print(f"--- {label}: capture failed: {error} ---")
+        try:
+            print(f"--- cellward status ---\n{alice('cellward status --json')}")
+        except Exception as error:
+            print(f"--- status capture failed: {error} ---")
+        for vm, source, target in (
+            (server, "/tmp/dns.log", "d2-failure-dns.log"),
+            (server, "/tmp/d2.pcap", "d2-failure.pcap"),
+            (machine, "/tmp/d2-leak.pcap", "d2-failure-leak.pcap"),
+        ):
+            try:
+                vm.copy_from_vm(source, target)
+                print(f"preserved {source} as {target}")
+            except Exception as error:
+                print(f"could not preserve {source}: {error}")
+        try:
+            server.succeed("systemctl stop d2watch")
+            print(f"--- /tmp/d2.pcap ---\n{server.succeed('tcpdump -nr /tmp/d2.pcap 2>/dev/null')}")
+            print(f"--- /tmp/dns.log ---\n{server.succeed('cat /tmp/dns.log')}")
+        except Exception as error:
+            print(f"--- packet/log decoding failed: {error} ---")
+        raise
 
 
 with subtest("the host's resolv.conf replaced by rename: its own laid again in the zone and the instance, names through the tunnel's DNS"):
