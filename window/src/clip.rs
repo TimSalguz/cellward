@@ -2394,40 +2394,50 @@ impl Clip {
                         .on_press(Msg::Switch(name.clone())),
                 );
             }
-            page = page.push(tabs.wrap().vertical_spacing(6));
-        }
-        page = page.push(
-            row![
-                button(text("История").size(13))
-                    .style(if self.favorites || self.secrets {
-                        button::secondary
-                    } else {
-                        crate::appearance::primary_button
-                    })
-                    .on_press(Msg::Shelf(false)),
-                button(text("Избранное").size(13))
-                    .style(if self.favorites {
-                        crate::appearance::primary_button
-                    } else {
-                        button::secondary
-                    })
-                    .on_press(Msg::Shelf(true)),
-                button(text("Пароли").size(13))
-                    .style(if self.secrets {
-                        crate::appearance::primary_button
-                    } else {
-                        button::secondary
-                    })
-                    .on_press(Msg::Secrets),
-                container(text("")).width(Length::Fill),
+            tabs = tabs.push(container(text("")).width(Length::Fill));
+            tabs = tabs.push(
                 button(text("✕").size(16))
                     .padding([4, 10])
                     .style(button::secondary)
                     .on_press(Msg::Close),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
-        );
+            );
+            page = page.push(tabs.wrap().vertical_spacing(6));
+        }
+        let mut shelves = row![
+            button(text("История").size(13))
+                .style(if self.favorites || self.secrets {
+                    button::secondary
+                } else {
+                    crate::appearance::primary_button
+                })
+                .on_press(Msg::Shelf(false)),
+            button(text("Избранное").size(13))
+                .style(if self.favorites {
+                    crate::appearance::primary_button
+                } else {
+                    button::secondary
+                })
+                .on_press(Msg::Shelf(true)),
+            button(text("Пароли").size(13))
+                .style(if self.secrets {
+                    crate::appearance::primary_button
+                } else {
+                    button::secondary
+                })
+                .on_press(Msg::Secrets),
+            container(text("")).width(Length::Fill),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        if !self.manager {
+            shelves = shelves.push(
+                button(text("✕").size(16))
+                    .padding([4, 10])
+                    .style(button::secondary)
+                    .on_press(Msg::Close),
+            );
+        }
+        page = page.push(shelves);
         page = page.push(
             checkbox(self.type_enabled)
                 .label("Ввод по символам")
@@ -2646,6 +2656,12 @@ impl Clip {
     }
 
     fn view_workspace(&self) -> Element<'_, Msg> {
+        if self.window_width < 640.0 {
+            return container(self.view_feed())
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into();
+        }
         let feed = container(self.view_feed())
             .width(Length::FillPortion(2))
             .height(Length::Fill);
@@ -2655,10 +2671,13 @@ impl Clip {
         if self.window_width >= 900.0 {
             row![feed, details].spacing(12).height(Length::Fill).into()
         } else {
-            column![feed, details]
-                .spacing(12)
-                .height(Length::Fill)
-                .into()
+            column![
+                container(feed).width(Length::FillPortion(3)),
+                container(details).width(Length::FillPortion(2)),
+            ]
+            .spacing(12)
+            .height(Length::Fill)
+            .into()
         }
     }
 
@@ -2719,6 +2738,12 @@ impl Clip {
                     .size(15)
                     .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new()
+                    .width(6)
+                    .scroller_width(6)
+                    .spacing(4),
+            ))
             .height(Length::Fill)
             .into()
         };
@@ -2793,6 +2818,12 @@ impl Clip {
         }
         scrollable(feed)
             .id(FEED)
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new()
+                    .width(6)
+                    .scroller_width(6)
+                    .spacing(4),
+            ))
             .anchor_bottom()
             .on_scroll(Msg::Scrolled)
             .height(Length::Fill)
@@ -4490,7 +4521,7 @@ mod tests {
     #[test]
     fn workspace_switches_between_side_by_side_and_stacked_panes() {
         let mut c = clip();
-        for (width, stacked) in [(1200.0, false), (600.0, true)] {
+        for (width, stacked) in [(1200.0, false), (700.0, true)] {
             let _ = c.update(Msg::Resized(width));
             let mut workspace = c.view_workspace();
             let mut tree = iced::advanced::widget::Tree::new(&workspace);
@@ -4509,6 +4540,32 @@ mod tests {
                 assert!(second.x > first.x, "wide panes are not side by side");
             }
         }
+    }
+
+    #[test]
+    fn workspace_hides_details_and_reserves_scrollbar_space_when_narrow() {
+        let mut c = clip();
+        c.entries = (1..=50).map(|id| entry(id, id as i64)).collect();
+        let _ = c.update(Msg::Resized(600.0));
+        let mut workspace = c.view_workspace();
+        let mut tree = iced::advanced::widget::Tree::new(&workspace);
+        let renderer = iced::Renderer::new(iced::Font::default(), iced::Pixels(16.0));
+        let limits = iced::advanced::layout::Limits::new(Size::ZERO, Size::new(600.0, 700.0));
+        let node = workspace
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(node.children().len(), 1, "details were not hidden");
+
+        let mut feed = c.view_feed();
+        let mut tree = iced::advanced::widget::Tree::new(&feed);
+        let limits = iced::advanced::layout::Limits::new(Size::ZERO, Size::new(300.0, 700.0));
+        let node = feed.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let content = node.children()[0].bounds();
+        assert!(
+            content.width < node.bounds().width,
+            "scrollbar floats over content: {content:?} vs {:?}",
+            node.bounds()
+        );
     }
 
     #[test]
