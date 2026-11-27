@@ -2002,7 +2002,8 @@ impl Proxy {
             }
             return;
         }
-        if ask == Ask::ScreenshotWindow {
+        let root_capture = matches!(ask, Ask::ScreenshotWindow | Ask::ScreenshotArea);
+        if root_capture {
             let Some((fd, path)) = self.capture_handshake() else {
                 eprintln!("wl-sandbox: root-surface capture is unavailable for this buffer");
                 return;
@@ -2015,17 +2016,15 @@ impl Proxy {
                     manifest,
                     self.display.as_deref(),
                     std::process::id(),
+                    ask,
                     Some(path),
                 )
             });
         }
-        let shot = matches!(
-            ask,
-            Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover
-        );
+        let hover = ask == Ask::ScreenshotHover;
         self.start_unit(
-            if shot { &self.shots } else { &self.menu },
-            if shot {
+            if hover { &self.shots } else { &self.menu },
+            if hover {
                 "screenshot preview"
             } else {
                 "window menu"
@@ -2268,16 +2267,10 @@ fn menu_capture_argv(
     manifest: &OsStr,
     display: Option<&OsStr>,
     pid: u32,
+    ask: Ask,
     capture: Option<String>,
 ) -> Vec<OsString> {
-    let mut argv = menu_argv(
-        systemd_run,
-        core,
-        manifest,
-        display,
-        pid,
-        Ask::ScreenshotWindow,
-    );
+    let mut argv = menu_argv(systemd_run, core, manifest, display, pid, ask);
     if let Some(path) = capture {
         argv.push("--proxy-fd".into());
         argv.push(path.into());
@@ -6806,6 +6799,20 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
         };
+        let capture = |ask| {
+            menu_capture_argv(
+                Path::new("/s/systemd-run"),
+                Path::new("/nix/store/x-cellward/bin/vpn-zone-core"),
+                OsStr::new("/nix/store/t-tools.json"),
+                None,
+                4242,
+                ask,
+                Some("/proc/self/fd/7".to_owned()),
+            )
+            .into_iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+        };
         assert_eq!(
             argv(Some("wayland-1"), Ask::Menu),
             [
@@ -6836,6 +6843,19 @@ mod tests {
             assert!(shot.iter().any(|a| a == "--wait"));
             assert!(shot.iter().any(|a| a == "--unit=cellward-screenshot-4242"));
             assert!(!shot.iter().any(|a| a == "--property=KillMode=process"));
+            if ask != Ask::ScreenshotHover {
+                let captured = capture(ask);
+                assert_eq!(
+                    captured[captured.len() - 5..],
+                    [
+                        "window-screenshot",
+                        "4242",
+                        mode,
+                        "--proxy-fd",
+                        "/proc/self/fd/7"
+                    ]
+                );
+            }
         }
         let network = argv(None, Ask::Network);
         assert!(!network.iter().any(|a| a.contains("WAYLAND_DISPLAY")));

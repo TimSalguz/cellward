@@ -77,13 +77,17 @@ through the trusted `cellward window-record --pid` command. `Session.Close` or c
 the chooser stops that portal-owned source; a source already started from the frame is
 neither adopted nor stopped.
 
-Region and hover captures intentionally keep the composited screen view and use
-the manifest-pinned `grim`. In particular, niri's native screenshot action is
-unsuitable for private copies because it also writes the desktop clipboard.
-The desired complete isolated-window mode must additionally capture owned
-popups and subsurfaces without the desktop, unrelated windows, Cellward frame
-or compositor decorations. Application alpha must be preserved explicitly or
-flattened against a chosen solid background, never against desktop pixels.
+Window and region captures receive the same root surface through the proxy's
+memfd and crop only that image. An unsupported buffer is an explicit error,
+never a fallback to the whole desktop. Hover keeps the composited frame for
+now so its owned subsurface tooltip is not lost; composing those subsurfaces
+safely with the root surface is a separate task. In particular, niri's native
+screenshot action is unsuitable for private copies because it also writes the
+desktop clipboard. The desired complete isolated-window mode must additionally
+capture owned popups and subsurfaces without the desktop, unrelated windows,
+Cellward frame or compositor decorations. Application alpha must be preserved
+explicitly or flattened against a chosen solid background, never against
+desktop pixels.
 Niri's clipboard behaviour is documented in its
 [screenshot actions](https://github.com/niri-wm/niri/blob/main/docs/wiki/Configuration%3A-Key-Bindings.md#screenshot-screenshot-screen-screenshot-window).
 

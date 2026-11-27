@@ -3512,7 +3512,10 @@ impl Window {
                 f.asks.capture_window(&self.me);
                 f.asks.push(Ask::ScreenshotWindow);
             }
-            Button::ScreenshotArea => f.asks.push(Ask::ScreenshotArea),
+            Button::ScreenshotArea => {
+                f.asks.capture_window(&self.me);
+                f.asks.push(Ask::ScreenshotArea);
+            }
             Button::ScreenshotHover => screenshot::arm(self.root.clone()),
         }
     }

@@ -224,36 +224,38 @@ with subtest("two windows of one launch resize and keep their hover buttons usab
 
     boxes = settled("niri-two-windows", two_frames, tries=60)
 
-    with subtest("root-surface capture bypasses the compositor and excludes Cellward's frame"):
-        target = boxes[0]
-        right = target[2] + 1
-        x = right - (8 - 4) * 24 + 12
-        y = target[1] + 4 + 10
-        pointer("move", x, y)
-        pointer("press")
-        pointer("release")
-        machine.sleep(1)
-        listed = machine.succeed(f"ls -l /proc/{supervisor}/fd | grep cellward-capture")
-        fd = listed.split()[8]
-        raw = base64.b64decode(machine.succeed(f"base64 -w0 /proc/{supervisor}/fd/{fd}"))
-        width, height, stride, format = [
-            int.from_bytes(raw[at:at + 4], "little") for at in range(0, 16, 4)
-        ]
-        assert width > 0 and height > 0 and stride >= width * 4
-        assert len(raw) == 16 + stride * height
-        framed_pixels = sum(
-            int.from_bytes(raw[at:at + 4], "little") == 0xFFFF00FF
-            for at in range(16, len(raw), 4)
-        )
-        assert framed_pixels == 0, f"proxy frame reached capture: {framed_pixels} pixels"
-        machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=5)
-        preview_pid = int(machine.succeed("pgrep -x vpn-zone-window").splitlines()[0])
-        preview = next(
-            w for w in json.loads(alice(f"{niri_cmd} windows"))
-            if w["pid"] == preview_pid
-        )
-        alice(f"{niri_cmd} action close-window --id {preview['id']}")
-        machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=5)
+    for mode, button_index in [("window", 4), ("area", 5)]:
+        with subtest(f"{mode} capture uses the root surface and excludes Cellward's frame"):
+            boxes = settled(f"niri-two-windows-before-{mode}", two_frames)
+            target = boxes[0]
+            right = target[2] + 1
+            x = right - (8 - button_index) * 24 + 12
+            y = target[1] + 4 + 10
+            pointer("move", x, y)
+            pointer("press")
+            pointer("release")
+            machine.sleep(1)
+            listed = machine.succeed(f"ls -l /proc/{supervisor}/fd | grep cellward-capture")
+            fd = listed.split()[8]
+            raw = base64.b64decode(machine.succeed(f"base64 -w0 /proc/{supervisor}/fd/{fd}"))
+            width, height, stride, format = [
+                int.from_bytes(raw[at:at + 4], "little") for at in range(0, 16, 4)
+            ]
+            assert width > 0 and height > 0 and stride >= width * 4
+            assert len(raw) == 16 + stride * height
+            framed_pixels = sum(
+                int.from_bytes(raw[at:at + 4], "little") == 0xFFFF00FF
+                for at in range(16, len(raw), 4)
+            )
+            assert framed_pixels == 0, f"proxy frame reached capture: {framed_pixels} pixels"
+            machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=5)
+            preview_pid = int(machine.succeed("pgrep -x vpn-zone-window").splitlines()[0])
+            preview = next(
+                w for w in json.loads(alice(f"{niri_cmd} windows"))
+                if w["pid"] == preview_pid
+            )
+            alice(f"{niri_cmd} action close-window --id {preview['id']}")
+            machine.wait_until_fails("pgrep -x vpn-zone-window", timeout=5)
 
     boxes = settled("niri-two-windows-after-capture", two_frames)
 
