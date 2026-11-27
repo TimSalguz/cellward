@@ -42,6 +42,12 @@ cross-instance transfer operation. Prepare/commit are authenticated host-only
 controller operations. Older brokers without the capability retain ordinary
 copying and do not enable the new shortcut interception.
 
+A launch or container marked as automation keeps its selections local and never
+replaces the latest user-copy candidate. Use `--automation` on a launch,
+`cellward container set <name> automation on`, or `containers.<name>.automation =
+true` in Nix. Local reads and pastes within that instance still work; an explicit
+user paste into it is unchanged.
+
 This shortcut handles running private instances. An unconfined launch through the
 updated launcher gets a `main:u<PID>` scope without filesystem or network
 sandboxing. Its canonical history is the real home, so current `main:*` clips are

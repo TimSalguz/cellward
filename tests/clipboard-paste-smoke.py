@@ -192,6 +192,19 @@ def main():
         assert output.read_bytes() == before, 'text-only foot unexpectedly accepted image/png'
         print('real trusted window renders and confirms the PNG transfer', flush=True)
         before = output.read_bytes()
+        automation_control = root / 'automation-copy.json'
+        automation_control.write_text(json.dumps({'epoch': 1, 'types': {'text/plain': 'AUTOMATION private'}}))
+        start([args.core, 'wl-sandbox', 'automation-source', '--automation',
+               *scope('automation-source', source_holder), '--',
+               sys.executable, str(tests / 'private-clipboard-smoke.py'), 'fault-owner', str(automation_control)],
+              'automation-source')
+        time.sleep(.5)
+        key(47, 5)
+        time.sleep(.7)
+        assert not menu(), 'automation copy opened a user-transfer preview'
+        assert output.read_bytes() == before, 'automation text reached the target'
+        print('automation selections remain local instead of becoming the user copy', flush=True)
+        before = output.read_bytes()
         control.write_text(json.dumps({'epoch': 6, 'types': {'text/plain': 'SYNTHETIC password', 'x-kde-passwordManagerHint': 'secret'}}))
         time.sleep(.2)
         key(47, 5)

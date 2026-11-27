@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Launches and containers can be marked as automation: their selections stay
+  local instead of replacing the latest user-copy candidate for cross-container paste.
 - Cross-container paste confirmation renders a bounded PNG preview from an
   inherited memfd, without temporary files; secret images remain hidden.
 - The frame dropdown now opens container permissions, network pinning, frame

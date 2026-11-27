@@ -28,7 +28,7 @@
 //! [--require-proxy]
 //! [--frame <rrggbb>:<width>:<always|hover|off>[:<buttons>:<style>:<radius>]
 //! --frame-title <text> --frame-switch <settings dir>]
-//! [--focus input|notify|ask|allow] -- <command> [args…]`.
+//! [--focus input|notify|ask|allow] [--automation] -- <command> [args…]`.
 //!
 //! **Where it runs.** On the host, before the launch enters its zone
 //! (`docs/LEAK-MODEL.md` §13): a zone does not have the compositor's own
@@ -296,6 +296,8 @@ pub struct Args {
     pub clip_history: String,
     /// Host-only binding to a live instance: id, holder pid and start stamp.
     pub clipboard_scope: Option<(String, i32, String)>,
+    /// `--automation`: keep this launch's copies out of the global paste candidate.
+    pub automation: bool,
     /// Never run the program without a restricted compositor/proxy connection.
     pub require_proxy: bool,
     /// The program and its arguments.
@@ -352,7 +354,7 @@ impl std::error::Error for ArgError {}
 impl Args {
     /// Parse `<app-id> [--zone <zone>] [--no-proxy] [--require-proxy] [--frame
     /// <rrggbb>:<w>[:<mode>]] [--frame-title <text>] [--frame-switch <dir>]
-    /// [--focus <policy>] -- cmd...`.
+    /// [--focus <policy>] [--automation] -- cmd...`.
     ///
     /// The command keeps its `OsString`s: an argument can be a file name handed
     /// over by the launcher through a `%U` field code, and those are bytes, not
@@ -380,6 +382,7 @@ impl Args {
         let mut camera = None;
         let mut clip_history = crate::container::MAIN_RECORD.to_owned();
         let mut clipboard_scope = None;
+        let mut automation = false;
         let mut require_proxy = false;
         let mut words = argv[..split].iter();
         while let Some(word) = words.next() {
@@ -443,6 +446,8 @@ impl Args {
                     return Err(ArgError::BadFrame);
                 }
                 clip_history = name.into_owned();
+            } else if word == "--automation" {
+                automation = true;
             } else if word == "--always-focused" {
                 always_focused = true;
             } else if word == "--focus" {
@@ -509,6 +514,7 @@ impl Args {
             camera,
             clip_history,
             clipboard_scope,
+            automation,
             require_proxy,
             cmd,
         })
@@ -940,6 +946,7 @@ pub fn run(args: Args) -> u8 {
                             id: id.clone(),
                             history: args.clip_history.clone(),
                             owner,
+                            automation: args.automation,
                         },
                     )
                 })
@@ -1288,6 +1295,13 @@ mod tests {
             socket_display("nl", 1234),
             "vpn-zones/wayland/nl/wl-sandbox-1234"
         );
+    }
+
+    #[test]
+    fn automation_is_read_as_a_sandbox_flag() {
+        let args = Args::parse(&argv(&["foot", "--automation", "--", "x"])).unwrap();
+        assert!(args.automation);
+        assert_eq!(args.cmd, argv(&["x"]));
     }
 
     #[test]

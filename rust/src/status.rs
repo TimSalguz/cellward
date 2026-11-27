@@ -1048,7 +1048,7 @@ pub fn container(tools: &Tools, c: &Container) -> String {
     format!(
         "{{\"name\":{},\"selector\":{},\"home\":{},\"network\":{},\"apps\":{apps},\
          \"permissions\":{permissions},\"folder_rules\":{folder_rules},\"compositor\":{},\"trust\":{},\"running\":{},\
-         \"x11\":{},\"frame_color\":{frame_color},\"frame_width\":{frame_width},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"camera_mode\":{camera_mode},\"timezone\":{timezone},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},{own},\"instances\":{instances}}}",
+         \"x11\":{},\"frame_color\":{frame_color},\"frame_width\":{frame_width},\"microphone\":{microphone},\"screencast\":{screencast},\"camera\":{camera},\"camera_mode\":{camera_mode},\"timezone\":{timezone},\"devices\":{devices},\"links\":{links},\"focus\":{focus},\"always_focused\":{},\"automation\":{},{own},\"instances\":{instances}}}",
         string(&c.name),
         string(&c.selector()),
         sourced_str(c.home.as_str(), home_source),
@@ -1065,6 +1065,10 @@ pub fn container(tools: &Tools, c: &Container) -> String {
         // Its windows always think they have the focus (3d): its own word,
         // off without one.
         match &c.always_focused {
+            Some(a) => sourced(a.value.to_string(), a.source),
+            None => sourced("false".to_owned(), Source::Default),
+        },
+        match &c.automation {
             Some(a) => sourced(a.value.to_string(), a.source),
             None => sourced("false".to_owned(), Source::Default),
         }

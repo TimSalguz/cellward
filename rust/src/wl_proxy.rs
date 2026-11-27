@@ -515,6 +515,7 @@ pub(crate) struct ClipboardBinding {
     pub(crate) id: String,
     pub(crate) history: String,
     pub(crate) owner: OwnedFd,
+    pub(crate) automation: bool,
 }
 
 pub struct Proxy {
@@ -1120,7 +1121,10 @@ pub(crate) fn start_private(
                 clip.as_deref()
             });
             if let Some(bound) = private {
-                if let Err(e) = crate::wl_frame::private_clipboard::initialize(bound) {
+                if let Err(e) = crate::wl_frame::private_clipboard::initialize(
+                    bound,
+                    clipboard.as_ref().is_some_and(|binding| binding.automation),
+                ) {
                     eprintln!("wl-sandbox: private clipboard: {e}");
                     return 1;
                 }

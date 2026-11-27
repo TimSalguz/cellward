@@ -35,16 +35,21 @@ fn choice(at: usize) -> Selection {
     }
 }
 
+fn user_copy(at: usize, automation: bool, types: &[String]) -> bool {
+    at == 0 && !automation && !types.iter().any(|t| t == "application/x-cellward-restored")
+}
+
 pub(crate) fn enabled() -> bool {
     STATE.with(|s| s.borrow().is_some())
 }
-pub(crate) fn initialize(bound: Bound) -> io::Result<()> {
+pub(crate) fn initialize(bound: Bound, automation: bool) -> io::Result<()> {
     let client = BrokerClient::new(bound.data)?;
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             client: Some(client),
             metadata: bound.captures.map(Metadata::new).transpose()?,
             connected: true,
+            automation,
             reconnect_at: None,
             local: [0; 2],
             changing: [None; 2],
@@ -315,8 +320,7 @@ pub(super) fn set(
             if let Some(source) = source {
                 s.clear[at] = false;
                 if let Some(meta) = &mut s.metadata {
-                    let user_copy =
-                        at == 0 && !types.iter().any(|t| t == "application/x-cellward-restored");
+                    let user_copy = user_copy(at, s.automation, &types);
                     meta.begin(which, local, user_copy);
                 }
                 if !overflow && !types.is_empty() {
@@ -370,6 +374,7 @@ struct State {
     client: Option<BrokerClient>,
     metadata: Option<Metadata>,
     connected: bool,
+    automation: bool,
     reconnect_at: Option<Instant>,
     local: [u64; 2],
     changing: [Option<u64>; 2],
@@ -858,6 +863,7 @@ mod tests {
             client: Some(BrokerClient::new(bound.data).unwrap()),
             metadata: Some(Metadata::new(bound.captures.unwrap()).unwrap()),
             connected: true,
+            automation: false,
             reconnect_at: None,
             local: [0; 2],
             changing: [None; 2],
@@ -893,9 +899,21 @@ mod tests {
     }
 
     #[test]
+    fn automation_selections_are_not_global_user_copies() {
+        assert!(user_copy(0, false, &[]));
+        assert!(!user_copy(0, true, &[]));
+        assert!(!user_copy(1, false, &[]));
+        assert!(!user_copy(
+            0,
+            false,
+            &["application/x-cellward-restored".to_owned()]
+        ));
+    }
+
+    #[test]
     fn missing_response_times_out_and_a_later_reconnect_succeeds() {
         let (first, _data, _metadata, _signal) = bound();
-        initialize(first).unwrap();
+        initialize(first, false).unwrap();
         STATE.with(|s| s.borrow_mut().as_mut().unwrap().disable());
         let requested = Instant::now();
         assert!(reconnect_requested(requested));

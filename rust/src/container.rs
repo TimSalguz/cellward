@@ -248,6 +248,9 @@ pub struct Container {
     /// the keyboard's and the pointer's leave held back. Off unless it says
     /// so.
     pub always_focused: Option<Sourced<bool>>,
+    /// Automation launches keep their copies local instead of announcing them
+    /// as the latest user copy for cross-container paste.
+    pub automation: Option<Sourced<bool>>,
     /// The colour of its windows' frame (`#rrggbb`); none of its own is the
     /// zone's (`docs/PERMISSIONS.md` §11.10).
     pub frame_color: Option<Sourced<String>>,
@@ -1958,6 +1961,23 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
             })
         });
 
+    let automation = declared_conf
+        .and_then(|conf| {
+            values(conf, "automation")
+                .last()
+                .map(|v| matches!(v, "true" | "on" | "yes"))
+        })
+        .map(|value| Sourced {
+            value,
+            source: Source::Nix,
+        })
+        .or_else(|| {
+            values(&local, "automation").last().map(|v| Sourced {
+                value: matches!(v, "true" | "on" | "yes"),
+                source: Source::Local,
+            })
+        });
+
     let color = |conf: &[(String, String)]| {
         values(conf, "frame_color")
             .last()
@@ -2051,6 +2071,7 @@ fn load_quiet(tools: &Tools, selector: &str) -> Option<Container> {
         expires,
         x11,
         always_focused,
+        automation,
         dir,
         policy,
     })
@@ -2810,6 +2831,25 @@ pub fn set_always_focused(tools: &Tools, selector: &str, on: Option<bool>) -> Re
     write_key(
         &container.policy.join(FILE),
         "always_focused",
+        on.map(|on| if on { "true" } else { "false" }),
+        true,
+    )
+}
+
+pub fn set_automation(tools: &Tools, selector: &str, on: Option<bool>) -> Result<(), String> {
+    let container = load(tools, selector).ok_or_else(|| format!("контейнера {selector} нет"))?;
+    if container
+        .automation
+        .as_ref()
+        .is_some_and(|a| a.source == Source::Nix)
+    {
+        return Err(format!(
+            "automation контейнера {selector} задано в Nix — меняется там"
+        ));
+    }
+    write_key(
+        &container.policy.join(FILE),
+        "automation",
         on.map(|on| if on { "true" } else { "false" }),
         true,
     )
@@ -3662,6 +3702,19 @@ mod tests {
         assert!(old.downloads);
     }
 
+    #[test]
+    fn automation_is_a_saved_container_setting() {
+        let t = Tmp::new("automation");
+        let tools = tools_in(&t.0);
+        create(&tools, "agents", Home::Private).unwrap();
+        set_automation(&tools, "agents", Some(true)).unwrap();
+        assert!(load(&tools, "agents").unwrap().automation.unwrap().value);
+        set_automation(&tools, "agents", Some(false)).unwrap();
+        assert!(!load(&tools, "agents").unwrap().automation.unwrap().value);
+        set_automation(&tools, "agents", None).unwrap();
+        assert!(load(&tools, "agents").unwrap().automation.is_none());
+    }
+
     /// A container's own frame colour: set, refused when it is no colour,
     /// taken back to the zone's (`docs/PERMISSIONS.md` §11.10).
     #[test]
@@ -4016,6 +4069,7 @@ mod tests {
             expires: Vec::new(),
             x11: None,
             always_focused: None,
+            automation: None,
             frame_color: None,
             microphone: None,
             screencast: None,

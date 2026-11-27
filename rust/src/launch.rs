@@ -200,6 +200,9 @@ pub struct Selection {
     pub zone: OsString,
     pub container: Container,
     pub sandbox: Sandbox,
+    /// `--automation`: this launch's copies stay local instead of becoming
+    /// the global cross-container paste candidate.
+    pub automation: bool,
     /// `--with <key>=<value>`, repeated: a permission of this launch alone
     /// ([`WITH_KEYS`]), where its container has no record to keep one in —
     /// a throwaway's; refused for one that has ([`resolve_selection`]).
@@ -280,7 +283,7 @@ impl std::error::Error for ArgError {}
 
 impl Selection {
     /// Parse `<zone> [--container C | --profile P | -p P | --tmp-profile
-    /// [--join DIR]] [--fs-sandbox | --sandbox NAME] [--] cmd…`.
+    /// [--join DIR]] [--fs-sandbox | --sandbox NAME] [--automation] [--] cmd…`.
     ///
     /// Positional, exactly as the shell version: the container flag may only
     /// come first and the sandbox flag second, and everything after the
@@ -353,6 +356,13 @@ impl Selection {
             _ => Sandbox::None,
         };
 
+        let automation = if rest.first().is_some_and(|f| f == "--automation") {
+            rest.remove(0);
+            true
+        } else {
+            false
+        };
+
         let mut with = Vec::new();
         while rest.first().is_some_and(|f| f == "--with") {
             let pair = rest
@@ -372,6 +382,7 @@ impl Selection {
             zone,
             container,
             sandbox,
+            automation,
             with,
             cmd: rest,
         })
@@ -445,6 +456,9 @@ pub fn strip_selection(argv: &[OsString]) -> Vec<OsString> {
             rest.drain(..2.min(rest.len()));
         }
         _ => {}
+    }
+    if let Some(at) = rest.iter().position(|f| f == "--automation") {
+        rest.remove(at);
     }
     while rest.first().is_some_and(|f| f == "--with") {
         rest.drain(..2.min(rest.len()));
@@ -680,7 +694,7 @@ const RUN_USAGE: &str = "cellward run <сеть> [контейнер] [--] [ко
   --tmp-profile [--join <каталог>]  разовый слой над домом\n\
   --no-isolation          встроенный контейнер без изоляции;\n\
                           не отменяет ограничения host-files сети\n\
-  --with <ключ=значение>  разрешение одного разового запуска\n";
+  --automation            копии запуска остаются локальными и не становятся\n                          кандидатом на межконтейнерную вставку\n  --with <ключ=значение>  разрешение одного разового запуска\n";
 
 /// Run a program inside a zone. Returns only when something went wrong: the
 /// successful path ends in `execvp`.
@@ -1132,6 +1146,14 @@ pub fn run(tools: &Tools, argv: &[OsString]) -> u8 {
             .is_some_and(|a| a.value);
         if always_focused {
             wrap.push("--always-focused".into());
+        }
+        let automation = selection.automation
+            || record_name(&selection)
+                .and_then(|name| crate::container::load(tools, &name))
+                .and_then(|c| c.automation)
+                .is_some_and(|a| a.value);
+        if automation {
+            wrap.push("--automation".into());
         }
         // A black camera: served from the supervisor, on the host.
         if camera_mode.black() {
@@ -4176,6 +4198,18 @@ mod tests {
         .unwrap();
         assert_eq!(s.container, Container::TmpJoin(PathBuf::from("/tmp/p")));
         assert_eq!(s.cmd, argv(&["x"]));
+    }
+
+    #[test]
+    fn automation_is_a_launch_flag_not_a_program_argument() {
+        let s =
+            Selection::parse(&argv(&["nl", "--fs-sandbox", "--automation", "--", "x"])).unwrap();
+        assert!(s.automation);
+        assert_eq!(s.cmd, argv(&["x"]));
+        assert_eq!(
+            strip_selection(&argv(&["run", "nl", "--automation", "--", "x"])),
+            argv(&["nl", "--", "x"])
+        );
     }
 
     #[test]

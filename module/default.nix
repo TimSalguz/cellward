@@ -617,6 +617,7 @@ let
       ) "audio_manager = ${lib.boolToString c.permissions.audioManager}"
       ++ lib.optional (c.focus != null) "focus = ${c.focus}"
       ++ lib.optional (c.alwaysFocused != null) "always_focused = ${lib.boolToString c.alwaysFocused}"
+      ++ lib.optional (c.automation != null) "automation = ${lib.boolToString c.automation}"
       ++ lib.optional (c.firewall.default != null) "net_default = ${c.firewall.default}"
       ++ map (p: "net_allow = ${p}") c.firewall.allow
       ++ map (p: "net_deny = ${p}") c.firewall.deny
@@ -693,6 +694,11 @@ let
         type = lib.types.nullOr lib.types.bool;
         default = null;
         description = "Окна программ контейнера всегда думают, что они в фокусе (docs/PERMISSIONS.md §11.15, 3г): игры и плееры не встают на паузу, программа не узнаёт, когда от неё отвернулись; нажатые клавиши и кнопки при уходе фокуса отпускаются. Цена: мессенджеры в нём перестают уведомлять. Действует в окнах с рамкой cellward. null — не задавать из Nix (выключено; `cellward container set <к> always-focused on`).";
+      };
+      automation = lib.mkOption {
+        type = lib.types.nullOr lib.types.bool;
+        default = null;
+        description = "Пометить запуски контейнера как automation: их CLIPBOARD остаётся в том же экземпляре и не становится последней пользовательской копией-кандидатом на межконтейнерную вставку. Обычная локальная вставка продолжает работать. null — не задавать из Nix (выключено; `cellward container set <к> automation on`).";
       };
       firewall = {
         default = lib.mkOption {
