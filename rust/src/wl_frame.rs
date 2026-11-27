@@ -976,6 +976,10 @@ pub(crate) enum Ask {
     Record,
     RecordPipeWire,
     RecordPipeWireStop,
+    Permissions,
+    Pin,
+    Frame,
+    KillZone,
 }
 
 /// Asks the proxy's loop has not sent yet. A few at most: a click is one,
@@ -4033,7 +4037,10 @@ impl Window {
         match chosen {
             Some(MenuRow::Network) => asks.push(Ask::Network),
             Some(MenuRow::Restart) => asks.push(Ask::Restart),
-            Some(MenuRow::Actions) => asks.push(Ask::Menu),
+            Some(MenuRow::Permissions) => asks.push(Ask::Permissions),
+            Some(MenuRow::Pin) => asks.push(Ask::Pin),
+            Some(MenuRow::Frame) => asks.push(Ask::Frame),
+            Some(MenuRow::KillZone) => asks.push(Ask::KillZone),
             Some(MenuRow::Clipboard) => asks.push(Ask::Clip),
             Some(MenuRow::Record) => {
                 asks.record_window(&self.me);
@@ -8041,7 +8048,7 @@ mod tests {
         assert_eq!(menu_key(KEY_ESC, 4, Some(1)), MenuKey::Close);
         assert_eq!(menu_key(30, 4, Some(1)), MenuKey::Nothing);
         assert_eq!(menu_key(KEY_DOWN, 0, None), MenuKey::Close);
-        assert_eq!(crate::wl_title::MENU.len(), 7, "the rows of the dropdown");
+        assert_eq!(crate::wl_title::MENU.len(), 10, "the rows of the dropdown");
     }
 
     /// The buttons at the look's end of the strip, the text in the rest with

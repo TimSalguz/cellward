@@ -375,6 +375,10 @@ const ATTENTION: u8 = b'f';
 /// Proxy → supervisor: the launch restarted with a network chosen — a row
 /// of the ≡'s dropdown (`crate::wl_frame`, step 3c). No answer.
 const RESTART: u8 = b'x';
+const PERMISSIONS: u8 = b'A';
+const PIN: u8 = b'U';
+const KILL_ZONE: u8 = b'Z';
+const FRAME_SETTINGS: u8 = b'F';
 /// Supervisor → proxy: a question to show on the launch's window — its
 /// number (eight bytes, little-endian), the length of the rest (two bytes,
 /// little-endian) and the rest:
@@ -440,6 +444,10 @@ fn ask_byte(ask: Ask) -> u8 {
         Ask::Record => RECORD,
         Ask::RecordPipeWire => RECORD_PIPEWIRE,
         Ask::RecordPipeWireStop => RECORD_PIPEWIRE_STOP,
+        Ask::Permissions => PERMISSIONS,
+        Ask::Pin => PIN,
+        Ask::KillZone => KILL_ZONE,
+        Ask::Frame => FRAME_SETTINGS,
     }
 }
 
@@ -456,6 +464,10 @@ fn ask_of(byte: u8) -> Option<Ask> {
         RECORD => Some(Ask::Record),
         RECORD_PIPEWIRE => Some(Ask::RecordPipeWire),
         RECORD_PIPEWIRE_STOP => Some(Ask::RecordPipeWireStop),
+        PERMISSIONS => Some(Ask::Permissions),
+        PIN => Some(Ask::Pin),
+        KILL_ZONE => Some(Ask::KillZone),
+        FRAME_SETTINGS => Some(Ask::Frame),
         _ => None,
     }
 }
@@ -2220,6 +2232,10 @@ pub(crate) fn menu_argv(
     match ask {
         Ask::Network => verb.push("--network".into()),
         Ask::Restart => verb.push("--restart".into()),
+        Ask::Permissions => verb.push("--permissions".into()),
+        Ask::Pin => verb.push("--pin".into()),
+        Ask::KillZone => verb.push("--kill-zone".into()),
+        Ask::Frame => verb.push("--frame".into()),
         Ask::Clip => verb[0] = "clip-window".into(),
         Ask::Record | Ask::RecordPipeWire | Ask::RecordPipeWireStop => {}
         Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover => {
@@ -6560,8 +6576,7 @@ mod tests {
             events_until(&mut client, |o, op, _| o == 9 && op == 1);
 
             // Over the menu: lit; clicked, its dropdown (step 3c) — and the
-            // actions row, «Все действия окна…», asked of the supervisor. The
-            // network: asked at once.
+            // permissions row, asked of the supervisor. The network: at once.
             let channel = rig.channel.as_ref().unwrap();
             channel
                 .set_read_timeout(Some(Duration::from_secs(10)))
@@ -6592,7 +6607,7 @@ mod tests {
                 ],
             );
             assert_eq!(next(&log), 0, "off the row");
-            assert_eq!(asked(), MENU);
+            assert_eq!(asked(), PERMISSIONS);
             send(&mut compositor, &[enter(64, buttons, 10, 10)]);
             assert_eq!(next(&log), 1, "the menu under the pointer again");
             send(&mut compositor, &[motion(30, 10)]);
@@ -6712,6 +6727,10 @@ mod tests {
             Ask::Record,
             Ask::RecordPipeWire,
             Ask::RecordPipeWireStop,
+            Ask::Permissions,
+            Ask::Pin,
+            Ask::KillZone,
+            Ask::Frame,
         ] {
             let byte = ask_byte(ask);
             assert!(!others.contains(&byte), "{ask:?}");
@@ -6833,6 +6852,14 @@ mod tests {
         );
         let clip = argv(None, Ask::Clip);
         assert_eq!(clip[clip.len() - 3..], ["clip-window", "--pid", "4242"]);
+        for (ask, flag) in [
+            (Ask::Permissions, "--permissions"),
+            (Ask::Pin, "--pin"),
+            (Ask::KillZone, "--kill-zone"),
+            (Ask::Frame, "--frame"),
+        ] {
+            assert_eq!(argv(None, ask).last().map(String::as_str), Some(flag));
+        }
         for (ask, mode) in [
             (Ask::ScreenshotWindow, "window"),
             (Ask::ScreenshotArea, "area"),

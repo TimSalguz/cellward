@@ -1292,9 +1292,13 @@ pub struct MenuArgs {
     /// 2026-09-28): the container's network switched live where its
     /// instance can be ([`switch_network`]), else the restart as above.
     pub network: bool,
+    pub permissions: bool,
+    pub pin: bool,
+    pub kill_zone: bool,
+    pub frame: bool,
 }
 
-/// `[--pid <pid>] [--restart|--network]`.
+/// `[--pid <pid>] [--restart|--network|--permissions|--pin|--kill-zone|--frame]`.
 pub fn parse_menu_args(args: &[OsString]) -> Result<MenuArgs, String> {
     let mut out = MenuArgs::default();
     let mut words = args.iter();
@@ -1311,9 +1315,13 @@ pub fn parse_menu_args(args: &[OsString]) -> Result<MenuArgs, String> {
             }
             Some("--restart") => out.restart = true,
             Some("--network") => out.network = true,
+            Some("--permissions") => out.permissions = true,
+            Some("--pin") => out.pin = true,
+            Some("--kill-zone") => out.kill_zone = true,
+            Some("--frame") => out.frame = true,
             _ => {
                 return Err(format!(
-                    "cellward window-menu [--pid <pid>] [--restart|--network], не {}",
+                    "cellward window-menu [--pid <pid>] [--restart|--network|--permissions|--pin|--kill-zone|--frame], не {}",
                     word.to_string_lossy()
                 ))
             }
@@ -1322,7 +1330,7 @@ pub fn parse_menu_args(args: &[OsString]) -> Result<MenuArgs, String> {
     Ok(out)
 }
 
-/// `vpn-zone window-menu [--pid <pid>] [--restart|--network]`: what can be done with the
+/// `vpn-zone window-menu [--pid <pid>] [--restart|--network|--permissions|--pin|--kill-zone|--frame]`: what can be done with the
 /// program of the focused window — for a key binding of the compositor —,
 /// or of the launch of `--pid` — for the frame's buttons, whose window may
 /// not have the focus.
@@ -1417,6 +1425,17 @@ pub fn menu(tools: &Tools, args: &[OsString]) -> u8 {
             return 1;
         }
         "restart".to_owned()
+    } else if args.permissions {
+        "perms".to_owned()
+    } else if args.pin {
+        match &pin {
+            Pin::Unbind { .. } => "unpin".to_owned(),
+            _ => "pin".to_owned(),
+        }
+    } else if args.kill_zone {
+        "kill-zone".to_owned()
+    } else if args.frame {
+        "frame".to_owned()
     } else {
         let Some(choice) = ask_menu(tools, &menu) else {
             return 0;
@@ -2441,7 +2460,8 @@ mod tests {
             Ok(MenuArgs {
                 pid: Some(4242),
                 restart: false,
-                network: false
+                network: false,
+                ..MenuArgs::default()
             })
         );
         assert_eq!(
@@ -2449,7 +2469,8 @@ mod tests {
             Ok(MenuArgs {
                 pid: Some(4242),
                 restart: true,
-                network: false
+                network: false,
+                ..MenuArgs::default()
             })
         );
         assert_eq!(
@@ -2457,7 +2478,8 @@ mod tests {
             Ok(MenuArgs {
                 pid: None,
                 restart: true,
-                network: false
+                network: false,
+                ..MenuArgs::default()
             })
         );
         // The frame's ⇄ since stage 5: the network, switched live where it
@@ -2467,9 +2489,42 @@ mod tests {
             Ok(MenuArgs {
                 pid: Some(4242),
                 restart: false,
-                network: true
+                network: true,
+                ..MenuArgs::default()
             })
         );
+        for (flag, expected) in [
+            (
+                "--permissions",
+                MenuArgs {
+                    permissions: true,
+                    ..MenuArgs::default()
+                },
+            ),
+            (
+                "--pin",
+                MenuArgs {
+                    pin: true,
+                    ..MenuArgs::default()
+                },
+            ),
+            (
+                "--kill-zone",
+                MenuArgs {
+                    kill_zone: true,
+                    ..MenuArgs::default()
+                },
+            ),
+            (
+                "--frame",
+                MenuArgs {
+                    frame: true,
+                    ..MenuArgs::default()
+                },
+            ),
+        ] {
+            assert_eq!(parse(&[flag]), Ok(expected));
+        }
         for bad in [
             &["--pid"][..],
             &["--pid", "x"],

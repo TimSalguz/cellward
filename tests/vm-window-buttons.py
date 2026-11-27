@@ -124,8 +124,7 @@ with subtest("the frame's ≡ drops its menu down; a row of it opens the window 
     assert at(*spot) == border and under != border, (at(*spot), under)
     # Nothing started yet: the dropdown is the proxy's alone.
     machine.fail(f"journalctl --no-pager | grep -F 'window-menu --pid {sup}'")
-    # The actions row, «Все действия окна…», lit under the pointer, then
-    # chosen: the window menu of the launch, as the ≡ opened it before.
+    # The permissions row, lit under the pointer, then chosen.
     row = (right - 20, top + 1 + 5 * 28 + 14)
     pointer("move", *row)
     at = shot("frame-dropdown-lit")
@@ -139,7 +138,7 @@ with subtest("the frame's ≡ drops its menu down; a row of it opens the window 
     machine.wait_until_succeeds("pgrep -x vpn-zone-window", timeout=30)
     unit = alice(f"systemctl --user show -p ExecStart cellward-window-menu-{sup}")
     assert f"window-menu --pid {sup}" in unit, unit
-    assert "--restart" not in unit and "--network" not in unit, unit
+    assert "--permissions" in unit, unit
     machine.sleep(2)
     alice(f"WAYLAND_DISPLAY={display} grim /tmp/frame-buttons-menu.png")
     machine.copy_from_vm("/tmp/frame-buttons-menu.png", "")

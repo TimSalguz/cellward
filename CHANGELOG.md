@@ -6,6 +6,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- The frame dropdown now opens container permissions, network pinning, frame
+  settings and network shutdown directly, without a separate "all actions"
+  window.
 - Frozen screenshot selection supports pointer-anchored wheel zoom, middle-button
   panning and `0` to fit. Crops retain original pixels at every view scale.
 - Frame controls capture a visible window, a frozen region, or a region after
