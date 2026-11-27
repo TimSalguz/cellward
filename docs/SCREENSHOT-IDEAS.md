@@ -34,9 +34,9 @@ frame-coloured pixels in the captured image.
 
 This first direct backend accepts ARGB8888 and XRGB8888 SHM buffers within the
 documented size bounds. An unsupported buffer fails closed: it never falls back
-to the desktop. The root surface does not include separately owned popups or a
-composition of application subsurfaces. Those cases, non-SHM buffers and alpha
-presentation remain follow-up work, not claimed support.
+to the desktop. Direct SHM subsurfaces with the same pixel format, scale 1 and
+no viewport transforms are included. Separate popups, nested subsurfaces and
+other transforms remain follow-up work, not claimed support.
 
 The frame menu also toggles root-surface recording. A dedicated agent requests
 frames over its own proxy channel at 30 FPS, so an encoder cannot interleave
@@ -77,11 +77,11 @@ through the trusted `cellward window-record --pid` command. `Session.Close` or c
 the chooser stops that portal-owned source; a source already started from the frame is
 neither adopted nor stopped.
 
-Window and region captures receive the same root surface through the proxy's
-memfd and crop only that image. An unsupported buffer is an explicit error,
-never a fallback to the whole desktop. Hover keeps the composited frame for
-now so its owned subsurface tooltip is not lost; composing those subsurfaces
-safely with the root surface is a separate task. In particular, niri's native
+Window, region and hover captures receive the root surface through the
+proxy's memfd and crop only that image and its owned subsurfaces. An
+unsupported buffer is an explicit error, never a fallback to the whole desktop.
+Direct SHM subsurfaces are alpha-blended at their positions; viewport transforms
+are rejected for now. In particular, niri's native
 screenshot action is unsuitable for private copies because it also writes the
 desktop clipboard. The desired complete isolated-window mode must additionally
 capture owned popups and subsurfaces without the desktop, unrelated windows,

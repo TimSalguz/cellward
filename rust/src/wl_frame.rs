@@ -1050,7 +1050,7 @@ fn write_window(window: &Weak<RefCell<Window>>, output: OwnedFd) -> bool {
     let Ok(window) = window.try_borrow() else {
         return false;
     };
-    let Some(pixels) = root_pixels(&window.root) else {
+    let Some(pixels) = composite_pixels(&window.root) else {
         return false;
     };
     let mut output = std::fs::File::from(output);
@@ -5035,6 +5035,7 @@ struct Committed {
     transform: u32,
     destination: Option<(i32, i32)>,
     source: Option<(i32, i32)>,
+    position: (i32, i32),
 }
 
 impl Default for Committed {
@@ -5045,6 +5046,7 @@ impl Default for Committed {
             transform: 0,
             destination: None,
             source: None,
+            position: (0, 0),
         }
     }
 }
@@ -5284,6 +5286,15 @@ impl WlSubsurfaceHandler for Subsurface {
     fn handle_place_below(&mut self, slf: &Rc<WlSubsurface>, sibling: &Rc<WlSurface>) {
         slf.send_place_below(sibling);
         self.reorder(sibling, false);
+    }
+
+    fn handle_set_position(&mut self, slf: &Rc<WlSubsurface>, x: i32, y: i32) {
+        slf.send_set_position(x, y);
+        if let Some(child) = self.child.upgrade() {
+            if let Ok(mut surface) = child.try_get_handler_mut::<Surface>() {
+                surface.committed.position = (x, y);
+            }
+        }
     }
 
     fn handle_destroy(&mut self, slf: &Rc<WlSubsurface>) {
@@ -5916,6 +5927,105 @@ pub(crate) fn root_pixels(root: &Weak<WlSurface>) -> Option<ShmPixels> {
         .try_get_handler_ref::<BufferSize>()
         .ok()?;
     read_shm(attached.width, attached.height, buffer.shm.as_ref()?)
+}
+
+fn blend_pixel(canvas: &mut [u8], overlay: &[u8], format: WlShmFormat) {
+    let alpha = if format == WlShmFormat::XRGB8888 {
+        255
+    } else {
+        overlay[3] as u32
+    };
+    if alpha == 0 {
+        return;
+    }
+    if alpha == 255 {
+        canvas[..3].copy_from_slice(&overlay[..3]);
+        canvas[3] = if format == WlShmFormat::XRGB8888 {
+            255
+        } else {
+            overlay[3]
+        };
+        return;
+    }
+    for channel in 0..3 {
+        canvas[channel] =
+            (overlay[channel] as u32 + canvas[channel] as u32 * (255 - alpha) / 255).min(255) as u8;
+    }
+    canvas[3] = (alpha + canvas[3] as u32 * (255 - alpha) / 255).min(255) as u8;
+}
+
+fn composite_pixels(root: &Weak<WlSurface>) -> Option<ShmPixels> {
+    const MAX_LAYERS: usize = 64;
+    let mut canvas = root_pixels(root)?;
+    if !matches!(canvas.format, WlShmFormat::ARGB8888 | WlShmFormat::XRGB8888) {
+        return None;
+    }
+    let root = root.upgrade()?;
+    let surface = root.try_get_handler_ref::<Surface>().ok()?;
+    let children: Vec<_> = surface
+        .stack
+        .iter()
+        .filter_map(|layer| match layer {
+            Layer::Child(_, child) => Some(child),
+            Layer::Itself => None,
+        })
+        .collect();
+    if children.is_empty() {
+        return Some(canvas);
+    }
+    if children.len() > MAX_LAYERS {
+        return None;
+    }
+    let format = canvas.format;
+    let (width, height, stride) = (canvas.width, canvas.height, canvas.stride);
+    let mut total = canvas.bytes.len();
+    for child in children {
+        let Some(child_surface) = child.upgrade() else {
+            continue;
+        };
+        let committed = &child_surface
+            .try_get_handler_ref::<Surface>()
+            .ok()?
+            .committed;
+        if committed.buffer.is_none() {
+            continue;
+        }
+        if committed.scale != 1 || committed.transform != 0 {
+            return None;
+        }
+        if committed.destination.is_some() || committed.source.is_some() {
+            return None;
+        }
+        let overlay = root_pixels(child)?;
+        if overlay.format != format {
+            return None;
+        }
+        total = total.checked_add(overlay.bytes.len())?;
+        if total > 256 << 20 {
+            return None;
+        }
+        let (ox, oy) = committed.position;
+        for y in 0..overlay.height {
+            let dy = oy.saturating_add(y);
+            if dy < 0 || dy >= height {
+                continue;
+            }
+            for x in 0..overlay.width {
+                let dx = ox.saturating_add(x);
+                if dx < 0 || dx >= width {
+                    continue;
+                }
+                let src = (y * overlay.stride + x * 4) as usize;
+                let dst = (dy * stride + dx * 4) as usize;
+                blend_pixel(
+                    &mut canvas.bytes[dst..dst + 4],
+                    &overlay.bytes[src..src + 4],
+                    format,
+                );
+            }
+        }
+    }
+    Some(canvas)
 }
 
 struct Dmabuf;
@@ -8583,6 +8693,16 @@ mod tests {
         assert_eq!(outer_rects(Rect { w: 30, ..R }, BT, &niri), None);
         assert_eq!(outer_rects(Rect { h: 10, ..R }, BT, &niri), None);
         assert_eq!(outer_rects(R, B, &niri), None);
+    }
+
+    #[test]
+    fn subsurface_alpha_is_premultiplied_and_opaque_pixels_replace_the_root() {
+        let mut root = [180, 180, 180, 255];
+        blend_pixel(&mut root, &[10, 220, 230, 128], WlShmFormat::ARGB8888);
+        assert_eq!(root, [99, 255, 255, 255]);
+        let mut xrgb = [1, 2, 3, 4];
+        blend_pixel(&mut xrgb, &[10, 220, 230, 128], WlShmFormat::XRGB8888);
+        assert_eq!(xrgb, [10, 220, 230, 255]);
     }
 
     #[test]

@@ -2014,7 +2014,10 @@ impl Proxy {
             }
             return;
         }
-        let root_capture = matches!(ask, Ask::ScreenshotWindow | Ask::ScreenshotArea);
+        let root_capture = matches!(
+            ask,
+            Ask::ScreenshotWindow | Ask::ScreenshotArea | Ask::ScreenshotHover
+        );
         if root_capture {
             let Some((fd, path)) = self.capture_handshake() else {
                 eprintln!("wl-sandbox: root-surface capture is unavailable for this buffer");
@@ -2033,25 +2036,16 @@ impl Proxy {
                 )
             });
         }
-        let hover = ask == Ask::ScreenshotHover;
-        self.start_unit(
-            if hover { &self.shots } else { &self.menu },
-            if hover {
-                "screenshot preview"
-            } else {
-                "window menu"
-            },
-            |tools, manifest| {
-                menu_argv(
-                    &tools.systemd_run,
-                    &tools.core,
-                    manifest,
-                    self.display.as_deref(),
-                    std::process::id(),
-                    ask,
-                )
-            },
-        );
+        self.start_unit(&self.menu, "window menu", |tools, manifest| {
+            menu_argv(
+                &tools.systemd_run,
+                &tools.core,
+                manifest,
+                self.display.as_deref(),
+                std::process::id(),
+                ask,
+            )
+        });
     }
 
     fn smart_paste(&self, ticket: u64, revision: u64) {
@@ -6870,19 +6864,17 @@ mod tests {
             assert!(shot.iter().any(|a| a == "--wait"));
             assert!(shot.iter().any(|a| a == "--unit=cellward-screenshot-4242"));
             assert!(!shot.iter().any(|a| a == "--property=KillMode=process"));
-            if ask != Ask::ScreenshotHover {
-                let captured = capture(ask);
-                assert_eq!(
-                    captured[captured.len() - 5..],
-                    [
-                        "window-screenshot",
-                        "4242",
-                        mode,
-                        "--proxy-fd",
-                        "/proc/self/fd/7"
-                    ]
-                );
-            }
+            let captured = capture(ask);
+            assert_eq!(
+                captured[captured.len() - 5..],
+                [
+                    "window-screenshot",
+                    "4242",
+                    mode,
+                    "--proxy-fd",
+                    "/proc/self/fd/7"
+                ]
+            );
         }
         let network = argv(None, Ask::Network);
         assert!(!network.iter().any(|a| a.contains("WAYLAND_DISPLAY")));

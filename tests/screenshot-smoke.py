@@ -211,6 +211,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('core', 'broker', 'window', 'sway', 'swaymsg', 'foot', 'font', 'xkbcommon', 'grim', 'wl-copy'):
         parser.add_argument('--' + name, required=True)
+    parser.add_argument('--hover-only', action='store_true')
     args = parser.parse_args()
     tests = Path(__file__).resolve().parent
     spec = importlib.util.spec_from_file_location('typing', tests / 'typing-smoke.py')
@@ -231,13 +232,13 @@ def main():
         env.pop(key, None)
     env['PATH'] = str(Path(args.swaymsg).parent) + ':' + env.get('PATH', '')
     adapter = root / 'systemd-adapter'
-    adapter.write_text(f'#!{sys.executable}\nimport os,sys,json,pathlib\na=sys.argv[sys.argv.index("--")+1:]\np=pathlib.Path({str(root)!r}) / ("unit-"+str(os.getpid()))\np.with_suffix(".tmp").write_text(json.dumps(a))\np.with_suffix(".tmp").rename(p.with_suffix(".json"))\n')
+    adapter.write_text(f'#!{sys.executable}\nimport os,sys,json,pathlib,time\na=sys.argv[sys.argv.index("--")+1:]\np=pathlib.Path({str(root)!r}) / ("unit-"+str(os.getpid()))\np.with_suffix(".tmp").write_text(json.dumps(a))\np.with_suffix(".tmp").rename(p.with_suffix(".json"))\nwhile not p.with_suffix(".done").exists(): time.sleep(.01)\n')
     adapter.chmod(0o700)
     grab = root / 'grim-adapter'
     grab.write_text(f'#!{sys.executable}\nimport subprocess,sys,pathlib,os\nr=subprocess.run([{args.grim!r},*sys.argv[1:]],stdout=subprocess.PIPE)\nif r.returncode: sys.exit(r.returncode)\np=pathlib.Path({str(root)!r}) / ("frozen-"+str(os.getpid())+".png")\np.write_bytes(r.stdout)\nsys.stdout.buffer.write(r.stdout)\n')
     grab.chmod(0o700)
     ui = root / 'window-adapter'
-    ui.write_text(f'#!{sys.executable}\nimport os,sys\nos.dup2(os.open({str(root / "editor.log")!r},os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600),2)\nos.execv({args.window!r},[{args.window!r},*sys.argv[1:]])\n')
+    ui.write_text(f'#!{sys.executable}\nimport os,sys,pathlib\ndata=sys.stdin.buffer.read()\npathlib.Path({str(root)!r}, "capture-input-"+str(os.getpid())+".png").write_bytes(data)\nfd=os.memfd_create("editor-input")\nos.write(fd,data)\nos.lseek(fd,0,0)\nos.dup2(fd,0)\nif fd != 0: os.close(fd)\nos.dup2(os.open({str(root / "editor.log")!r},os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600),2)\nos.execv({args.window!r},[{args.window!r},*sys.argv[1:]])\n')
     ui.chmod(0o700)
     keys = re.findall(r'"([a-z-]+)"', (tests.parent / 'rust/src/tools.rs').read_text().split('const KEYS:')[1].split('];')[0])
     manifest = {key: '/bin/false' for key in keys}
@@ -264,7 +265,12 @@ def main():
             for request in root.glob('unit-*.json'):
                 if request not in seen:
                     seen.add(request)
-                    start(json.loads(request.read_text()), request.stem)
+                    child = start(json.loads(request.read_text()), request.stem)
+                    def finish(child=child, request=request):
+                        status = child.wait()
+                        request.with_suffix('.exit').write_text(str(status))
+                        request.with_suffix('.done').touch()
+                    threading.Thread(target=finish, daemon=True).start()
 
     def msg(*words):
         return subprocess.check_output([args.swaymsg, *words], env=env, text=True, timeout=5)
@@ -281,11 +287,20 @@ def main():
         return next((w for w in windows() if w['app_id'] == 'cellward-screenshot'), None)
 
     def wait_editor():
-        window = wire.wait_for(editor)
+        try:
+            window = wire.wait_for(editor)
+        except AssertionError:
+            (root / 'editor-timeout.json').write_text(msg('-t', 'get_tree'))
+            subprocess.run([args.grim, str(root / 'editor-timeout.png')], env=env, check=True)
+            raise
         wire.wait_for(lambda: editor()['rect']['width'] >= 900)
         msg(f"[con_id={window['id']}]", 'focus')
         time.sleep(.2)
         return window
+
+    def captured():
+        paths = list(root.glob('frozen-*.png')) + list(root.glob('capture-input-*.png'))
+        return max(paths, key=lambda p: p.stat().st_mtime_ns).read_bytes()
 
     def key(code):
         for down in (1, 0):
@@ -377,48 +392,51 @@ def main():
         node = wire.wait_for(lambda: next((w for w in windows() if w['app_id'] == 'screenshot-target'), None))
         wire.wait_for(mouse.exists)
         time.sleep(.4)
-        button('window')
-        wait_editor()
-        assert snapshot() == (0, None), 'window screenshot bypassed trusted preview'
-        key(1)
-        wire.wait_for(lambda: not editor())
-        assert snapshot() == (0, None), 'Escape changed private clipboard'
-        button('window')
-        wait_editor()
-        time.sleep(1.8)
-        key(28)
-        wire.wait_for(lambda: snapshot()[1] is not None)
-        assert decode_png(snapshot()[1])[:2] == (1000, 800), 'window image has wrong geometry'
-        wire.wait_for(lambda: not editor())
-        previous = snapshot()[0]
-        button('area')
-        wait_editor()
-        frozen = max(root.glob('frozen-*.png'), key=lambda p: p.stat().st_mtime_ns).read_bytes()
-        control.touch()
-        move(500, 400)
-        pointer.write('wheel -5\n')
-        time.sleep(.2)
-        key(11)  # 0 restores fit without changing the frozen image.
-        pointer.write('wheel -5\n')
-        time.sleep(.2)
-        pointer.write('press middle\n')
-        move(580, 440)
-        pointer.write('release middle\n')
-        move(100, 120)
-        pointer.write('press\n')
-        move(900, 700)
-        pointer.write('release\n')
-        time.sleep(1.8)
-        (root / 'selection-tree.json').write_text(msg('-t', 'get_tree'))
-        subprocess.run([args.grim, str(root / 'selection.png')], env=env, check=True)
-        key(28)
-        wire.wait_for(lambda: not editor())
-        revision, png = wire.wait_for(lambda: value if (value := snapshot())[0] != previous else None)
-        assert 250 < decode_png(png)[0] < 650 and 150 < decode_png(png)[1] < 500, 'zoomed drag did not map to original pixels'
-        assert is_crop(frozen, png), 'region was recaptured after the live image changed'
-        (root / 'region.png').write_bytes(png)
-        print('window preview/Escape preserve clipboard; region crops immutable pre-editor pixels', flush=True)
-        control.unlink()
+        if not args.hover_only:
+            button('window')
+            wait_editor()
+            assert snapshot() == (0, None), 'window screenshot bypassed trusted preview'
+            key(1)
+            wire.wait_for(lambda: not editor())
+            assert snapshot() == (0, None), 'Escape changed private clipboard'
+            button('window')
+            wait_editor()
+            time.sleep(1.8)
+            key(28)
+            wire.wait_for(lambda: snapshot()[1] is not None)
+            assert decode_png(snapshot()[1])[:2] == (992, 772), 'window image has wrong root geometry'
+            wire.wait_for(lambda: not editor())
+            previous = snapshot()[0]
+            button('area')
+            wait_editor()
+            frozen = captured()
+            control.touch()
+            move(500, 400)
+            pointer.write('wheel -5\n')
+            time.sleep(.2)
+            key(11)  # 0 restores fit without changing the frozen image.
+            pointer.write('wheel -5\n')
+            time.sleep(.2)
+            pointer.write('press middle\n')
+            move(580, 440)
+            pointer.write('release middle\n')
+            move(100, 120)
+            pointer.write('press\n')
+            move(900, 700)
+            pointer.write('release\n')
+            time.sleep(1.8)
+            (root / 'selection-tree.json').write_text(msg('-t', 'get_tree'))
+            subprocess.run([args.grim, str(root / 'selection.png')], env=env, check=True)
+            key(28)
+            wire.wait_for(lambda: not editor())
+            revision, png = wire.wait_for(lambda: value if (value := snapshot())[0] != previous else None)
+            assert 250 < decode_png(png)[0] < 650 and 150 < decode_png(png)[1] < 500, 'zoomed drag did not map to original pixels'
+            assert is_crop(frozen, png), 'region was recaptured after the live image changed'
+            (root / 'region.png').write_bytes(png)
+            print('window preview/Escape preserve clipboard; region crops immutable pre-editor pixels', flush=True)
+        else:
+            revision = snapshot()[0]
+        control.unlink(missing_ok=True)
         # Restart the synthetic paint state without restarting its window.
         # The hover test only needs actual motion delivery and click isolation.
         motions = json.loads(mouse.read_text())['motions']
@@ -428,7 +446,7 @@ def main():
         baseline = json.loads(mouse.read_text())
         pointer.write('press\nrelease\n')
         wait_editor()
-        frozen = max(root.glob('frozen-*.png'), key=lambda p: p.stat().st_mtime_ns).read_bytes()
+        frozen = captured()
         _, _, pixels = decode_png(frozen)
         assert any(pixels[i:i + 3] == bytes((10, 220, 230)) for i in range(0, len(pixels), 3)), 'hover tooltip disappeared before capture'
         assert any(pixels[i:i + 3] == bytes((180, 180, 180)) for i in range(0, len(pixels), 3)), 'shade remained in frozen pixels'
@@ -447,13 +465,14 @@ def main():
         print('hover forwards motion, swallows freezing press/release, copies only after confirmation; desktop untouched', flush=True)
         revision = snapshot()[0]
         wire.wait_for(lambda: not editor())
-        button('area')
-        wait_editor()
-        source.terminate()
-        source.wait(timeout=5)
-        wire.wait_for(lambda: not editor(), timeout=5)
-        assert snapshot()[0] == revision, 'closed source changed selection'
-        print('source exit closes editor and preserves previous private selection', flush=True)
+        if not args.hover_only:
+            button('area')
+            wait_editor()
+            source.terminate()
+            source.wait(timeout=5)
+            wire.wait_for(lambda: not editor(), timeout=5)
+            assert snapshot()[0] == revision, 'closed source changed selection'
+            print('source exit closes editor and preserves previous private selection', flush=True)
         vk.close()
     finally:
         stop.set()

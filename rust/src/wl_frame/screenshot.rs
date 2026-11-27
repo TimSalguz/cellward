@@ -193,13 +193,16 @@ struct Removed {
 }
 impl WlCallbackHandler for Removed {
     fn handle_done(&mut self, _slf: &Rc<WlCallback>, _: u32) {
-        if self
-            .root
-            .upgrade()
-            .is_some_and(|root| !root.state().is_destroyed() && programs(&root))
-        {
-            self.frames.asks.push(Ask::ScreenshotHover);
-        }
+        let Some(window) = self.root.upgrade().and_then(|root| {
+            if root.state().is_destroyed() || !programs(&root) {
+                return None;
+            }
+            spot(&root).map(|(window, _)| window)
+        }) else {
+            return;
+        };
+        self.frames.asks.capture_window(&Rc::downgrade(&window));
+        self.frames.asks.push(Ask::ScreenshotHover);
     }
 }
 
