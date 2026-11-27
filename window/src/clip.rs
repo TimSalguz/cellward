@@ -2681,6 +2681,17 @@ impl Clip {
         }
     }
 
+    fn detail_image(
+        &self,
+        id: u64,
+        fallback: &iced::widget::image::Handle,
+    ) -> iced::widget::image::Handle {
+        self.thumbs
+            .get(&id)
+            .and_then(|made| made.as_ref().ok().cloned())
+            .unwrap_or_else(|| fallback.clone())
+    }
+
     fn view_details(&self) -> Element<'_, Msg> {
         let Some(e) = self.selected.and_then(|i| self.entries.get(i)) else {
             return container(text("Выберите запись").style(dim))
@@ -2702,7 +2713,7 @@ impl Clip {
                         ]
                         .spacing(8),
                         text(format!("{width} × {height}")).size(12).style(dim),
-                        iced::widget::image::viewer(handle.clone())
+                        iced::widget::image::viewer(self.detail_image(e.id, handle))
                             .width(Length::Fill)
                             .height(Length::Fill)
                             .content_fit(if preview.native {
@@ -3988,6 +3999,16 @@ mod tests {
         ));
         assert!(!c.image_preview.as_ref().unwrap().expanded);
         assert_eq!(c.entries.len(), 1);
+    }
+
+    #[test]
+    fn detail_preview_reuses_the_list_thumbnail_instead_of_the_large_fit() {
+        let mut c = clip();
+        let thumbnail = iced::widget::image::Handle::from_rgba(1, 1, vec![1, 2, 3, 255]);
+        c.thumbs.insert(1, Ok(thumbnail.clone()));
+        let fit = iced::widget::image::Handle::from_rgba(1280, 720, vec![0; 1280 * 720 * 4]);
+        assert_eq!(c.detail_image(1, &fit), thumbnail);
+        assert_eq!(c.detail_image(2, &fit), fit);
     }
 
     #[test]
