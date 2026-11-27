@@ -149,6 +149,7 @@ let
       style = "tag";
       buttons = "macos";
       radius = 10;
+      fullscreen.radius = 12;
     };
     audioManager = [ "mixer" ];
     # What the networks tolerate (step 1 of the permission model,

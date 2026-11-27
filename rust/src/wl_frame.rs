@@ -256,7 +256,9 @@ use wl_proxy::protocols::xdg_toplevel_drag_v1::xdg_toplevel_drag_v1::{
 };
 use wl_proxy::protocols::ObjectInterface;
 
-use crate::frame::{DoubleClick, Fullscreen, FullscreenButton, TitleMode};
+use crate::frame::{
+    DoubleClick, Fullscreen, FullscreenButton, FullscreenRadius, TitleMode, MAX_OUTER_RADIUS,
+};
 use crate::wl_proxy::Border;
 use crate::wl_title::{
     Button, ButtonsLook, Drawn, End, Lease, Lit, Look, MenuRow, Outer, Pixels, Prompt, Square, Text,
@@ -556,9 +558,31 @@ pub(crate) fn corner_rects(g: Rect, top: i32, bottom: i32) -> [Option<Rect>; 4] 
 /// frame's insets `i` around it —, the top two `side` × `top`, the bottom
 /// two `side` square; top left, top right, bottom left, bottom right, as
 /// `crate::wl_title::render_outer` draws them. `None`: a window too small
-/// for them and something of each strip between them, or no title strip
-/// for the top ones to draw the ends of (mode `always` in fullscreen: the
-/// strip takes no room then).
+/// for them and something of each strip between them, or a title-band
+/// corner requested where the title strip takes no room. Fullscreen clears
+/// `band` first and draws the border's corners alone.
+fn fullscreen_radius(ordinary: i32, radius: FullscreenRadius) -> Option<i32> {
+    match radius {
+        FullscreenRadius::Same => Some(ordinary),
+        FullscreenRadius::Off => None,
+        FullscreenRadius::Override(radius) => Some(radius.px().clamp(0, MAX_OUTER_RADIUS)),
+    }
+}
+
+fn outer_in_fullscreen(look: &Look, radius: FullscreenRadius, i: Insets) -> Option<Outer> {
+    let radius = fullscreen_radius(look.outer, radius)?;
+    let look = Look {
+        border: i.border,
+        ..*look
+    };
+    let mut outer = look.outer_corners_at(radius)?;
+    if i.title <= 0 {
+        outer.band = false;
+        outer.top = outer.side;
+    }
+    Some(outer)
+}
+
 pub(crate) fn outer_rects(g: Rect, i: Insets, o: &Outer) -> Option<[Rect; 4]> {
     if o.band && i.title <= 0 {
         return None;
@@ -1677,6 +1701,7 @@ impl Frames {
         me: &Weak<RefCell<Window>>,
         fractional: bool,
         round: Round,
+        outer: Option<Outer>,
     ) -> Option<CornerParts> {
         let own = self.own.borrow();
         let text = self.text();
@@ -1691,7 +1716,7 @@ impl Frames {
         };
         let outer = match round {
             Round::Inner => None,
-            Round::Outer => Some(text.look().outer_corners()?),
+            Round::Outer => outer,
         };
         let pieces: Vec<Strip> = (0..4)
             .map(|corner| {
@@ -1741,6 +1766,8 @@ impl Frames {
         };
         Some(CornerParts {
             round,
+            outer,
+            dirty: false,
             text: text.clone(),
             pool: pool.clone(),
             pieces,
@@ -2365,6 +2392,8 @@ enum Round {
 /// program's commit; a new scale shows at once (desync, commit, sync).
 struct CornerParts {
     round: Round,
+    outer: Option<Outer>,
+    dirty: bool,
     text: Rc<Text>,
     pool: Rc<WlShmPool>,
     /// Top left, top right, bottom left, bottom right.
@@ -2387,7 +2416,9 @@ impl CornerParts {
     fn draw(&mut self) -> bool {
         let drawn = match self.round {
             Round::Inner => self.text.corners_at(self.scale),
-            Round::Outer => self.text.outer_at(self.scale),
+            Round::Outer => self
+                .outer
+                .and_then(|outer| self.text.outer_at(self.scale, outer)),
         };
         let Some(drawn) = drawn else {
             return false;
@@ -2425,14 +2456,15 @@ impl CornerParts {
         }
         self.retired.extend(old);
         sweep(&mut self.retired);
+        self.dirty = false;
         true
     }
 
     /// Lay them at `rects` ([`corner_rects`], [`outer_rects`]; cached,
     /// applied with the program's commit), drawn the first time; a window
     /// too small for them has none. A square corner is neither laid nor
-    /// drawn: the look's, the same for the window's life (a new look is
-    /// new corners, `Window::swap`).
+    /// drawn. Outer corners are redrawn when fullscreen changes their
+    /// geometry.
     fn lay(&mut self, rects: [Option<Rect>; 4]) {
         let visible = rects.map(|r| r.is_some());
         let changed = self.visible != visible;
@@ -2460,8 +2492,26 @@ impl CornerParts {
             }
         }
         self.laid = true;
-        if self.current.is_empty() || changed {
+        if self.current.is_empty() || changed || self.dirty {
             self.draw();
+        }
+    }
+
+    fn set_outer(&mut self, compositor: &Rc<WlCompositor>, outer: Outer) {
+        if self.outer == Some(outer) {
+            return;
+        }
+        self.outer = Some(outer);
+        self.dirty = true;
+        for (corner, piece) in self.pieces.iter().enumerate() {
+            let region = compositor.new_send_create_region();
+            quiet(&*region);
+            for r in outer_input(&outer, corner) {
+                region.send_add(r.x, r.y, r.w, r.h);
+            }
+            piece.surface.send_set_input_region(Some(&region));
+            piece.surface.send_commit();
+            region.send_destroy();
         }
     }
 
@@ -2845,15 +2895,16 @@ impl Window {
             || self.mode != TitleMode::Off
             || (self.fullscreen
                 && (self.full.title != TitleMode::Off || self.notice_until.is_some()));
-        // The frame's own round corners, and what is laid short of them —
-        // only when they are there to draw it; none in fullscreen (the
-        // screen's corners are square, and the border may be another).
-        let outer = self
-            .look
-            .outer_corners()
-            .filter(|_| !self.fullscreen)
-            .and_then(|o| outer_rects(area, i, &o))
-            .filter(|_| self.make_outer(f, root, top));
+        // The frame's own round corners, and what is laid short of them.
+        let outer_look = if self.fullscreen {
+            outer_in_fullscreen(&self.look, self.full.radius, i)
+        } else {
+            self.look.outer_corners()
+        };
+        let outer = outer_look.and_then(|o| {
+            let rects = outer_rects(area, i, &o)?;
+            self.make_outer(f, root, top, &o).then_some(rects)
+        });
         let pieces: &[Rect] = outer.as_ref().map_or(&[], |p| &p[..]);
         let strip = if self.look.tag() {
             tag_row(area, i, over)
@@ -2904,7 +2955,7 @@ impl Window {
         self.outer_laid = outer;
         self.lay_title(f, root, top, strip);
         self.lay_corners(f, root, top, area);
-        self.lay_outer(outer);
+        self.lay_outer(f, outer, outer_look);
         if outer.is_some() {
             // Outer pieces are made before the title on the first layout.
             // Restore the documented stacking order now that the title can
@@ -2940,7 +2991,7 @@ impl Window {
                 .as_ref()
                 .and_then(|t| t.text.as_ref())
                 .is_some_and(|text| text.fraction.is_some());
-            self.corners = f.make_corners(root, top, &self.me, !fractional, Round::Inner);
+            self.corners = f.make_corners(root, top, &self.me, !fractional, Round::Inner, None);
         }
         if let Some(corners) = &mut self.corners {
             let mut rects = corner_rects(area, radii.0, radii.1);
@@ -2954,13 +3005,26 @@ impl Window {
 
     /// The frame's own round corners, made the first time they are wanted:
     /// whether they are there (not without the title's memfd).
-    fn make_outer(&mut self, f: &Rc<Frames>, root: &Rc<WlSurface>, top: &Rc<WlSurface>) -> bool {
+    fn make_outer(
+        &mut self,
+        f: &Rc<Frames>,
+        root: &Rc<WlSurface>,
+        top: &Rc<WlSurface>,
+        specification: &Outer,
+    ) -> bool {
         if self.outer.is_none() {
             // Their own scale only when nothing else of the window's is
             // drawn at one: the title's text (made after them, in the same
             // layout) takes it, else the window's round corners.
             let own_scale = self.mode == TitleMode::Off && self.look.corners() == (0, 0);
-            self.outer = f.make_corners(root, top, &self.me, own_scale, Round::Outer);
+            self.outer = f.make_corners(
+                root,
+                top,
+                &self.me,
+                own_scale,
+                Round::Outer,
+                Some(*specification),
+            );
         }
         self.outer.is_some()
     }
@@ -2968,8 +3032,17 @@ impl Window {
     /// The frame's own round corners at `rects` ([`outer_rects`]; `None`:
     /// none now — a window too small for them —, the strips laid whole),
     /// before the program's commit.
-    fn lay_outer(&mut self, rects: Option<[Rect; 4]>) {
+    fn lay_outer(
+        &mut self,
+        f: &Rc<Frames>,
+        rects: Option<[Rect; 4]>,
+        specification: Option<Outer>,
+    ) {
+        let compositor = f.own.borrow().compositor.clone();
         if let Some(outer) = &mut self.outer {
+            if let (Some(specification), Some(compositor)) = (specification, compositor) {
+                outer.set_outer(&compositor, specification);
+            }
             let mut rects = rects.map_or([None; 4], |r| r.map(Some));
             if self.unified_top {
                 rects[0] = None;
@@ -3068,11 +3141,16 @@ impl Window {
                 return;
             };
             let whole = geometry_up(area, i);
-            let radius = if self.fullscreen { 0 } else { self.look.outer };
+            let radius = if self.fullscreen {
+                fullscreen_radius(self.look.outer, self.full.radius).unwrap_or(0)
+            } else {
+                self.look.outer
+            };
             let height = self
                 .outer_laid
                 .as_ref()
-                .map_or(i.border + TITLE_HEIGHT, |p| p[0].h);
+                .map_or(i.border + TITLE_HEIGHT, |p| p[0].h)
+                .max(i.border + TITLE_HEIGHT);
             t.sub.send_set_position(whole.x, whole.y);
             top.spec = crate::wl_title::top::TopSpec {
                 width: whole.w,
@@ -8490,12 +8568,69 @@ mod tests {
                 h: TITLE_HEIGHT
             }
         );
-        // None: a window too small for them; fullscreen in mode `always`
-        // (the strip takes no room, the top ones would draw its ends over
-        // the content).
+        // None: a window too small for them, or a title-band corner without
+        // the strip; `outer_in_fullscreen` clears that band instead.
         assert_eq!(outer_rects(Rect { w: 30, ..R }, BT, &niri), None);
         assert_eq!(outer_rects(Rect { h: 10, ..R }, BT, &niri), None);
         assert_eq!(outer_rects(R, B, &niri), None);
+    }
+
+    #[test]
+    fn fullscreen_keeps_or_overrides_the_outer_radius_without_a_title_band() {
+        let look = Look {
+            outer: 20,
+            border: 4,
+            band: true,
+            ..LOOK
+        };
+        let outer = look.outer_corners().unwrap();
+        assert_eq!(
+            outer_in_fullscreen(&look, FullscreenRadius::Same, BT),
+            Some(outer)
+        );
+        assert_eq!(outer_in_fullscreen(&look, FullscreenRadius::Off, BT), None);
+        assert_eq!(
+            outer_in_fullscreen(
+                &look,
+                FullscreenRadius::Override(crate::frame::Radius::Px(12)),
+                BT
+            ),
+            look.outer_corners_at(12)
+        );
+        let without_title = Outer {
+            band: false,
+            top: 20,
+            ..outer
+        };
+        assert_eq!(
+            outer_in_fullscreen(&look, FullscreenRadius::Same, B),
+            Some(without_title)
+        );
+        assert!(outer_rects(R, B, &without_title).is_some());
+        let square = Look { outer: 0, ..look };
+        assert!(square.outer_corners().is_none());
+        assert_eq!(
+            outer_in_fullscreen(
+                &square,
+                FullscreenRadius::Override(crate::frame::Radius::Px(12)),
+                B
+            ),
+            Some(Outer {
+                band: false,
+                top: 12,
+                ..square.outer_corners_at(12).unwrap()
+            })
+        );
+        let thicker = Insets {
+            border: 6,
+            title: 0,
+        };
+        assert_eq!(
+            outer_in_fullscreen(&look, FullscreenRadius::Same, thicker)
+                .unwrap()
+                .border,
+            6
+        );
     }
 
     /// A piece of the frame's own corner takes the pointer where the frame

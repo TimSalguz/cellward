@@ -175,6 +175,7 @@ mod tests {
                 width: Some(0),
                 title: crate::frame::TitleMode::Hover,
                 notice: 0,
+                ..crate::frame::DEFAULT_FULLSCREEN
             }
         );
         let mut other = Session::new(&base).unwrap();

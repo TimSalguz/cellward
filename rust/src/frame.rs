@@ -81,6 +81,9 @@ pub const OUTER_RADIUS_SETTING: &str = "frame-outer-radius";
 /// setting file of the config directory: `same` (as outside fullscreen) or
 /// logical pixels ([`Fullscreen`]).
 pub const FULLSCREEN_WIDTH_SETTING: &str = "frame-fullscreen-width";
+/// The frame's outer radius in fullscreen: `same` (as outside), `off`, `niri`
+/// or logical pixels.
+pub const FULLSCREEN_RADIUS_SETTING: &str = "frame-fullscreen-radius";
 /// The title strip's mode in fullscreen: `always`, `hover` or `off`.
 pub const FULLSCREEN_TITLE_SETTING: &str = "frame-fullscreen-title";
 /// How long the zone's label shows on a window going fullscreen, whole
@@ -570,6 +573,13 @@ fn word_setting<T>(
 /// takes the whole screen could draw another zone's frame there, and the
 /// label says whose it is before it can).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullscreenRadius {
+    Same,
+    Off,
+    Override(Radius),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fullscreen {
     /// The border's width; `None` the same as outside fullscreen.
     pub width: Option<i32>,
@@ -577,6 +587,7 @@ pub struct Fullscreen {
     /// How long the title strip shows, over the content, once the window
     /// is fullscreen: whole seconds, 0 not at all.
     pub notice: u8,
+    pub radius: FullscreenRadius,
 }
 
 /// Three seconds: long enough to read two words, short of what a film or a
@@ -589,6 +600,7 @@ pub const DEFAULT_FULLSCREEN: Fullscreen = Fullscreen {
     width: None,
     title: TitleMode::Hover,
     notice: DEFAULT_NOTICE,
+    radius: FullscreenRadius::Same,
 };
 
 /// A fullscreen width as a setting file or the command line has it: `same`
@@ -603,6 +615,31 @@ pub fn parse_fullscreen_width(text: &str) -> Option<Option<i32>> {
 /// [`parse_fullscreen_width`] back.
 pub fn fullscreen_width_word(width: Option<i32>) -> String {
     width.map_or_else(|| "same".to_owned(), |w| w.to_string())
+}
+
+pub fn parse_fullscreen_radius(text: &str) -> Option<FullscreenRadius> {
+    match text.trim() {
+        "same" => Some(FullscreenRadius::Same),
+        "off" => Some(FullscreenRadius::Off),
+        "niri" => Some(FullscreenRadius::Override(Radius::Niri(0))),
+        text => Radius::parse_arg(text, MAX_OUTER_RADIUS).map(FullscreenRadius::Override),
+    }
+}
+
+pub fn fullscreen_radius_word(radius: FullscreenRadius) -> String {
+    match radius {
+        FullscreenRadius::Same => "same".to_owned(),
+        FullscreenRadius::Off => "off".to_owned(),
+        FullscreenRadius::Override(radius) => radius.word(),
+    }
+}
+
+fn fullscreen_radius_arg(radius: FullscreenRadius) -> String {
+    match radius {
+        FullscreenRadius::Same => "same".to_owned(),
+        FullscreenRadius::Off => "off".to_owned(),
+        FullscreenRadius::Override(radius) => radius.arg(),
+    }
 }
 
 /// A notice's seconds: a whole number, 0 to [`MAX_NOTICE`].
@@ -687,6 +724,21 @@ pub fn fullscreen_width(config: &Path) -> (Option<i32>, Source) {
     )
 }
 
+/// The frame's outer radius in fullscreen and where it comes from.
+pub fn fullscreen_radius(config: &Path) -> (FullscreenRadius, Source) {
+    let (radius, source) = word_setting(
+        config,
+        FULLSCREEN_RADIUS_SETTING,
+        parse_fullscreen_radius,
+        DEFAULT_FULLSCREEN.radius,
+    );
+    let radius = match radius {
+        FullscreenRadius::Override(radius) => FullscreenRadius::Override(radius.read()),
+        same_or_off => same_or_off,
+    };
+    (radius, source)
+}
+
 /// The title strip's mode in fullscreen and where it comes from.
 pub fn fullscreen_title(config: &Path) -> (TitleMode, Source) {
     word_setting(
@@ -713,6 +765,7 @@ pub fn fullscreen(config: &Path) -> Fullscreen {
         width: fullscreen_width(config).0,
         title: fullscreen_title(config).0,
         notice: fullscreen_notice(config).0,
+        radius: fullscreen_radius(config).0,
     }
 }
 
@@ -836,7 +889,7 @@ pub fn clean_title(text: &str) -> String {
 /// mode, the look — the buttons', the style, the corners' radius inside and
 /// outside —, and the frame in fullscreen, the fullscreen buttons and the
 /// double click, `rrggbb:w:mode[:buttons:style:radius[:outer[:fullscreen]]]`
-/// — the last `width:title:notice:button:double-click`.
+/// — the last `width:title:notice:button:double-click:radius`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Frame {
     pub color: Rgb,
@@ -894,8 +947,8 @@ impl Frame {
     /// `rrggbb:w:mode`, and `:buttons:style:radius` after it when one of
     /// them — or anything after them — is not its default, `:outer` after
     /// them when it — or the fullscreen part — is not, and the fullscreen
-    /// part, all five, when one of them is not: the launch's line of the
-    /// common case stays the one it was before there were looks.
+    /// part when one of its fields is not the default (the radius itself
+    /// only when needed): the launch's common line stays what it was.
     pub fn to_arg(self) -> String {
         let default = (DEFAULT_BUTTONS, DEFAULT_STYLE, DEFAULT_RADIUS);
         let fullscreen = (self.fullscreen, self.fullscreen_button, self.double_click);
@@ -916,13 +969,20 @@ impl Frame {
                 ) {
             String::new()
         } else {
+            let radius =
+                if self.fullscreen.radius == DEFAULT_FULLSCREEN.radius && interaction.is_empty() {
+                    String::new()
+                } else {
+                    format!(":{}", fullscreen_radius_arg(self.fullscreen.radius))
+                };
             format!(
-                ":{}:{}:{}:{}:{}{interaction}",
+                ":{}:{}:{}:{}:{}{}{interaction}",
                 fullscreen_width_word(self.fullscreen.width),
                 self.fullscreen.title.as_str(),
                 self.fullscreen.notice,
                 self.fullscreen_button.as_str(),
-                self.double_click.as_str()
+                self.double_click.as_str(),
+                radius
             )
         };
         let outer = if self.outer == DEFAULT_OUTER_RADIUS && tail.is_empty() {
@@ -949,7 +1009,7 @@ impl Frame {
     }
 
     /// `rrggbb:w[:mode[:buttons[:style[:radius[:outer[:fullscreen]]]]]]`,
-    /// the fullscreen part `width[:title[:notice[:button[:double-click]]]]`:
+    /// the fullscreen part `width[:title[:notice[:button[:double-click[:radius]]]]]`:
     /// what is left out has its default; anything more, or anything that is
     /// not what its place says, is no frame.
     pub fn parse_arg(text: &str) -> Option<Self> {
@@ -997,6 +1057,9 @@ impl Frame {
             None => DEFAULT_DOUBLE_CLICK,
             Some(click) => DoubleClick::parse(click)?,
         };
+        if let Some(radius) = parts.next() {
+            fullscreen.radius = parse_fullscreen_radius(radius)?;
+        }
         let interaction = Interaction {
             hover_edge: match parts.next() {
                 Some(value) => parse_hover_edge(value)?,
@@ -1500,9 +1563,9 @@ mod tests {
     }
 
     /// The frame in fullscreen, its buttons and the double click ride at
-    /// the end of the same argument: all five said when one is not its
-    /// default (and the look and the outer radius before them), read back
-    /// part by part, what is left out its default, nonsense no frame.
+    /// the end of the same argument, after the look and the outer radius;
+    /// read back part by part, what is left out its default, nonsense no
+    /// frame.
     #[test]
     fn the_fullscreen_part_goes_there_and_back() {
         let f = Frame::parse_arg("ff00ff:4:always").unwrap();
@@ -1520,6 +1583,7 @@ mod tests {
                 width: Some(0),
                 title: TitleMode::Hover,
                 notice: 0,
+                ..DEFAULT_FULLSCREEN
             },
             ..f
         };
@@ -1538,6 +1602,29 @@ mod tests {
             "ff00ff:4:always:cellward:soft:0:0:same:hover:3:menu:none"
         );
         assert_eq!(Frame::parse_arg(&h.to_arg()), Some(h));
+        for radius in [
+            FullscreenRadius::Same,
+            FullscreenRadius::Off,
+            FullscreenRadius::Override(Radius::Px(12)),
+            FullscreenRadius::Override(Radius::Niri(20)),
+        ] {
+            let g = Frame {
+                fullscreen: Fullscreen {
+                    radius,
+                    ..f.fullscreen
+                },
+                ..f
+            };
+            assert_eq!(Frame::parse_arg(&g.to_arg()), Some(g), "{radius:?}");
+        }
+        let interaction = Frame {
+            interaction: Interaction {
+                hover_edge: 4,
+                resize_corner: 24,
+            },
+            ..f
+        };
+        assert_eq!(Frame::parse_arg(&interaction.to_arg()), Some(interaction));
         for button in FullscreenButton::ALL {
             let g = Frame {
                 fullscreen_button: button,
@@ -1579,7 +1666,8 @@ mod tests {
             Fullscreen {
                 width: None,
                 title: TitleMode::Hover,
-                notice: 3
+                notice: 3,
+                radius: FullscreenRadius::Same,
             },
             "the border remains; the title returns at the top edge"
         );
@@ -1593,6 +1681,7 @@ mod tests {
             (DoubleClick::Maximize, Source::Default)
         );
         fs::write(config.join(FULLSCREEN_WIDTH_SETTING), "0\n").unwrap();
+        fs::write(config.join(FULLSCREEN_RADIUS_SETTING), "12").unwrap();
         fs::write(config.join(FULLSCREEN_TITLE_SETTING), "hover").unwrap();
         fs::write(config.join(FULLSCREEN_NOTICE_SETTING), "0").unwrap();
         fs::write(config.join(FULLSCREEN_BUTTON_SETTING), "two").unwrap();
@@ -1602,18 +1691,25 @@ mod tests {
             Fullscreen {
                 width: Some(0),
                 title: TitleMode::Hover,
-                notice: 0
+                notice: 0,
+                radius: FullscreenRadius::Override(Radius::Px(12)),
             }
         );
         assert_eq!(fullscreen_width(&config).1, Source::Local);
+        assert_eq!(fullscreen_radius(&config).1, Source::Local);
         assert_eq!(
             fullscreen_button(&config),
             (FullscreenButton::Two, Source::Local)
         );
         assert_eq!(double_click(&config), (DoubleClick::None, Source::Local));
         crate::declared::declare(&declared.join(FULLSCREEN_WIDTH_SETTING), "same");
+        crate::declared::declare(&declared.join(FULLSCREEN_RADIUS_SETTING), "off");
         crate::declared::declare(&declared.join(FULLSCREEN_NOTICE_SETTING), "10");
         assert_eq!(fullscreen_width(&config), (None, Source::Nix));
+        assert_eq!(
+            fullscreen_radius(&config),
+            (FullscreenRadius::Off, Source::Nix)
+        );
         assert_eq!(fullscreen_notice(&config), (10, Source::Nix));
         // Not theirs: as if not there.
         crate::declared::declare(&declared.join(FULLSCREEN_NOTICE_SETTING), "31");
@@ -1633,6 +1729,18 @@ mod tests {
         assert_eq!(parse_fullscreen_width(" same\n"), Some(None));
         assert_eq!(fullscreen_width_word(Some(6)), "6");
         assert_eq!(fullscreen_width_word(None), "same");
+        for (word, radius) in [
+            ("same", FullscreenRadius::Same),
+            ("off", FullscreenRadius::Off),
+            ("niri", FullscreenRadius::Override(Radius::Niri(0))),
+            ("niri20", FullscreenRadius::Override(Radius::Niri(20))),
+            ("32", FullscreenRadius::Override(Radius::Px(32))),
+        ] {
+            assert_eq!(parse_fullscreen_radius(word), Some(radius), "{word}");
+        }
+        for bad in ["33", "niri33", "square", "", "Same"] {
+            assert_eq!(parse_fullscreen_radius(bad), None, "{bad:?}");
+        }
         // A zone's frame is what they say.
         let frame = Frame::of_zone(&state, &config, "nl");
         assert_eq!(
@@ -1647,6 +1755,7 @@ mod tests {
                 width: None,
                 title: TitleMode::Off,
                 notice: 0,
+                ..DEFAULT_FULLSCREEN
             },
             ..frame
         };

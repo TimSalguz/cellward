@@ -896,6 +896,7 @@ let
     "frame.radius"
     "frame.outerRadius"
     "frame.fullscreen.width"
+    "frame.fullscreen.radius"
     "frame.fullscreen.title"
     "frame.fullscreen.notice"
     "frame.fullscreenButton"
@@ -1450,6 +1451,13 @@ in
       description = "Толщина рамки окна, развёрнутого композитором во весь экран, логические пиксели; \"same\" — как без полного экрана. 0 — без обводки: чьё окно, тогда говорят только строка заголовка (frame.fullscreen.title) и имя зоны при входе (frame.fullscreen.notice). Если композитор вывел окно из полного экрана, а программа этого не подтвердила, обводка не тоньше обычной. null — не задавать из Nix (тогда cellward frame fullscreen width, иначе same). Меняется на ходу.";
     };
 
+    frame.fullscreen.radius = lib.mkOption {
+      type = lib.types.nullOr (lib.types.either (lib.types.ints.between 0 32) (lib.types.enum [ "same" "off" "niri" ]));
+      default = null;
+      example = "same";
+      description = "Скругление внешних углов рамки во весь экран: \"same\" — как вне полного экрана, \"off\" — квадратные, \"niri\" — как у niri, либо число логических пикселей. null — не задавать из Nix (тогда cellward frame fullscreen radius, иначе same). Меняется на ходу.";
+    };
+
     frame.fullscreen.title = lib.mkOption {
       type = lib.types.nullOr (
         lib.types.enum [
@@ -1975,6 +1983,9 @@ in
     })
     (lib.mkIf (cfg.frame.fullscreen.width != null) {
       ".config/vpn-zones/declared/frame-fullscreen-width".text = toString cfg.frame.fullscreen.width;
+    })
+    (lib.mkIf (cfg.frame.fullscreen.radius != null) {
+      ".config/vpn-zones/declared/frame-fullscreen-radius".text = toString cfg.frame.fullscreen.radius;
     })
     (lib.mkIf (cfg.frame.fullscreen.title != null) {
       ".config/vpn-zones/declared/frame-fullscreen-title".text = cfg.frame.fullscreen.title;

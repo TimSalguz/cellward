@@ -3628,6 +3628,7 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
     let json = stdout(&home.run(&["status", "--json"]));
     for field in [
         "\"frame_fullscreen_width\":{\"value\":\"same\",\"source\":\"default\"}",
+        "\"frame_fullscreen_radius\":{\"value\":\"same\",\"source\":\"default\"}",
         "\"frame_fullscreen_title\":{\"value\":\"hover\",\"source\":\"default\"}",
         "\"frame_fullscreen_notice\":{\"value\":3,\"source\":\"default\"}",
         "\"frame_fullscreen_button\":{\"value\":\"one\",\"source\":\"default\"}",
@@ -3637,6 +3638,7 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
     }
     for args in [
         &["frame", "fullscreen", "width", "0"][..],
+        &["frame", "fullscreen", "radius", "12"],
         &["frame", "fullscreen", "title", "hover"],
         &["frame", "fullscreen", "notice", "off"],
         &["frame", "fullscreen-button", "two"],
@@ -3648,13 +3650,14 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
     let line = stdout(&home.run_with(&["run", "nl", "--", "foot"], &dry));
     assert!(
         line.contains(&format!(
-            "--frame {colour}:4:always:cellward:soft:0:0:0:hover:0:two:none "
+            "--frame {colour}:4:always:cellward:soft:0:0:0:hover:0:two:none:12 "
         )),
         "{line}"
     );
     let json = stdout(&home.run(&["status", "--json"]));
     for field in [
         "\"frame_fullscreen_width\":{\"value\":0,\"source\":\"local\"}",
+        "\"frame_fullscreen_radius\":{\"value\":12,\"source\":\"local\"}",
         "\"frame_fullscreen_title\":{\"value\":\"hover\",\"source\":\"local\"}",
         "\"frame_fullscreen_notice\":{\"value\":0,\"source\":\"local\"}",
         "\"frame_fullscreen_button\":{\"value\":\"two\",\"source\":\"local\"}",
@@ -3713,6 +3716,7 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
     // Back to the defaults: the launch's line as it was.
     for args in [
         &["frame", "fullscreen", "width", "default"][..],
+        &["frame", "fullscreen", "radius", "default"],
         &["frame", "fullscreen", "title", "default"],
         &["frame", "fullscreen", "notice", "default"],
         &["frame", "fullscreen-button", "default"],
@@ -3732,6 +3736,8 @@ fn the_frame_in_fullscreen_goes_to_the_launch_and_the_status() {
         &["frame", "fullscreen", "width", "33"][..],
         &["frame", "fullscreen", "width", "wide"],
         &["frame", "fullscreen", "width"],
+        &["frame", "fullscreen", "radius", "33"],
+        &["frame", "fullscreen", "radius", "round"],
         &["frame", "fullscreen", "title", "never"],
         &["frame", "fullscreen", "notice", "31"],
         &["frame", "fullscreen", "notice", "-1"],

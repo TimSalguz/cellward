@@ -6027,6 +6027,7 @@ mod tests {
             width: Some(0),
             title: TitleMode::Off,
             notice: 1,
+            ..crate::frame::DEFAULT_FULLSCREEN
         };
         let rig = Rig::with_drawing("fullscreen", Some(drawing));
         let (mut client, mut compositor, log) = rig.connect_framed(UPSTREAM, TITLE_GLOBALS);
@@ -7727,10 +7728,10 @@ mod tests {
         let got = log_until(&log, |m| {
             m.iface == "wl_surface" && m.opcode == 6 && m.object == root
         });
-        let square = attached(&got, top).expect("fullscreen kept a stale rounded top");
-        assert_ne!(square, first);
+        let next = attached(&got, top).expect("fullscreen did not redraw the unified top");
+        assert_ne!(next, first);
         assert_eq!(
-            made(&got, square)[1..],
+            made(&got, next)[1..],
             dimensions,
             "the geometry stayed the same"
         );

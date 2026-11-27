@@ -12,7 +12,8 @@
 #   - a new radius in niri's config reaches the open window;
 #   - two windows of one launch keep their own width and working hover buttons;
 #   - fullscreen: the border at the screen's edges, the zone's name over the
-#     top for a moment, with its text.
+#     top for a moment, outer corners kept/square/overridden, no seams at
+#     a fractional scale.
 #   - permission panels accept real pointer clicks, fall back on the same
 #     display, and gate real TCP traffic to a second VM until approval.
 #
@@ -350,7 +351,7 @@ let
           alice(f"NIRI_SOCKET={sock} niri msg action set-column-width 640")
           settled("niri-resize-back", round_outside)
 
-      with subtest("fullscreen on niri: the border kept, the zone's name over the top"):
+      with subtest("fullscreen on niri: outer radius modes and seamless fractional scaling"):
           alice("cellward frame fullscreen notice 30")
           machine.sleep(2)
           sock = machine.succeed("ls /run/user/1000/niri.*.sock | head -1").strip()
@@ -358,10 +359,9 @@ let
 
           def labelled(at):
               w, h = at.size
-              # The border at the screen's edges, with square top corners:
-              # no stale rounded image from the windowed state.
               assert at(1, h // 2) == MAGENTA and at(w - 2, h // 2) == MAGENTA, (at(1, h // 2), at(w - 2, h // 2))
-              assert at(1, 1) == MAGENTA and at(w - 2, 1) == MAGENTA, "stale rounded top"
+              for c in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+                  assert at(*c) != MAGENTA, ("fullscreen did not keep the outer radius", c, at(*c))
               # The label under the top border: magenta past its text...
               assert at(w * 3 // 4, 4 + 10) == MAGENTA, at(w * 3 // 4, 4 + 10)
               # ... and the zone's name on it: not magenta.
@@ -369,6 +369,42 @@ let
               assert ink > 100, ("no text on the label", ink)
 
           settled("niri-fullscreen-label", labelled)
+          niri_config(20, False, 1.25)
+
+          def fractional(at):
+              w, h = at.size
+              for c in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+                  assert at(*c) != MAGENTA, ("a fractional outer corner", c, at(*c))
+              seam = round(20 * 1.25)
+              for x in (1, w - 2):
+                  for y in range(seam - 2, seam + 3):
+                      assert at(x, y) == MAGENTA, ("a fullscreen top/side seam", x, y, at(x, y))
+
+          settled("niri-fullscreen-fractional", fractional)
+          alice("cellward frame fullscreen radius off")
+
+          def square_fullscreen(at):
+              w, h = at.size
+              for c in ((1, 1), (w - 2, 1), (1, h - 2), (w - 2, h - 2)):
+                  assert at(*c) == MAGENTA, ("fullscreen radius off", c, at(*c))
+
+          settled("niri-fullscreen-square", square_fullscreen)
+          alice("cellward frame fullscreen radius 8")
+
+          def eight(at):
+              w, h = at.size
+              assert at(0, 0) != MAGENTA and at(w - 1, h - 1) != MAGENTA
+              # At 1.25, 8 logical pixels are 10 device pixels: the top
+              # strip starts there, not at the ordinary radius of 20.
+              assert at(round(12 * 1.25), 0) == MAGENTA, at(round(12 * 1.25), 0)
+
+          settled("niri-fullscreen-radius-8", eight)
+          alice("cellward frame outer-radius 0")
+          settled("niri-fullscreen-radius-8-square-window", eight)
+          alice("cellward frame outer-radius niri")
+          alice("cellward frame fullscreen radius same")
+          niri_config(20, False)
+          settled("niri-fullscreen-same", labelled)
           alice(f"NIRI_SOCKET={sock} niri msg action fullscreen-window")
           settled("niri-fullscreen-back", round_outside)
           alice("cellward frame fullscreen notice default")

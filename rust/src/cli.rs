@@ -4653,6 +4653,7 @@ fn tray(tools: &Tools, args: &[OsString]) -> u8 {
 /// `vpn-zone frame radius <0–16>|niri` (0),
 /// `vpn-zone frame outer-radius <0–32>|niri` (0),
 /// `vpn-zone frame fullscreen width same|<0–32>` (same),
+/// `vpn-zone frame fullscreen radius same|off|niri|<0–32>` (same),
 /// `vpn-zone frame fullscreen title always|hover|off` (hover),
 /// `vpn-zone frame fullscreen notice on|off|<0–30>` (3 seconds),
 /// `vpn-zone frame fullscreen-button one|two|menu|none` (one),
@@ -4671,9 +4672,10 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
     use crate::frame::{
         ButtonStyle, DoubleClick, FullscreenButton, Radius, Rgb, Style, TitleMode, BUTTONS_SETTING,
         COLOR_FILE, DEFAULT_NOTICE, DOUBLE_CLICK_SETTING, FULLSCREEN_BUTTON_SETTING,
-        FULLSCREEN_NOTICE_SETTING, FULLSCREEN_TITLE_SETTING, FULLSCREEN_WIDTH_SETTING, MAX_NOTICE,
-        MAX_OUTER_RADIUS, MAX_RADIUS, MAX_WIDTH, OUTER_RADIUS_SETTING, RADIUS_SETTING,
-        STYLE_SETTING, SWITCH_SETTING, TITLE_SETTING, WIDTH_SETTING,
+        FULLSCREEN_NOTICE_SETTING, FULLSCREEN_RADIUS_SETTING, FULLSCREEN_TITLE_SETTING,
+        FULLSCREEN_WIDTH_SETTING, MAX_NOTICE, MAX_OUTER_RADIUS, MAX_RADIUS, MAX_WIDTH,
+        OUTER_RADIUS_SETTING, RADIUS_SETTING, STYLE_SETTING, SWITCH_SETTING, TITLE_SETTING,
+        WIDTH_SETTING,
     };
     const USAGE: &str = "cellward frame show|hide\ncellward frame width <0–32> (по умолчанию 4)\n\
                          cellward frame title always (по умолчанию)|hover|off\n\
@@ -4682,6 +4684,7 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                          cellward frame radius <0–16>|niri (по умолчанию 0)\n\
                          cellward frame outer-radius <0–32>|niri (по умолчанию 0)\n\
                          cellward frame fullscreen width same (по умолчанию)|<0–32>\n\
+                         cellward frame fullscreen radius same (по умолчанию)|off|niri|<0–32>\n\
                          cellward frame fullscreen title always|hover|off (по умолчанию)\n\
                          cellward frame fullscreen notice on (3 с, по умолчанию)|off|<0–30>\n\
                          cellward frame fullscreen-button one (по умолчанию)|two|menu|none\n\
@@ -4715,6 +4718,11 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
     let fullscreen_width_words = |w: Option<i32>| match w {
         None => "как без полного экрана (same)".to_owned(),
         Some(w) => w.to_string(),
+    };
+    let fullscreen_radius_words = |r: crate::frame::FullscreenRadius| match r {
+        crate::frame::FullscreenRadius::Same => "как без полного экрана (same)".to_owned(),
+        crate::frame::FullscreenRadius::Off => "квадратные (off)".to_owned(),
+        crate::frame::FullscreenRadius::Override(radius) => radius_words(radius),
     };
     let notice_words = |seconds: u8| match seconds {
         0 => "нет (off)".to_owned(),
@@ -4768,15 +4776,22 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                 from(outer_source, "programs.cellward.frame.outerRadius")
             );
             let (fs_width, fs_width_source) = crate::frame::fullscreen_width(&tools.config);
+            let (fs_radius, fs_radius_source) = crate::frame::fullscreen_radius(&tools.config);
             let (fs_title, fs_title_source) = crate::frame::fullscreen_title(&tools.config);
             let (notice, notice_source) = crate::frame::fullscreen_notice(&tools.config);
             let (button, button_source) = crate::frame::fullscreen_button(&tools.config);
             let (click, click_source) = crate::frame::double_click(&tools.config);
             println!(
-                "во весь экран: толщина {}{}; заголовок: {}{}; имя зоны при входе: {}{}; \
-                 кнопка полного экрана: {}{}; двойной клик по заголовку: {}{}",
+                "во весь экран: толщина {}{}; скругление снаружи {}{}; заголовок: {}{}; \
+                 имя зоны при входе: {}{}; кнопка полного экрана: {}{}; \
+                 двойной клик по заголовку: {}{}",
                 fullscreen_width_words(fs_width),
                 from(fs_width_source, "programs.cellward.frame.fullscreen.width"),
+                fullscreen_radius_words(fs_radius),
+                from(
+                    fs_radius_source,
+                    "programs.cellward.frame.fullscreen.radius"
+                ),
                 title_words(fs_title),
                 from(fs_title_source, "programs.cellward.frame.fullscreen.title"),
                 notice_words(notice),
@@ -4801,6 +4816,11 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                     FULLSCREEN_WIDTH_SETTING,
                     crate::frame::parse_fullscreen_width(value)
                         .map(crate::frame::fullscreen_width_word),
+                ),
+                "radius" => (
+                    FULLSCREEN_RADIUS_SETTING,
+                    crate::frame::parse_fullscreen_radius(value)
+                        .map(crate::frame::fullscreen_radius_word),
                 ),
                 "title" => (
                     FULLSCREEN_TITLE_SETTING,
@@ -4828,6 +4848,9 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                     None => {
                         let hint = match what {
                             "width" => format!("толщина — same, целое от 0 до {MAX_WIDTH} или default"),
+                            "radius" => format!(
+                                "скругление — same, off, niri, целое от 0 до {MAX_OUTER_RADIUS} или default"
+                            ),
                             "title" => "заголовок — always, hover, off или default".to_owned(),
                             _ => format!(
                                 "имя зоны при входе — on, off, секунды от 0 до {MAX_NOTICE} или default"
@@ -4855,6 +4878,14 @@ pub(crate) fn frame(tools: &Tools, args: &[OsString]) -> u8 {
                         "толщина рамки во весь экран: {}{}{note} — {AT_ONCE}",
                         fullscreen_width_words(w),
                         from(source, "programs.cellward.frame.fullscreen.width")
+                    );
+                }
+                "radius" => {
+                    let (radius, source) = crate::frame::fullscreen_radius(&tools.config);
+                    println!(
+                        "скругление рамки во весь экран: {}{} — {AT_ONCE}",
+                        fullscreen_radius_words(radius),
+                        from(source, "programs.cellward.frame.fullscreen.radius")
                     );
                 }
                 "title" => {

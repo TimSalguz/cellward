@@ -56,6 +56,7 @@ fn setting_row(
         "hover-edge" => crate::frame::HOVER_EDGE_SETTING,
         "resize-corner" => crate::frame::RESIZE_CORNER_SETTING,
         "fullscreen-width" => crate::frame::FULLSCREEN_WIDTH_SETTING,
+        "fullscreen-radius" => crate::frame::FULLSCREEN_RADIUS_SETTING,
         "fullscreen-title" => crate::frame::FULLSCREEN_TITLE_SETTING,
         "fullscreen-notice" => crate::frame::FULLSCREEN_NOTICE_SETTING,
         _ => name,
@@ -230,6 +231,22 @@ pub fn rows(
             crate::frame::fullscreen_width_word(crate::frame::fullscreen_width(c).0),
         ),
         (
+            "fullscreen-radius",
+            "Скругление рамки снаружи",
+            vec![
+                ("same", "как в окне"),
+                ("off", "квадратные"),
+                ("4", "4"),
+                ("8", "8"),
+                ("12", "12"),
+                ("16", "16"),
+                ("24", "24"),
+                ("32", "32"),
+                ("niri", "как у niri"),
+            ],
+            crate::frame::fullscreen_radius_word(crate::frame::fullscreen_radius(c).0),
+        ),
+        (
             "fullscreen-title",
             "Заголовок",
             vec![
@@ -379,7 +396,7 @@ pub fn request(tools: &Tools, zone: Option<&str>, record: Option<&str>) -> Strin
     let (perms, values) = rows(tools, zone, record);
     let of = PermOf {
         tag: "this".to_owned(),
-        scope: "Общий вид — для всех окон, толщина контейнера — только для его окон. Геометрия, стиль, кнопки и режимы заголовка меняются сразу; отмена возвращает прежнее, «Сохранить» закрепляет поверх Nix. Цвет сети/контейнера и общий выключатель — пока по сохранению. Полноэкранная вкладка независимо задаёт общую толщину, заголовок и показ имени при входе. Верхние 2 px доступны приложению. Закрепление в Nix — отдельно в stillconf."
+        scope: "Общий вид — для всех окон, толщина контейнера — только для его окон. Геометрия, стиль, кнопки и режимы заголовка меняются сразу; отмена возвращает прежнее, «Сохранить» закрепляет поверх Nix. Цвет сети/контейнера и общий выключатель — пока по сохранению. Полноэкранная вкладка независимо задаёт общую толщину, внешнее скругление, заголовок и показ имени при входе. Верхние 2 px доступны приложению. Закрепление в Nix — отдельно в stillconf."
             .to_owned(),
         values,
     };
@@ -421,6 +438,10 @@ fn preview_value(tools: &Tools, key: &str, value: &str) -> Option<(&'static str,
             f::FULLSCREEN_WIDTH_SETTING,
             f::fullscreen_width_word(f::DEFAULT_FULLSCREEN.width),
         ),
+        "fullscreen-radius" => (
+            f::FULLSCREEN_RADIUS_SETTING,
+            f::fullscreen_radius_word(f::DEFAULT_FULLSCREEN.radius),
+        ),
         "fullscreen-title" => (
             f::FULLSCREEN_TITLE_SETTING,
             f::DEFAULT_FULLSCREEN.title.as_str().to_owned(),
@@ -456,6 +477,7 @@ fn preview_value(tools: &Tools, key: &str, value: &str) -> Option<(&'static str,
         "fullscreen-button" => f::FullscreenButton::parse(&value).is_some(),
         "double-click" => f::DoubleClick::parse(&value).is_some(),
         "fullscreen-width" => f::parse_fullscreen_width(&value).is_some(),
+        "fullscreen-radius" => f::parse_fullscreen_radius(&value).is_some(),
         "fullscreen-notice" => f::parse_notice(&value).is_some(),
         _ => f::parse_outer_radius(&value).is_some(),
     };
@@ -594,7 +616,7 @@ pub fn apply(
                 }
                 vec![if value == "off" { "hide" } else { "show" }.into()]
             }
-            "fullscreen-width" | "fullscreen-title" | "fullscreen-notice" => {
+            "fullscreen-width" | "fullscreen-radius" | "fullscreen-title" | "fullscreen-notice" => {
                 vec![
                     "fullscreen".into(),
                     key.trim_start_matches("fullscreen-").into(),
@@ -753,6 +775,7 @@ exit TEST_EXIT
         assert_eq!(value(&values, "show"), "on");
         assert_eq!(value(&values, "width"), "4");
         assert_eq!(value(&values, "outer-radius"), "0");
+        assert_eq!(value(&values, "fullscreen-radius"), "same");
         assert!(values.iter().all(|(_, _, fixed)| !fixed));
         let said = apply(
             &tools,
@@ -763,6 +786,7 @@ exit TEST_EXIT
                 ("show".into(), "off".into()),
                 ("style".into(), "tag".into()),
                 ("outer-radius".into(), "12".into()),
+                ("fullscreen-radius".into(), "16".into()),
                 ("color".into(), "#D94C4C".into()),
             ],
         );
@@ -772,6 +796,7 @@ exit TEST_EXIT
         assert_eq!(value(&values, "show"), "off");
         assert_eq!(value(&values, "style"), "tag");
         assert_eq!(value(&values, "outer-radius"), "12");
+        assert_eq!(value(&values, "fullscreen-radius"), "16");
         assert!(apply(&tools, None, None, &[("width".into(), "99".into())])
             .iter()
             .any(|l| l.contains("width")));

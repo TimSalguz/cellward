@@ -970,17 +970,21 @@ impl Look {
     /// The frame's own round corners: none in the tag look (nothing of the
     /// frame is in a window's corner), nor square.
     pub fn outer_corners(&self) -> Option<Outer> {
-        if self.tag() || self.outer <= 0 {
+        self.outer_corners_at(self.outer)
+    }
+
+    pub fn outer_corners_at(&self, radius: i32) -> Option<Outer> {
+        if self.tag() || radius <= 0 {
             return None;
         }
-        let side = self.outer.max(self.border);
-        let top = if self.outer > self.border {
+        let side = radius.max(self.border);
+        let top = if radius > self.border {
             side.max(self.border.saturating_add(HEIGHT))
         } else {
             side
         };
         Some(Outer {
-            radius: self.outer,
+            radius,
             side,
             top,
             border: self.border,
@@ -1977,8 +1981,12 @@ impl Prepared {
     }
 
     fn outer_bytes_as(look: &Look) -> usize {
-        look.outer_corners()
-            .map_or(0, |o| Self::outer_bytes_of(o.side, o.top))
+        if look.tag() {
+            0
+        } else {
+            let widest = MAX_OUTER_RADIUS.max(MAX_BORDER);
+            Self::outer_bytes_of(widest, widest + HEIGHT)
+        }
     }
 
     fn outer_bytes_of(side: i32, top: i32) -> usize {
@@ -2069,11 +2077,7 @@ impl Prepared {
                 }
             }
         }
-        // The frame's own corners at their largest: as wide as the widest
-        // radius or border, the top ones down past the title strip.
-        let widest = MAX_OUTER_RADIUS.max(MAX_BORDER);
-        let outer = Self::outer_bytes_of(widest, widest + HEIGHT) * SLOTS;
-        2 * (most + outer + top::slot_bytes() * top::TOP_SLOTS)
+        2 * (most + top::slot_bytes() * top::TOP_SLOTS)
     }
 }
 
@@ -2082,6 +2086,7 @@ impl Prepared {
 /// drawn there.
 struct Slot {
     scale: u32,
+    variant: u64,
     leases: Rc<Cell<u32>>,
     used: u64,
     size: (i32, i32),
@@ -2107,6 +2112,7 @@ impl Regions {
                 (0..count)
                     .map(|_| Slot {
                         scale: 0,
+                        variant: 0,
                         leases: Rc::new(Cell::new(0)),
                         used: 0,
                         size: (0, 0),
@@ -2454,12 +2460,11 @@ impl Text {
         })
     }
 
-    /// The frame's own round corners at `scale` ([`render_outer`]), all
-    /// four, as [`Text::at`] the line, but `width` is the width of one and
-    /// `height` the top ones' height — the bottom ones are `width` square.
-    /// `None` with square ones.
-    pub fn outer_at(&self, scale: u32) -> Option<Drawn> {
-        let outer = self.look.outer_corners()?;
+    /// The frame's own round corners at `scale` and the requested geometry
+    /// ([`render_outer`]), all four, as [`Text::at`] the line, but `width`
+    /// is the width of one and `height` the top ones' height — the bottom
+    /// ones are `width` square. The geometry is part of the cache key.
+    pub fn outer_at(&self, scale: u32, outer: Outer) -> Option<Drawn> {
         let squares = self.look.squares(self.frame);
         let rings: Vec<(i32, Rgb)> = self
             .look
@@ -2470,7 +2475,12 @@ impl Text {
                 _ => None,
             })
             .collect();
-        self.region_at(&self.outer, scale, |scale| {
+        let variant = outer.radius as u64
+            | (outer.side as u64) << 8
+            | (outer.top as u64) << 16
+            | (outer.border as u64) << 24
+            | u64::from(outer.band) << 32;
+        self.region_at_variant(&self.outer, scale, variant, |scale| {
             render_outer(&outer, &rings, self.bg, scale)
         })
     }
@@ -2481,30 +2491,45 @@ impl Text {
         scale: u32,
         draw: impl FnOnce(u32) -> (i32, i32, Vec<u8>),
     ) -> Option<Drawn> {
+        self.region_at_variant(regions, scale, 0, draw)
+    }
+
+    fn region_at_variant(
+        &self,
+        regions: &Regions,
+        scale: u32,
+        variant: u64,
+        draw: impl FnOnce(u32) -> (i32, i32, Vec<u8>),
+    ) -> Option<Drawn> {
         let scale = clamp_scale(scale);
         let now = self.clock.get() + 1;
         self.clock.set(now);
         let mut slots = regions.slots.borrow_mut();
-        let found = slots.iter().position(|s| s.scale == scale).or_else(|| {
-            let free = (0..slots.len())
-                .filter(|&i| slots[i].leases.get() == 0)
-                .min_by_key(|&i| slots[i].used)?;
-            let (w, h, pixels) = draw(scale);
-            let offset = (regions.base + free * regions.slot_bytes) as u64;
-            slots[free].scale = 0;
-            if pixels.len() > regions.slot_bytes || self.file.write_all_at(&pixels, offset).is_err()
-            {
-                return None;
-            }
-            slots[free].scale = scale;
-            slots[free].size = (w, h);
-            Some(free)
-        });
-        // Every region held: the nearest scale drawn, for the compositor to
-        // scale.
+        let found = slots
+            .iter()
+            .position(|s| s.scale == scale && s.variant == variant)
+            .or_else(|| {
+                let free = (0..slots.len())
+                    .filter(|&i| slots[i].leases.get() == 0)
+                    .min_by_key(|&i| slots[i].used)?;
+                let (w, h, pixels) = draw(scale);
+                let offset = (regions.base + free * regions.slot_bytes) as u64;
+                slots[free].scale = 0;
+                if pixels.len() > regions.slot_bytes
+                    || self.file.write_all_at(&pixels, offset).is_err()
+                {
+                    return None;
+                }
+                slots[free].scale = scale;
+                slots[free].variant = variant;
+                slots[free].size = (w, h);
+                Some(free)
+            });
+        // Every region held: the nearest scale of the same variant drawn,
+        // for the compositor to scale.
         let at = found.or_else(|| {
             (0..slots.len())
-                .filter(|&i| slots[i].scale != 0)
+                .filter(|&i| slots[i].scale != 0 && slots[i].variant == variant)
                 .min_by_key(|&i| slots[i].scale.abs_diff(scale))
         })?;
         let slot = &mut slots[at];
@@ -3955,7 +3980,7 @@ mod tests {
             ..round
         };
         let (text, path, size) = text_of(outer, "outer");
-        let drawn = text.outer_at(120).unwrap();
+        let drawn = text.outer_at(120, outer.outer_corners().unwrap()).unwrap();
         assert_eq!((drawn.width, drawn.height), (12, 24));
         assert!(drawn.offset as usize >= text.corners.end());
         let rings = [
@@ -3975,11 +4000,24 @@ mod tests {
             .read_exact_at(&mut got, drawn.offset as u64)
             .unwrap();
         assert_eq!(got, want);
-        // Square: nothing; a tag: nothing, and its line is the tag, clear
-        // at the corners.
+        let fullscreen = Outer {
+            top: 12,
+            band: false,
+            ..outer.outer_corners().unwrap()
+        };
+        let without_band = text.outer_at(120, fullscreen).unwrap();
+        assert_eq!((without_band.width, without_band.height), (12, 12));
+        assert_ne!(
+            without_band.offset, drawn.offset,
+            "a distinct cache variant"
+        );
+        // An explicit fullscreen radius also has memory when the ordinary
+        // radius is square.
         let (square, _, _) = text_of(LOOK, "square");
         assert!(square.corners_at(120).is_none());
-        assert!(square.outer_at(120).is_none());
+        assert!(square
+            .outer_at(120, outer.outer_corners().unwrap())
+            .is_some());
         let tag = Look {
             style: Style::Tag,
             radius: 8,
