@@ -358,8 +358,8 @@ pub fn paste_chord(keys: &PasteKeys) -> (u32, u32) {
     (SHIFT, keys.insert.first().copied().unwrap_or(KEY_INSERT))
 }
 
-pub fn paste_chord_v(keys: &PasteKeys) -> (u32, u32) {
-    (CONTROL | SHIFT, keys.v.first().copied().unwrap_or(KEY_V))
+pub fn paste_chord_v(_keys: &PasteKeys) -> (u32, u32) {
+    (CONTROL | SHIFT, KEY_V)
 }
 
 /// An offer the person drags onto the program: read as dropped.
@@ -583,8 +583,8 @@ mod tests {
     }
 
     /// The paste keys are the keymap's: V wherever a layout has it — a
-    /// second group's included —, an alias followed, another keymap's codes
-    /// (a virtual keyboard's) as they are.
+    /// second group's included — and an alias followed. Replaying a paste
+    /// still uses the physical V, not a virtual keyboard's temporary codes.
     #[test]
     fn the_paste_keys_are_read_from_the_keymap() {
         let keymap = r#"xkb_keymap {
@@ -604,6 +604,10 @@ xkb_symbols "pc+us+ru" {
         // number.
         let virtual_keymap = "xkb_keymap { xkb_keycodes \"(unnamed)\" { minimum = 8; maximum = 255; <K1> = 9; <K2> = 10; indicator 1 = \"Caps Lock\"; }; xkb_symbols \"(unnamed)\" { key <K1> {      [ 0x76 ] }; key <K2> { [ v ] }; }; };";
         assert_eq!(paste_keys(virtual_keymap).v, [1, 2]);
+        assert_eq!(
+            paste_chord_v(&paste_keys(virtual_keymap)),
+            (CONTROL | SHIFT, 47)
+        );
         assert_eq!(paste_keys("garbage"), PasteKeys::default());
     }
 

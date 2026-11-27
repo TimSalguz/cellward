@@ -96,6 +96,25 @@ nested = machine.succeed(
 ).strip()
 niri_socket = machine.succeed("ls /run/user/1000/niri.*.sock").strip()
 NIRI_MSG = f"NIRI_SOCKET={niri_socket} niri msg"
+alice(f"systemctl --user set-environment NIRI_SOCKET={niri_socket} SWAYSOCK={swaysock}")
+
+
+def raw_key(code, modifiers=0):
+    script = f'''
+import importlib.util, struct, time
+spec = importlib.util.spec_from_file_location("typing_smoke", {TYPING_SMOKE!r})
+wire = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wire)
+vk = wire.keyboard({{"XDG_RUNTIME_DIR": "/run/user/1000", "WAYLAND_DISPLAY": {nested!r}}}, {XKBCOMMON!r})
+time.sleep(0.2)
+wire.packet(vk, 6, 2, struct.pack("=IIII", {modifiers}, 0, 0, 0))
+for down in (1, 0):
+    wire.packet(vk, 6, 1, struct.pack("=III", 0, {code}, down))
+    time.sleep(0.02)
+wire.packet(vk, 6, 2, struct.pack("=IIII", 0, 0, 0, 0))
+time.sleep(0.2)
+'''
+    alice(f"{PYTHON} -c {shlex.quote(script)}")
 
 
 def windows():
@@ -877,6 +896,29 @@ if wanted(NESTED):
 
 # --- 8. The clipboard by container ---------------------------------------------
 
+BASELINE = "Baseline: foot pastes Ctrl+Shift+V on niri without Cellward"
+
+if wanted(BASELINE):
+    with scenario(BASELINE):
+        alice("printf secret-a | WAYLAND_DISPLAY=" + nested + " wl-copy")
+        alice(
+            "systemd-run --user --unit=baseline-paste --setenv=WAYLAND_DISPLAY=" + nested
+            + " --setenv=XDG_SESSION_TYPE=wayland foot --app-id baseline-paste sh -c 'cat > /home/alice/baseline-pasted.txt'"
+        )
+        machine.wait_until_succeeds(
+            f"su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 {NIRI_MSG} --json windows' | grep -q baseline-paste",
+            timeout=30,
+        )
+        win = next(w for w in windows() if w["app_id"] == "baseline-paste")
+        alice(f"{NIRI_MSG} action focus-window --id {win['id']}")
+        machine.sleep(2)
+        raw_key(47, 5)
+        raw_key(28)
+        machine.wait_until_succeeds("grep -q secret-a /home/alice/baseline-pasted.txt", timeout=15)
+    alice("systemctl --user stop baseline-paste", check=False)
+    machine.sleep(2)
+
+
 CLIP = "The clipboard by container: another container's copy only when pasted"
 
 if wanted(CLIP):
@@ -886,8 +928,8 @@ if wanted(CLIP):
         run("clip-a", "offline -- sh -c 'echo secret-a | wl-copy; sleep 600'",
             env="--setenv=VPN_ZONE_APPID=clip-a")
         machine.sleep(6)
-        # The host, not proxied: as before.
-        assert "secret-a" in alice(f"WAYLAND_DISPLAY={nested} wl-paste", check=False)
+        # The host does not automatically receive a private container's copy.
+        assert "secret-a" not in alice(f"WAYLAND_DISPLAY={nested} wl-paste", check=False)
         # Its own container: read freely.
         run("clip-a2", "offline -- sh -c 'sleep 2; wl-paste > ~/clip-a.txt; sleep 600'",
             env="--setenv=VPN_ZONE_APPID=clip-a2")
@@ -911,9 +953,9 @@ if wanted(CLIP):
         win = next(w for w in windows() if w["app_id"] == "clipb2")
         alice(f"{NIRI_MSG} action focus-window --id {win['id']}")
         machine.sleep(2)
-        alice(f"WAYLAND_DISPLAY={nested} wtype -M ctrl -M shift -k v -m shift -m ctrl")
+        raw_key(47, 5)
         machine.sleep(1)
-        alice(f"WAYLAND_DISPLAY={nested} wtype -k Return")
+        raw_key(28)
         machine.wait_until_succeeds("grep -q secret-a /home/alice/clip-b2.txt", timeout=20)
         shot("clip-pasted")
     alice("systemctl --user stop clip-a clip-a2 clip-b clip-b2", check=False)

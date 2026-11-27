@@ -219,6 +219,9 @@ let
       POINTER = "${pkgs.python3}/bin/python3 ${./vm-pointer.py}"
       SCHEME_LINES = "${../window/tests/scheme.lines}"
       SCHEME_CHAIN_LINES = "${../window/tests/scheme-chain.lines}"
+      TYPING_SMOKE = "${./typing-smoke.py}"
+      XKBCOMMON = "${pkgs.libxkbcommon}/lib/libxkbcommon.so.0"
+      PYTHON = "${pkgs.python3}/bin/python3"
       exec(open("${./vm-desktop.py}").read())
     '';
   };
