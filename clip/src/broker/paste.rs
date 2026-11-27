@@ -50,6 +50,7 @@ pub struct PasteCandidate {
     pub secret: bool,
     pub preview: String,
     pub types: Vec<(String, u64)>,
+    pub image: Option<Vec<u8>>,
 }
 pub enum PasteDecision {
     Current(u64),
@@ -251,6 +252,19 @@ impl Broker {
                 })
                 .unwrap_or_default()
         };
+        let image = if secret {
+            None
+        } else {
+            offer
+                .contents
+                .iter()
+                .find(|c| {
+                    c.mime == "image/png"
+                        && c.data.len() <= (32 << 20)
+                        && c.data.starts_with(b"\x89PNG\r\n\x1a\n")
+                })
+                .map(|c| c.data.clone())
+        };
         Ok(PasteDecision::Transfer(PasteCandidate {
             epoch: last.epoch,
             source: last.source,
@@ -263,6 +277,7 @@ impl Broker {
                 .iter()
                 .map(|c| (c.mime.clone(), c.data.len() as u64))
                 .collect(),
+            image,
         }))
     }
 
@@ -402,6 +417,41 @@ mod tests {
         }
     }
     #[test]
+    fn png_is_offered_as_a_separate_preview_without_a_text_substitute() {
+        let now = Instant::now();
+        let mut b = Broker::default();
+        let a = b.register().unwrap();
+        let target = b.register().unwrap();
+        let epoch = b.begin_capture(a, Selection::Clipboard, true, now).unwrap();
+        let png = b"\x89PNG\r\n\x1a\nSYNTHETIC";
+        let source = b
+            .finish_capture(
+                a,
+                Selection::Clipboard,
+                epoch,
+                vec![Content {
+                    mime: "image/png".into(),
+                    data: png.to_vec(),
+                }],
+                now,
+            )
+            .unwrap();
+        let PasteDecision::Transfer(candidate) = b.prepare_paste(target, 0, now).unwrap() else {
+            panic!()
+        };
+        assert_eq!(candidate.image.as_deref(), Some(png.as_slice()));
+        assert!(candidate.preview.is_empty());
+        let imported = b
+            .commit_paste(target, epoch, source, 0, false, now)
+            .unwrap();
+        assert_eq!(
+            b.read(target, Selection::Clipboard, imported, "image/png")
+                .unwrap(),
+            png
+        );
+    }
+
+    #[test]
     fn secret_has_no_preview_and_needs_separate_consent_without_losing_its_hint() {
         let now = Instant::now();
         let mut b = Broker::default();
@@ -409,6 +459,10 @@ mod tests {
         let target = b.register().unwrap();
         let epoch = b.begin_capture(a, Selection::Clipboard, true, now).unwrap();
         let mut contents = text(b"SYNTHETIC_SECRET");
+        contents.push(Content {
+            mime: "image/png".into(),
+            data: b"\x89PNG\r\n\x1a\nSYNTHETIC_SECRET_IMAGE".to_vec(),
+        });
         contents.push(Content {
             mime: "x-kde-passwordManagerHint".into(),
             data: b"secret".to_vec(),
@@ -421,6 +475,7 @@ mod tests {
         };
         assert!(candidate.secret);
         assert!(candidate.preview.is_empty());
+        assert!(candidate.image.is_none());
         assert_eq!(
             b.commit_paste(target, epoch, rev, 0, false, now),
             Err(Error::StaleOffer)

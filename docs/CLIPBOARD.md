@@ -20,7 +20,8 @@ never equal history labels. Separate containers still require the preview below.
 Copy normally in the source, focus the destination and press Ctrl+V (or
 Ctrl+Shift+V / Shift+Insert). If the latest private copy belongs to another
 instance, a trusted host window shows the source, destination and a bounded
-text preview. **Enter transfers and pastes; Escape cancels.** Password content
+text or PNG preview (PNG input is limited to 32 MiB and decoded within fixed
+memory limits). **Enter transfers and pastes; Escape cancels.** Password content
 is never shown and requires a separate guarded confirmation. Notifications
 contain only the direction, never the copied text. Once transferred, ordinary
 repeat pastes use the destination's local selection without another prompt.

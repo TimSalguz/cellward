@@ -5,7 +5,7 @@ use crate::broker_transport::Transport;
 use crate::clipboard_endpoint as endpoint;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -36,6 +36,21 @@ fn same_clipboard_container(source: &str, target: &str) -> bool {
                 .is_some_and(|network| !network.is_empty())
         })
 }
+fn image_fd(data: &[u8]) -> io::Result<OwnedFd> {
+    // SAFETY: a new descriptor owned by this process; SCM_RIGHTS gives the
+    // receiver its own reference while this one is closed after the answer.
+    let raw = unsafe { libc::memfd_create(c"cellward-paste-image".as_ptr(), libc::MFD_CLOEXEC) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: memfd_create returned this descriptor exactly once.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let mut file = File::from(fd.try_clone()?);
+    file.write_all(data)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(fd)
+}
+
 struct Pending {
     stream: UnixStream,
     header: [u8; 4],
@@ -427,6 +442,9 @@ impl Pending {
                         for (mime, size) in candidate.types {
                             endpoint::put_text(&mut answer, &mime);
                             answer.extend_from_slice(&size.to_le_bytes());
+                        }
+                        if let Some(image) = candidate.image {
+                            self.notifier = Some(image_fd(&image)?);
                         }
                     }
                 }
@@ -943,7 +961,10 @@ mod tests {
             &mut client,
             Request::FinishCapture {
                 epoch,
-                parts: &[("text/plain", b"synthetic preview")],
+                parts: &[
+                    ("text/plain", b"synthetic preview"),
+                    ("image/png", b"\x89PNG\r\n\x1a\nSYNTHETIC_IMAGE"),
+                ],
             },
         )
         .unwrap();
@@ -953,6 +974,10 @@ mod tests {
             panic!()
         };
         assert_eq!(preview.preview, "synthetic preview");
+        let mut image = File::from(preview.image.as_ref().unwrap().try_clone().unwrap());
+        let mut image_bytes = Vec::new();
+        image.read_to_end(&mut image_bytes).unwrap();
+        assert_eq!(image_bytes, b"\x89PNG\r\n\x1a\nSYNTHETIC_IMAGE");
         assert_eq!(preview.source_history, "source");
         assert_eq!(preview.target_history, "target");
         let revision = endpoint::commit_paste(&h.runtime, "target", &preview, false).unwrap();

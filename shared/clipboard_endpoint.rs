@@ -149,6 +149,7 @@ pub struct PastePreview {
     pub secret: bool,
     pub preview: String,
     pub types: Vec<(String, u64)>,
+    pub image: Option<OwnedFd>,
 }
 impl std::fmt::Debug for PastePreview {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -196,8 +197,8 @@ pub fn prepare_paste(runtime: &Path, target: &str, revision: u64) -> io::Result<
     let mut body = vec![b'P', 1];
     put_string(&mut body, target);
     body.extend_from_slice(&revision.to_le_bytes());
-    let (_, answer, fd) = exchange(runtime, &body, None)?;
-    if fd.is_some() || answer.len() < 2 {
+    let (_, answer, image) = exchange(runtime, &body, None)?;
+    if answer.len() < 2 || (answer[1] != 2 && image.is_some()) {
         return Err(invalid());
     }
     let mut bytes = &answer[2..];
@@ -224,7 +225,7 @@ pub fn prepare_paste(runtime: &Path, target: &str, revision: u64) -> io::Result<
             if !(1..=64).contains(&count)
                 || epoch == 0
                 || source_revision == 0
-                || (secret && !preview.is_empty())
+                || (secret && (!preview.is_empty() || image.is_some()))
             {
                 return Err(invalid());
             }
@@ -244,6 +245,7 @@ pub fn prepare_paste(runtime: &Path, target: &str, revision: u64) -> io::Result<
                 secret,
                 preview,
                 types,
+                image,
             })
         }
         _ => return Err(invalid()),

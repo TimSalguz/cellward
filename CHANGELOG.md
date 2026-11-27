@@ -6,6 +6,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Cross-container paste confirmation renders a bounded PNG preview from an
+  inherited memfd, without temporary files; secret images remain hidden.
 - The frame dropdown now opens container permissions, network pinning, frame
   settings and network shutdown directly, without a separate "all actions"
   window.

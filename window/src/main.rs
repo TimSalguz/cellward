@@ -37,6 +37,7 @@
 //! drawing at the size it had, and the compositor scales that to the new one.
 
 use std::io::Read;
+use std::os::fd::FromRawFd;
 
 mod appearance;
 mod checklist;
@@ -127,6 +128,8 @@ struct Request {
     block: Option<String>,
     frame_preview: bool,
     frame_sliders: std::collections::HashMap<String, (u32, u32)>,
+    image_fd: Option<i32>,
+    paste_image: Option<thumb::Thumb>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -248,6 +251,12 @@ fn parse_request(text: &str) -> Request {
             )),
             "title" => req.title = fields.get(1).unwrap_or(&"").to_string(),
             "note" => req.notes.push(fields.get(1).unwrap_or(&"").to_string()),
+            "image-fd" => {
+                req.image_fd = fields
+                    .get(1)
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .filter(|fd| *fd >= 0)
+            }
             "net" => req.nets.extend(parse_item(&fields[1..])),
             "container" => req.containers.extend(parse_item(&fields[1..])),
             "pin-net" => req.pin_net = fields.get(1) == Some(&"1"),
@@ -336,6 +345,7 @@ enum Msg {
 
 struct Window {
     req: Request,
+    paste_image: Option<iced::widget::image::Handle>,
     /// The highlighted menu entry.
     entry: usize,
     pane: Pane,
@@ -422,6 +432,13 @@ impl Window {
         let container = req.containers.iter().position(|i| i.selected).unwrap_or(0);
         let unconfined = req.nets.get(net).is_some_and(|n| n.tag == "unconfined");
         let mut window = Self {
+            paste_image: req.paste_image.as_ref().map(|image| {
+                iced::widget::image::Handle::from_rgba(
+                    image.width,
+                    image.height,
+                    image.rgba.clone(),
+                )
+            }),
             pin_net: req.pin_net && !unconfined,
             pin_container: req.pin_container && !unconfined,
             rule: false,
@@ -1127,6 +1144,13 @@ impl Window {
         let mut page = column![text(&self.req.title).size(20)]
             .spacing(10)
             .padding(16);
+        if let Some(image) = &self.paste_image {
+            page = page.push(
+                iced::widget::image(image.clone())
+                    .height(Length::Shrink)
+                    .content_fit(iced::ContentFit::None),
+            );
+        }
         let mut notes = column![].spacing(4);
         for note in &self.req.notes {
             notes = notes.push(
@@ -1979,6 +2003,17 @@ fn fitted_size(req: &Request) -> Size {
 /// asks another way (kdialog) — not a "no".
 const EXIT_NOT_SHOWN: i32 = 3;
 
+fn read_paste_image(fd: i32) -> Option<thumb::Thumb> {
+    // SAFETY: the core deliberately transferred this descriptor to the window.
+    let file = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut bytes = Vec::new();
+    file.take((32 << 20) + 1)
+        .read_to_end(&mut bytes)
+        .ok()
+        .filter(|_| !bytes.is_empty() && bytes.len() <= 32 << 20)?;
+    thumb::of_png(&bytes, 240).ok()
+}
+
 fn main() -> iced::Result {
     let started = std::time::Instant::now();
     let trace =
@@ -2043,7 +2078,7 @@ fn main() -> iced::Result {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         std::process::exit(1);
     }
-    let req = parse_request(&input);
+    let mut req = parse_request(&input);
     milestone("request read and parsed");
     // Nothing to choose from is not a window: the caller falls back.
     let empty = match req.mode.as_str() {
@@ -2053,6 +2088,9 @@ fn main() -> iced::Result {
     };
     if empty {
         std::process::exit(1);
+    }
+    if let Some(fd) = req.image_fd {
+        req.paste_image = read_paste_image(fd);
     }
     let size = fitted_size(&req);
     milestone("fonts and initial layout ready");
@@ -2728,5 +2766,32 @@ mod tests {
         w.name = "  общая  ".to_owned();
         assert!(w.ready());
         assert!(w.answer().contains("container\t__newsb__\nname\tобщая\n"));
+    }
+
+    #[test]
+    fn a_paste_image_is_decoded_once_from_the_transferred_fd() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::fd::IntoRawFd;
+
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[1, 2, 3, 4])
+            .unwrap();
+        let raw = unsafe { libc::memfd_create(c"paste-image-test".as_ptr(), libc::MFD_CLOEXEC) };
+        assert!(raw >= 0);
+        let mut file = unsafe { std::fs::File::from_raw_fd(raw) };
+        file.write_all(&png).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let raw = file.into_raw_fd();
+        let req = parse_request(&format!("image-fd\t{raw}\n"));
+        assert_eq!(req.image_fd, Some(raw));
+        let image = read_paste_image(raw).unwrap();
+        assert_eq!((image.width, image.height), (1, 1));
+        assert_eq!(image.rgba, [1, 2, 3, 4]);
     }
 }

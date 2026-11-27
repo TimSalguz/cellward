@@ -21,7 +21,7 @@ import time
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('core', 'broker', 'window', 'sway', 'swaymsg', 'foot', 'font', 'xkbcommon'):
+    for name in ('core', 'broker', 'window', 'sway', 'swaymsg', 'foot', 'font', 'xkbcommon', 'grim'):
         parser.add_argument('--' + name, required=True)
     args = parser.parse_args()
     tests = Path(__file__).resolve().parent
@@ -174,7 +174,25 @@ def main():
         assert output.read_bytes() == b'FIRST synthetic link' * 2 + b'SLOW synthetic link'
         print('fast paste waits for new capture despite a stalled legacy MIME', flush=True)
         before = output.read_bytes()
-        control.write_text(json.dumps({'epoch': 5, 'types': {'text/plain': 'SYNTHETIC password', 'x-kde-passwordManagerHint': 'secret'}}))
+        control.write_text(json.dumps({'epoch': 5, 'types': {'image/png': 'png'}}))
+        time.sleep(.2)
+        key(47, 5)
+        wire.wait_for(menu)
+        time.sleep(.7)
+        preview = root / 'preview.ppm'
+        subprocess.check_call([args.grim, '-t', 'ppm', str(preview)], env=env)
+        header = preview.read_bytes().split(b'\n', 3)
+        assert header[0] == b'P6', header[:3]
+        colors = {header[3][at:at + 3] for at in range(0, len(header[3]) - 2, 3)}
+        assert len(colors) > 1000, f'PNG preview was not rendered: {len(colors)} colours'
+        assert output.read_bytes() == before, 'image reached target before confirmation'
+        key(28)
+        wire.wait_for(lambda: not menu())
+        time.sleep(.5)
+        assert output.read_bytes() == before, 'text-only foot unexpectedly accepted image/png'
+        print('real trusted window renders and confirms the PNG transfer', flush=True)
+        before = output.read_bytes()
+        control.write_text(json.dumps({'epoch': 6, 'types': {'text/plain': 'SYNTHETIC password', 'x-kde-passwordManagerHint': 'secret'}}))
         time.sleep(.2)
         key(47, 5)
         wire.wait_for(menu)

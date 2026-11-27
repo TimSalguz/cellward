@@ -165,7 +165,7 @@ pub(crate) fn run(tools: &Tools, args: &[OsString]) -> u8 {
                 // Enter is the explicit transfer the person requested. The
                 // guarded window consumes the opening shortcut's repeats.
                 if !matches!(crate::window::paste_question(&tools.window, label(Key::PastePreview), &body,
-                    &choices), crate::window::Asked::Chose(tag) if tag == "paste")
+                    preview.image.as_ref(), &choices), crate::window::Asked::Chose(tag) if tag == "paste")
                 {
                     return Ok(None);
                 }

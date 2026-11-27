@@ -65,6 +65,7 @@
 //! nothing until the person has been still for the guard with it focused.
 //! Exit status 3: it could not be shown at all.
 
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
@@ -218,12 +219,33 @@ pub fn spawn_menu_on(
     display: Option<&std::ffi::OsStr>,
     menu: &Menu,
 ) -> Option<Child> {
+    spawn_menu_with_image(window, display, menu, None)
+}
+
+fn spawn_menu_with_image(
+    window: &Path,
+    display: Option<&std::ffi::OsStr>,
+    menu: &Menu,
+    image: Option<&OwnedFd>,
+) -> Option<Child> {
     if window.as_os_str().is_empty() {
         return None;
     }
     let mut command = Command::new(window);
     if let Some(display) = display {
         command.env("WAYLAND_DISPLAY", display);
+    }
+    if let Some(image) = image {
+        let fd = image.as_raw_fd();
+        // SAFETY: only clear close-on-exec for this trusted memfd in the child.
+        unsafe {
+            std::os::unix::process::CommandExt::pre_exec(&mut command, move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     let mut child = command
         .stdin(Stdio::piped())
@@ -234,7 +256,10 @@ pub fn spawn_menu_on(
     // From a thread of its own: a window that does not read would otherwise
     // hold this — and the deadline would never start.
     if let Some(mut stdin) = child.stdin.take() {
-        let request = render_menu(menu);
+        let mut request = render_menu(menu);
+        if let Some(image) = image {
+            request.push_str(&format!("image-fd\t{}\n", image.as_raw_fd()));
+        }
         std::thread::spawn(move || {
             let _ = std::io::Write::write_all(&mut stdin, request.as_bytes());
         });
@@ -348,16 +373,17 @@ pub(crate) fn paste_question(
     window: &Path,
     title: &str,
     text: &str,
+    image: Option<&OwnedFd>,
     answers: &[(&str, &str, bool)],
 ) -> Asked {
-    question_controlled(
+    question_controlled_image(
         window,
         None,
         title,
         text,
         None,
         answers,
-        (Some(std::time::Duration::from_secs(40)), None, 250),
+        (Some(std::time::Duration::from_secs(40)), None, 250, image),
     )
 }
 
@@ -424,6 +450,32 @@ fn question_controlled(
     ),
 ) -> Asked {
     let (deadline, cancel, guard_ms) = control;
+    question_controlled_image(
+        window,
+        display,
+        title,
+        text,
+        command,
+        answers,
+        (deadline, cancel, guard_ms, None),
+    )
+}
+
+fn question_controlled_image(
+    window: &Path,
+    display: Option<&std::ffi::OsStr>,
+    title: &str,
+    text: &str,
+    command: Option<(&str, &[String])>,
+    answers: &[(&str, &str, bool)],
+    control: (
+        Option<std::time::Duration>,
+        Option<&crate::sys::CancelToken>,
+        u64,
+        Option<&OwnedFd>,
+    ),
+) -> Asked {
+    let (deadline, cancel, guard_ms, image) = control;
     if cancel.is_some_and(|c| c.cancelled()) {
         return Asked::NoAnswer;
     }
@@ -442,7 +494,7 @@ fn question_controlled(
         command,
         program,
     };
-    let Some(mut child) = spawn_menu_on(window, display, &menu) else {
+    let Some(mut child) = spawn_menu_with_image(window, display, &menu, image) else {
         return Asked::NotShown;
     };
     if let Some(cancel) = cancel {
@@ -463,7 +515,6 @@ fn question_controlled(
                     return Asked::NoAnswer;
                 }
             }
-            use std::os::fd::AsRawFd;
             let mut fds = [
                 libc::pollfd {
                     fd: cancel.fd(),
