@@ -7278,6 +7278,13 @@ impl WlDataDeviceManagerHandler for DataDeviceManager {
 #[derive(Default)]
 struct DataDevice {
     away: bool,
+    dragged: Option<u64>,
+}
+
+impl DataDevice {
+    fn take_drag(&mut self) -> Option<u64> {
+        self.dragged.take()
+    }
 }
 
 impl WlDataDeviceHandler for DataDevice {
@@ -7358,7 +7365,7 @@ impl WlDataDeviceHandler for DataDevice {
                         }
                         info.announced = true;
                     }
-                    crate::clip::dragged(info.id);
+                    self.dragged = Some(info.id);
                 }
             }
             slf.send_enter(serial, surface, x, y, id);
@@ -7366,6 +7373,7 @@ impl WlDataDeviceHandler for DataDevice {
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlDataDevice>) {
+        self.dragged = None;
         if !std::mem::take(&mut self.away) {
             slf.send_leave();
         }
@@ -7378,6 +7386,9 @@ impl WlDataDeviceHandler for DataDevice {
     }
 
     fn handle_drop(&mut self, slf: &Rc<WlDataDevice>) {
+        if let Some(offer) = self.take_drag() {
+            crate::clip::dragged(offer);
+        }
         if !std::mem::take(&mut self.away) {
             slf.send_drop();
         }
@@ -8938,5 +8949,29 @@ mod tests {
         questions.touched.set(Some(long_ago));
         assert!(questions.click_allowed(0, Some(long_ago)));
         assert!(questions.click_allowed(1, Some(long_ago)));
+    }
+
+    #[test]
+    fn a_foreign_drag_is_readable_only_on_drop_and_only_once() {
+        let id = crate::clip::fresh_offer_id();
+        let mut device = DataDevice {
+            dragged: Some(id),
+            ..DataDevice::default()
+        };
+        assert!(!crate::clip::may_read(
+            false,
+            crate::clip::Which::Clipboard,
+            "image/png",
+            id
+        ));
+        assert_eq!(device.take_drag(), Some(id));
+        crate::clip::dragged(id);
+        assert!(crate::clip::may_read(
+            false,
+            crate::clip::Which::Clipboard,
+            "image/png",
+            id
+        ));
+        assert_eq!(device.take_drag(), None);
     }
 }
