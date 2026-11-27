@@ -932,7 +932,17 @@ pub fn run(args: Args) -> u8 {
                     &args.clip_history,
                     owner.as_fd(),
                 )
-                .map(|bound| (bound, runtime_dir.clone(), id.clone()))
+                .map(|bound| {
+                    (
+                        bound,
+                        wl_proxy::ClipboardBinding {
+                            runtime: runtime_dir.clone(),
+                            id: id.clone(),
+                            history: args.clip_history.clone(),
+                            owner,
+                        },
+                    )
+                })
                 .map_err(|e| format!("private clipboard unavailable ({e})"))
             })
             .transpose()

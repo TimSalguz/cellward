@@ -21,6 +21,7 @@
   # Only measure cold/warm picker mapping on a real compositor.
   startupOnly ? false,
   clipboardOnly ? false,
+  clipboardSoakSecs ? 0,
   # Default container launches and nested folder mounts, without GUI scenarios.
   foldersOnly ? false,
 }:
@@ -182,6 +183,7 @@ let
     '' + pkgs.lib.optionalString clipboardOnly ''
       assert json is not None
       clipboard_fixtures = "${clipboardFixtures}"
+      clipboard_soak_secs = ${toString clipboardSoakSecs}
       exec(open("${./vm-private-clipboard.py}").read())
     '' + pkgs.lib.optionalString (!loginOnly && !startupOnly && !clipboardOnly) (''
       with subtest("the launch window comes up, stays up, and closed starts nothing"):

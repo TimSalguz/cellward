@@ -22,8 +22,7 @@ thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 pub(super) fn begin(
     keyboard: &Rc<WlKeyboard>,
     state: &Rc<RefCell<typing::KeyboardState>>,
-    key: u32,
-    modifiers: u32,
+    chord: (u32, u32),
 ) {
     STATE.with_borrow_mut(|s| {
         if s.pending.is_some() {
@@ -39,7 +38,7 @@ pub(super) fn begin(
             keyboard: Rc::downgrade(keyboard),
             state: state.clone(),
             surface: state.borrow().surface.clone(),
-            chord: (modifiers, key),
+            chord,
             until: Instant::now() + Duration::from_secs(60),
             send: true,
             confirmed: None,

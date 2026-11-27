@@ -358,6 +358,10 @@ pub fn paste_chord(keys: &PasteKeys) -> (u32, u32) {
     (SHIFT, keys.insert.first().copied().unwrap_or(KEY_INSERT))
 }
 
+pub fn paste_chord_v(keys: &PasteKeys) -> (u32, u32) {
+    (CONTROL | SHIFT, keys.v.first().copied().unwrap_or(KEY_V))
+}
+
 /// An offer the person drags onto the program: read as dropped.
 pub fn dragged(offer: u64) {
     STATE.with(|s| {
@@ -595,6 +599,7 @@ xkb_symbols "pc+us+ru" {
         let keys = paste_keys(keymap);
         assert_eq!(keys.v, [47]);
         assert_eq!(keys.insert, [110]);
+        assert_eq!(paste_chord_v(&keys), (CONTROL | SHIFT, 47));
         // wtype's: a code of its own for each symbol, and the symbol by its
         // number.
         let virtual_keymap = "xkb_keymap { xkb_keycodes \"(unnamed)\" { minimum = 8; maximum = 255; <K1> = 9; <K2> = 10; indicator 1 = \"Caps Lock\"; }; xkb_symbols \"(unnamed)\" { key <K1> {      [ 0x76 ] }; key <K2> { [ v ] }; }; };";

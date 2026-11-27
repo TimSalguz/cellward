@@ -176,9 +176,12 @@ impl Client {
         // SAFETY: both descriptors are live; the old slot remains open until
         // dup2 atomically replaces it, so the received FD cannot alias it.
         if unsafe { libc::dup2(stream.as_raw_fd(), target) } < 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(error.kind(), format!("dup2: {error}")));
         }
-        self.stream.set_nonblocking(true)?;
+        self.stream
+            .set_nonblocking(true)
+            .map_err(|error| io::Error::new(error.kind(), format!("nonblocking: {error}")))?;
         self.reset();
         self.closed = false;
         Ok(())

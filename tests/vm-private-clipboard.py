@@ -1,4 +1,4 @@
-"""Executed by vm-window.nix --arg clipboardOnly true, history disabled."""
+"""Private clipboard VM checks, with an optional idle/reconnect soak."""
 import hashlib
 import json
 
@@ -117,12 +117,39 @@ with subtest("unconfined launches join the real-home clipboard without a filesys
     )
     machine.succeed("test -f /tmp/clip-unconfined-input")
 
+with subtest("fresh copies work after idle and a broker restart"):
+    machine.sleep(clipboard_soak_secs)
+    current = clipboard_status("main", "clip-main", "host") or {}
+    assert all(current.get("bodies", {}).get(mime) == body for mime, body in expected.items())
+    alice("systemctl --user restart cellward-clipboard.service")
+    machine.wait_until_succeeds(
+        "su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active cellward-clipboard.service'",
+        timeout=30,
+    )
+    deadline = time.monotonic() + 30
+    while (clipboard_status("main", "clip-main", "host") or {}).get("types", []) != []:
+        assert time.monotonic() < deadline, "the volatile selection survived a broker restart"
+        machine.sleep(1)
+    clipboard_start(
+        "clip-main-new-owner",
+        f"cellward run host -- python3 {clipboard_fixtures}/private-clipboard-smoke.py owner",
+    )
+    deadline = time.monotonic() + 60
+    while True:
+        current = clipboard_status("main", "clip-main", "host") or {}
+        if all(current.get("bodies", {}).get(mime) == body for mime, body in expected.items()):
+            break
+        assert time.monotonic() < deadline, "a fresh copy did not restore text/PNG"
+        machine.sleep(1)
+    assert clipboard_status("vmclipother", "clip-other")["types"] == []
+    assert json.loads(machine.succeed("cat /tmp/clip-host.json"))["types"] == []
+
 with subtest("disabling history leaves active isolation enabled and no disk store"):
     # No history service exists in this VM: the active broker is independent.
     alice("systemctl --user is-active cellward-clipboard.service")
     machine.fail("su -l alice -c 'XDG_RUNTIME_DIR=/run/user/1000 systemctl --user is-active cellward-clip.service'")
     machine.fail(f"test -e {state}/.clipboard")
 
-for unit in ("clip-owner", "clip-same", "clip-primary", "clip-other", "clip-observer", "clip-main-owner", "clip-main-reader", "clip-main-terminal", "clip-unconfined"):
+for unit in ("clip-owner", "clip-same", "clip-primary", "clip-other", "clip-observer", "clip-main-owner", "clip-main-new-owner", "clip-main-reader", "clip-main-terminal", "clip-unconfined"):
     alice(f"systemctl --user stop {unit}.service")
 print("PASS: actual default container launches, native CLIPBOARD/PRIMARY, host/foreign isolation, network switch, history disabled")

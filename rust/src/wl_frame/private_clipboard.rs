@@ -191,7 +191,10 @@ pub(crate) fn reconnect(bound: Bound, now: Instant) {
     match result {
         Ok(true) => eprintln!("wl-sandbox: private clipboard reconnected"),
         Ok(false) => {}
-        Err(_) => reconnect_failed(now),
+        Err(error) => {
+            eprintln!("wl-sandbox: private clipboard reconnect failed: {error}");
+            reconnect_failed(now);
+        }
     }
 }
 pub(crate) fn reconnect_failed(now: Instant) {
@@ -431,9 +434,14 @@ impl State {
             self.client
                 .as_mut()
                 .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))?
-                .reconnect(bound.data)?;
+                .reconnect(bound.data)
+                .map_err(|error| io::Error::new(error.kind(), format!("data socket: {error}")))?;
             match (&mut self.metadata, bound.captures) {
-                (Some(metadata), Some(captures)) => metadata.reconnect(captures)?,
+                (Some(metadata), Some(captures)) => {
+                    metadata.reconnect(captures).map_err(|error| {
+                        io::Error::new(error.kind(), format!("metadata socket: {error}"))
+                    })?
+                }
                 (None, None) => {}
                 _ => return Err(io::Error::from(io::ErrorKind::InvalidData)),
             }

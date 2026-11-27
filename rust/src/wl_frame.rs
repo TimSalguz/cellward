@@ -4766,13 +4766,25 @@ fn paste_waiting() {
 /// a paste of the program's own: it reads what the history set, as a paste
 /// of the person's ([`crate::clip::pasting`]).
 fn press_paste(keyboard: &WlKeyboard, f: Focus) {
+    const LEFT_SHIFT: u32 = 42;
+    const LEFT_CONTROL: u32 = 29;
     let (ctrl, key) = f.chord;
     let (depressed, latched, locked, group) = f.mods;
     let time = crate::clip::now_ms();
     crate::clip::pasting(crate::clip::Which::Clipboard);
     keyboard.send_modifiers(f.serial, depressed | ctrl, latched, locked, group);
+    for (mask, code) in [(1, LEFT_SHIFT), (4, LEFT_CONTROL)] {
+        if ctrl & mask != 0 {
+            keyboard.send_key(f.serial, time, code, WlKeyboardKeyState::PRESSED);
+        }
+    }
     keyboard.send_key(f.serial, time, key, WlKeyboardKeyState::PRESSED);
     keyboard.send_key(f.serial, time, key, WlKeyboardKeyState::RELEASED);
+    for (mask, code) in [(4, LEFT_CONTROL), (1, LEFT_SHIFT)] {
+        if ctrl & mask != 0 {
+            keyboard.send_key(f.serial, time, code, WlKeyboardKeyState::RELEASED);
+        }
+    }
     keyboard.send_modifiers(f.serial, depressed, latched, locked, group);
 }
 
@@ -4944,7 +4956,7 @@ impl WlKeyboardHandler for Keyboard {
             {
                 self.prompt_keys.push(key);
                 if self.f.first(serial) {
-                    smart_paste::begin(slf, &self.typing, key, self.depressed);
+                    smart_paste::begin(slf, &self.typing, crate::clip::paste_chord_v(&self.paste));
                 }
                 return;
             }

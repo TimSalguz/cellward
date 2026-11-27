@@ -154,7 +154,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::io::{self, Read as _, Write as _};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -510,12 +510,19 @@ struct Recording {
     pid: libc::pid_t,
 }
 
+pub(crate) struct ClipboardBinding {
+    pub(crate) runtime: PathBuf,
+    pub(crate) id: String,
+    pub(crate) history: String,
+    pub(crate) owner: OwnedFd,
+}
+
 pub struct Proxy {
     pid: libc::pid_t,
     pidfd: Option<OwnedFd>,
     channel: Option<UnixStream>,
     upstream: PathBuf,
-    clipboard: Option<(PathBuf, String)>,
+    clipboard: Option<ClipboardBinding>,
     adopting: bool,
     /// The signals taken over in [`Proxy::take_over`].
     signals: Option<Signals>,
@@ -1064,11 +1071,12 @@ pub(crate) fn start_private(
     opened: Option<OwnedFd>,
     focus: FocusPolicy,
     clip: Option<String>,
-    private: Option<(crate::clipboard_endpoint::Bound, PathBuf, String)>,
+    private: Option<(crate::clipboard_endpoint::Bound, ClipboardBinding)>,
 ) -> Result<Proxy, String> {
-    let clipboard = private
-        .as_ref()
-        .map(|(_, runtime, id)| (runtime.clone(), id.clone()));
+    let (private, clipboard) = match private {
+        Some((bound, binding)) => (Some(bound), Some(binding)),
+        None => (None, None),
+    };
     // A live switch may have completed after launch built the command line
     // but before this supervisor drew its first frame. Start from the
     // instance's current network, not a label that was already stale.
@@ -1111,7 +1119,7 @@ pub(crate) fn start_private(
             } else {
                 clip.as_deref()
             });
-            if let Some((bound, _, _)) = private {
+            if let Some(bound) = private {
                 if let Err(e) = crate::wl_frame::private_clipboard::initialize(bound) {
                     eprintln!("wl-sandbox: private clipboard: {e}");
                     return 1;
@@ -1474,12 +1482,21 @@ impl Proxy {
         let Some(channel) = &self.channel else {
             return false;
         };
-        let bound = self.clipboard.as_ref().and_then(|(runtime, id)| {
-            let mut bound = crate::clipboard_endpoint::lookup(runtime, id).ok()?;
-            let metadata = crate::clipboard_endpoint::lookup(runtime, id).ok()?;
-            bound.captures = Some(metadata.data);
-            Some(bound)
-        });
+        let bound =
+            self.clipboard.as_ref().and_then(
+                |binding| match crate::clipboard_endpoint::bind_capture(
+                    &binding.runtime,
+                    &binding.id,
+                    &binding.history,
+                    binding.owner.as_fd(),
+                ) {
+                    Ok(bound) => Some(bound),
+                    Err(error) => {
+                        eprintln!("wl-sandbox: private clipboard rebind failed: {error}");
+                        None
+                    }
+                },
+            );
         let sent = if let Some(bound) = bound {
             let descriptors = [
                 bound.data.as_raw_fd(),
@@ -1490,6 +1507,9 @@ impl Proxy {
         } else {
             sys::send_with_fds(channel.as_raw_fd(), &[CLIPBOARD_REFUSED], &[])
         };
+        if let Err(error) = &sent {
+            eprintln!("wl-sandbox: private clipboard rebind answer failed: {error}");
+        }
         sent.is_ok()
     }
 
@@ -1878,7 +1898,7 @@ impl Proxy {
             let capture_id = self
                 .clipboard
                 .as_ref()
-                .map(|(_, id)| id)
+                .map(|binding| &binding.id)
                 .filter(|id| crate::record::valid_capture_id(id))
                 .cloned()
                 .unwrap_or_else(|| format!("launch-{}", self.pid));
@@ -2983,7 +3003,8 @@ fn limit(resource: libc::__rlimit_resource_t, max: libc::rlim_t) -> Result<(), S
 /// each wl-proxy State polls its own epoll), the eventfd and pipe a State
 /// makes, memory (anonymous and never executable), futex, the clock and
 /// random numbers the runtime reads, and leaving. `ioctl` only for
-/// `TIOCOUTQ`. `pwrite64` for the title's pixels (`crate::wl_title`), and
+/// `TIOCOUTQ` and the replacement clipboard socket's `FIONBIO`.
+/// `pwrite64` for the title's pixels (`crate::wl_title`), and
 /// only to `title` — the descriptor they are written with, made before the
 /// filter (none: no `pwrite64` at all). Not to any descriptor (review
 /// 2026-09-25): `write` only goes forward from where a file is, and there is
@@ -3142,15 +3163,17 @@ fn filter_sockets(
             libc::F_GETFD as u64,
         )],
     )?;
-    ctx.add_rule_conditional(
-        ScmpAction::Allow,
-        ScmpSyscall::from_name("ioctl")?,
-        &[ScmpArgCompare::new(
-            1,
-            ScmpCompareOp::MaskedEqual(0xffff_ffff),
-            libc::TIOCOUTQ,
-        )],
-    )?;
+    for cmd in [libc::TIOCOUTQ, libc::FIONBIO] {
+        ctx.add_rule_conditional(
+            ScmpAction::Allow,
+            ScmpSyscall::from_name("ioctl")?,
+            &[ScmpArgCompare::new(
+                1,
+                ScmpCompareOp::MaskedEqual(0xffff_ffff),
+                cmd,
+            )],
+        )?;
+    }
     // Masked to 32 bits, like the descriptor above: an `int`.
     if let Some(Ok(fd)) = title.map(u64::try_from) {
         ctx.add_rule_conditional(
@@ -3522,7 +3545,7 @@ enum Answer {
 
 fn answer(channel: &UnixStream) -> Answer {
     let mut byte = [0u8; 1];
-    match sys::recv_into_with_fds(channel.as_raw_fd(), &mut byte, 1) {
+    match sys::recv_into_with_fds(channel.as_raw_fd(), &mut byte, 3) {
         // Without its descriptor (out of descriptors here: the kernel closed
         // it) the answer is as good as a refusal — for this one client.
         Ok((1, mut fds, _)) if byte[0] == UPSTREAM || byte[0] == UPSTREAM_BARE => match fds.pop() {
@@ -4167,6 +4190,25 @@ mod tests {
         ));
         crate::sys::send_with_fds(ours.as_raw_fd(), &[super::REFUSED], &[]).unwrap();
         assert!(matches!(super::answer(&theirs), super::Answer::Refused));
+    }
+
+    #[test]
+    fn clipboard_reconnect_preserves_all_three_descriptors() {
+        use std::os::fd::AsRawFd;
+        let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (data, _data_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (captures, _captures_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let changed = std::fs::File::open("/dev/null").unwrap();
+        crate::sys::send_with_fds(
+            ours.as_raw_fd(),
+            &[super::CLIPBOARD_REBOUND],
+            &[data.as_raw_fd(), changed.as_raw_fd(), captures.as_raw_fd()],
+        )
+        .unwrap();
+        let super::Answer::Clipboard(bound) = super::answer(&theirs) else {
+            panic!("the three-descriptor reconnect was refused or truncated");
+        };
+        assert!(bound.captures.is_some());
     }
 
     #[test]
@@ -7210,7 +7252,11 @@ mod tests {
                 use std::os::unix::fs::FileExt;
                 fs::File::from(writer).write_all_at(&[7; 8], 56).is_ok()
             };
-            let fine = v.len() == 1 << 20 && outq(a.as_raw_fd()) == 0 && title;
+            let nonblocking = {
+                let mut n = 1i32;
+                (unsafe { libc::ioctl(a.as_raw_fd(), libc::FIONBIO, &mut n) }) == 0
+            };
+            let fine = v.len() == 1 << 20 && outq(a.as_raw_fd()) == 0 && nonblocking && title;
             tx.send((results, fine)).unwrap();
         });
         let got = rx.recv_timeout(Duration::from_secs(10));

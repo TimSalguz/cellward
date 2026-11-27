@@ -874,7 +874,8 @@ always-focused не даёт панели фокус композитора. В�
 - **seccomp — список разрешённого**, остальное — `KILL_PROCESS`: read/write/
   close, recvmsg/sendmsg, accept4, poll/epoll (у каждого `State` wl-proxy свой
   epoll), eventfd2/pipe2 (их делает `State`), память (анонимная, без `PROT_EXEC`),
-  futex, часы, getrandom, выход; `ioctl` — только `TIOCOUTQ`, `fcntl` — только
+  futex, часы, getrandom, выход; `ioctl` — только `TIOCOUTQ` и `FIONBIO`
+  (замена сокета clipboard при reconnect), `fcntl` — только
   `F_GETFD` (его зовёт std при закрытии дескриптора в отладочной сборке —
   нашёл тест под настоящим фильтром).
 - **Пределы**: 64 подключения, 16 ждущих своего подключения вверх, 100 000
