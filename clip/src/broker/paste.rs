@@ -58,6 +58,70 @@ pub enum PasteDecision {
     Transfer(PasteCandidate),
 }
 
+pub(super) fn preview(
+    epoch: u64,
+    source: Instance,
+    revision: Revision,
+    target_revision: u64,
+    contents: &[Content],
+) -> PasteCandidate {
+    let secret = contents
+        .iter()
+        .any(|c| c.mime == "x-kde-passwordManagerHint");
+    let preferred = [
+        "text/plain;charset=utf-8",
+        "text/plain",
+        "UTF8_STRING",
+        "TEXT",
+        "STRING",
+    ]
+    .iter()
+    .find_map(|mime| contents.iter().find(|c| c.mime == *mime));
+    let preview = if secret {
+        String::new()
+    } else {
+        preferred
+            .map(|c| {
+                let sample = String::from_utf8_lossy(&c.data[..c.data.len().min(2048)]);
+                let mut preview: String = sample
+                    .chars()
+                    .take(200)
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                if c.data.len() > 2048 || sample.chars().take(201).count() > 200 {
+                    preview.push('…');
+                }
+                preview
+            })
+            .unwrap_or_default()
+    };
+    let image = if secret {
+        None
+    } else {
+        contents
+            .iter()
+            .find(|c| {
+                c.mime == "image/png"
+                    && c.data.len() <= (32 << 20)
+                    && c.data.starts_with(b"\x89PNG\r\n\x1a\n")
+            })
+            .map(|c| c.data.clone())
+    };
+    PasteCandidate {
+        epoch,
+        source,
+        revision,
+        target_revision,
+        secret,
+        preview,
+        types: contents
+            .iter()
+            .map(|c| (c.mime.clone(), c.data.len() as u64))
+            .collect(),
+        image,
+    }
+}
+
 impl Broker {
     pub(super) fn cancel_capture(&mut self, instance: Instance, selection: Selection) {
         if let Some(epoch) = self
@@ -168,7 +232,7 @@ impl Broker {
         Ok(revision)
     }
 
-    fn clipboard_revision(&self, instance: Instance) -> Result<u64, Error> {
+    pub(super) fn clipboard_revision(&self, instance: Instance) -> Result<u64, Error> {
         Ok(self
             .types(instance, Selection::Clipboard)?
             .map_or(0, |(r, _)| r.wire()))
@@ -221,64 +285,13 @@ impl Broker {
             .as_ref()
             .filter(|o| o.revision == source_revision)
             .ok_or(Error::StaleOffer)?;
-        let secret = offer
-            .contents
-            .iter()
-            .any(|c| c.mime == "x-kde-passwordManagerHint");
-        let preferred = [
-            "text/plain;charset=utf-8",
-            "text/plain",
-            "UTF8_STRING",
-            "TEXT",
-            "STRING",
-        ]
-        .iter()
-        .find_map(|mime| offer.contents.iter().find(|c| c.mime == *mime));
-        let preview = if secret {
-            String::new()
-        } else {
-            preferred
-                .map(|c| {
-                    let sample = String::from_utf8_lossy(&c.data[..c.data.len().min(2048)]);
-                    let mut preview: String = sample
-                        .chars()
-                        .take(200)
-                        .map(|c| if c.is_control() { ' ' } else { c })
-                        .collect();
-                    if c.data.len() > 2048 || sample.chars().take(201).count() > 200 {
-                        preview.push('…');
-                    }
-                    preview
-                })
-                .unwrap_or_default()
-        };
-        let image = if secret {
-            None
-        } else {
-            offer
-                .contents
-                .iter()
-                .find(|c| {
-                    c.mime == "image/png"
-                        && c.data.len() <= (32 << 20)
-                        && c.data.starts_with(b"\x89PNG\r\n\x1a\n")
-                })
-                .map(|c| c.data.clone())
-        };
-        Ok(PasteDecision::Transfer(PasteCandidate {
-            epoch: last.epoch,
-            source: last.source,
-            revision: source_revision,
-            target_revision: revision,
-            secret,
-            preview,
-            types: offer
-                .contents
-                .iter()
-                .map(|c| (c.mime.clone(), c.data.len() as u64))
-                .collect(),
-            image,
-        }))
+        Ok(PasteDecision::Transfer(preview(
+            last.epoch,
+            last.source,
+            source_revision,
+            revision,
+            &offer.contents,
+        )))
     }
 
     pub fn commit_paste(

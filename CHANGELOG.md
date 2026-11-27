@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Private-instance drag-and-drop now preserves text, HTTPS links, URI lists, PNG
+  and arbitrary binary MIME payloads. A foreign drop opens the trusted preview
+  only after release and replays a frozen, bounded snapshot after confirmation;
+  same-instance drops stay direct. Hover never reads the source, cancellation
+  transfers nothing, and expired or completed drags wipe their snapshots.
 - Launches and containers can be marked as automation: their selections stay
   local instead of replacing the latest user-copy candidate for cross-container paste.
 - Cross-container paste confirmation renders a bounded PNG preview from an
@@ -26,6 +31,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   without granting capture to apps.
 
 ### Fixed
+- Share the unguessable DnD identity across launches of one private instance and
+  serialize token creation with an instance lock. Same-scope windows no longer
+  open a foreign-transfer dialog, including concurrent startup.
 - Dim the target and block its pointer/keyboard input during character typing,
   while Cellward's synthetic events continue and the original keymap is restored.
 - Keep the Nix daemon's resolver bound on `/etc/resolv.conf` itself rather than at

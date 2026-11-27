@@ -450,6 +450,68 @@ impl Pending {
                 }
                 Ok(answer)
             }
+            b'Q' if bytes.first() == Some(&1) && self.owner.is_none() => {
+                bytes = &bytes[1..];
+                let target = endpoint::take_string(&mut bytes)?;
+                let drag_id = endpoint::take_number(&mut bytes)?;
+                let target_revision = endpoint::take_number(&mut bytes)?;
+                if !bytes.is_empty() || drag_id == 0 {
+                    return Err(endpoint::invalid());
+                }
+                let to = controller
+                    .scopes
+                    .get(target)
+                    .ok_or_else(endpoint::invalid)?;
+                if !endpoint::alive(to.owner.as_fd()) {
+                    return Err(endpoint::invalid());
+                }
+                let mut answer = vec![0];
+                match controller
+                    .transport
+                    .prepare_drop(to.instance, drag_id, target_revision, Instant::now())
+                    .map_err(|_| endpoint::invalid())?
+                {
+                    crate::broker::PasteDecision::Pending(id) => {
+                        answer.push(1);
+                        answer.extend_from_slice(&id.to_le_bytes());
+                    }
+                    crate::broker::PasteDecision::Transfer(candidate) => {
+                        let (source, from) = controller
+                            .scopes
+                            .iter()
+                            .find(|(_, scope)| scope.instance == candidate.source)
+                            .ok_or_else(endpoint::invalid)?;
+                        if !endpoint::alive(from.owner.as_fd()) {
+                            return Err(endpoint::invalid());
+                        }
+                        answer.push(2);
+                        for n in [
+                            candidate.epoch,
+                            candidate.revision.wire(),
+                            candidate.target_revision,
+                        ] {
+                            answer.extend_from_slice(&n.to_le_bytes());
+                        }
+                        answer.push(u8::from(candidate.secret));
+                        for text in [source.as_str(), from.history.as_str(), to.history.as_str()] {
+                            endpoint::put_string(&mut answer, text);
+                        }
+                        endpoint::put_text(&mut answer, &candidate.preview);
+                        answer.extend_from_slice(&(candidate.types.len() as u16).to_le_bytes());
+                        for (mime, size) in candidate.types {
+                            endpoint::put_text(&mut answer, &mime);
+                            answer.extend_from_slice(&size.to_le_bytes());
+                        }
+                        if let Some(image) = candidate.image {
+                            self.notifier = Some(image_fd(&image)?);
+                        }
+                    }
+                    crate::broker::PasteDecision::Current(_) => {
+                        return Err(endpoint::invalid());
+                    }
+                }
+                Ok(answer)
+            }
             b'J' if bytes.first() == Some(&1) && self.owner.is_none() => {
                 bytes = &bytes[1..];
                 let target = endpoint::take_string(&mut bytes)?;
@@ -491,6 +553,54 @@ impl Pending {
                         target.instance,
                         epoch,
                         crate::broker::Revision::from_wire(source_revision),
+                        target_revision,
+                        allow_secret,
+                        Instant::now(),
+                    )
+                    .map_err(|_| endpoint::invalid())?;
+                let mut answer = vec![0];
+                answer.extend_from_slice(&revision.wire().to_le_bytes());
+                Ok(answer)
+            }
+            b'K' if bytes.first() == Some(&1) && self.owner.is_none() => {
+                bytes = &bytes[1..];
+                let target = endpoint::take_string(&mut bytes)?;
+                let drag_id = endpoint::take_number(&mut bytes)?;
+                let drop_revision = endpoint::take_number(&mut bytes)?;
+                let target_revision = endpoint::take_number(&mut bytes)?;
+                let allow_secret = match bytes {
+                    [0] => false,
+                    [1] => true,
+                    _ => return Err(endpoint::invalid()),
+                };
+                let target = controller
+                    .scopes
+                    .get(target)
+                    .ok_or_else(endpoint::invalid)?;
+                if !endpoint::alive(target.owner.as_fd()) {
+                    return Err(endpoint::invalid());
+                }
+                let crate::broker::PasteDecision::Transfer(candidate) = controller
+                    .transport
+                    .prepare_drop(target.instance, drag_id, target_revision, Instant::now())
+                    .map_err(|_| endpoint::invalid())?
+                else {
+                    return Err(endpoint::invalid());
+                };
+                let source = controller
+                    .scopes
+                    .values()
+                    .find(|scope| scope.instance == candidate.source)
+                    .ok_or_else(endpoint::invalid)?;
+                if !endpoint::alive(source.owner.as_fd()) {
+                    return Err(endpoint::invalid());
+                }
+                let revision = controller
+                    .transport
+                    .commit_drop(
+                        target.instance,
+                        drag_id,
+                        crate::broker::Revision::from_wire(drop_revision),
                         target_revision,
                         allow_secret,
                         Instant::now(),
@@ -802,7 +912,7 @@ mod tests {
         let mut metadata = Client::new(bound.captures.unwrap()).unwrap();
         assert!(matches!(
             exchange(&mut metadata, Request::Capabilities).unwrap(),
-            Reply::Capabilities(3)
+            Reply::Capabilities(7)
         ));
         let manager = endpoint::lookup(&h.runtime, "other").unwrap();
         let mut manager = Client::new(manager.data).unwrap();
@@ -817,7 +927,7 @@ mod tests {
         ));
         assert!(matches!(
             exchange(&mut metadata, Request::Capabilities).unwrap(),
-            Reply::Capabilities(3)
+            Reply::Capabilities(7)
         ));
         assert!(matches!(
             exchange(&mut data, Request::Types).unwrap(),

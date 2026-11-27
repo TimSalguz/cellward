@@ -143,6 +143,21 @@ jobs:
           nix-shell ../tests/harness.nix -A rustShell --run \
             'cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test'
 
+  clipboard-smoke:
+    name: clipboard-smoke (real Wayland paste and drag-and-drop)
+    runs-on: ubuntu-24.04
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Собрать core, broker и trusted window
+        run: nix-shell tests/harness.nix -A rustShell --run 'cargo build --manifest-path rust/Cargo.toml && cargo build --manifest-path clip/Cargo.toml && cargo build --manifest-path window/Cargo.toml'
+      - name: Настоящие paste и DnD на изолированном Sway
+        run: |
+          nix-shell -E 'let pins = import ./tests/pins.nix; pkgs = import pins.nixpkgs { }; in pkgs.mkShell { packages = [ pkgs.sway pkgs.foot pkgs.grim pkgs.python3 pkgs.dejavu_fonts pkgs.libxkbcommon pkgs.wayland ]; FONT = "${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans.ttf"; XKB = "${pkgs.libxkbcommon}/lib/libxkbcommon.so.0"; LD_LIBRARY_PATH = "${pkgs.wayland}/lib:${pkgs.libxkbcommon}/lib"; }' --run '
+            python3 tests/clipboard-paste-smoke.py --core "$PWD/rust/target/debug/vpn-zone-core" --broker "$PWD/clip/target/debug/cellward-clip" --window "$PWD/window/target/debug/vpn-zone-window" --sway "$(command -v sway)" --swaymsg "$(command -v swaymsg)" --foot "$(command -v foot)" --font "$FONT" --xkbcommon "$XKB" --grim "$(command -v grim)" &&
+            python3 tests/clipboard-drop-smoke.py smoke --core "$PWD/rust/target/debug/vpn-zone-core" --broker "$PWD/clip/target/debug/cellward-clip" --window "$PWD/window/target/debug/vpn-zone-window" --sway "$(command -v sway)" --swaymsg "$(command -v swaymsg)" --font "$FONT" --xkbcommon "$XKB"'
+
   # VM-тест (tests/vm.nix): qemu-машина с настоящим systemd и модулем + вторая
   # VM как живой WireGuard-пир. Закрывает то, до чего смоук не дотягивается
   # (нет systemctl --user на раннере): юнит vpn-zone@, автоподъём в run,

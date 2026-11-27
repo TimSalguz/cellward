@@ -919,10 +919,9 @@ pub fn run(args: Args) -> u8 {
             }
             None => None,
         };
-        let clip = if clipboard_scope.is_some() {
-            None
-        } else {
-            crate::clip::token_for(&runtime_dir, &args.zone, &args.clip_history)
+        let clip = match &clipboard_scope {
+            Some((id, _, _)) => crate::clip::token_for(&runtime_dir, id, &args.clip_history),
+            None => crate::clip::token_for(&runtime_dir, &args.zone, &args.clip_history),
         };
         let private = match clipboard_scope
             .as_ref()

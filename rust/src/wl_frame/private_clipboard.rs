@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 
 mod capture;
-use capture::{CaptureData, Payload};
+pub(super) use capture::{CaptureData, Payload};
 mod metadata;
 use metadata::Metadata;
 
@@ -64,6 +64,7 @@ pub(crate) fn initialize(bound: Bound, automation: bool) -> io::Result<()> {
             capture: [None, None],
             waiting: VecDeque::new(),
             publish: VecDeque::new(),
+            drop_publish: VecDeque::new(),
             reads: VecDeque::new(),
             writes: VecDeque::new(),
         });
@@ -112,6 +113,18 @@ pub(crate) fn smart_enabled() -> bool {
                     .as_ref()
                     .and_then(|m| m.caps)
                     .is_some_and(|caps| caps & 2 != 0)
+        })
+    })
+}
+
+pub(super) fn drop_enabled() -> bool {
+    STATE.with(|s| {
+        s.borrow().as_ref().is_some_and(|s| {
+            s.connected
+                && s.metadata
+                    .as_ref()
+                    .and_then(|m| m.caps)
+                    .is_some_and(|caps| caps & 4 != 0)
         })
     })
 }
@@ -270,6 +283,67 @@ pub(super) fn ready_primary(device: &Rc<ZwpPrimarySelectionDeviceV1>) {
     });
 }
 
+pub(super) fn begin_drag() -> Option<u64> {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let state = state.as_mut()?;
+        if !state.connected {
+            return None;
+        }
+        let drag_id = crate::clip::fresh_offer_id();
+        state.metadata.as_mut()?.begin_drag(drag_id);
+        Some(drag_id)
+    })
+}
+
+pub(super) fn abort_drag(drag_id: u64) {
+    STATE.with(|s| {
+        if let Some(state) = &mut *s.borrow_mut() {
+            state
+                .drop_publish
+                .retain(|publication| publication.drag_id != drag_id);
+            if let Some(metadata) = &mut state.metadata {
+                metadata.abort_drag(drag_id);
+            }
+        }
+    });
+}
+
+pub(super) fn finish_drop(drag_id: u64, target_revision: u64, contents: Vec<Payload>) {
+    STATE.with(|s| {
+        if let Some(state) = &mut *s.borrow_mut() {
+            if state.connected && !contents.is_empty() {
+                state.drop_publish.push_back(DropPublication {
+                    drag_id,
+                    target_revision,
+                    contents,
+                });
+            }
+        }
+    });
+}
+
+pub(super) fn read_drop(drag_id: u64, drop_revision: u64, mime: &str, fd: &Rc<OwnedFd>) {
+    STATE.with(|s| {
+        if let Some(state) = &mut *s.borrow_mut() {
+            if !state.connected || state.reads.len() + state.writes.len() >= PENDING {
+                return;
+            }
+            let Ok(fd) = fd.try_clone() else { return };
+            if nonblocking(fd.as_raw_fd()).is_err() {
+                return;
+            }
+            state.reads.push_back(ReadRequest {
+                revision: drop_revision,
+                which: Selection::Clipboard,
+                drag_id: Some(drag_id),
+                mime: mime.to_owned(),
+                file: File::from(fd),
+            });
+        }
+    });
+}
+
 #[derive(Clone)]
 pub(super) enum SourceRef {
     Clipboard(Rc<WlDataSource>, Rc<Cell<bool>>),
@@ -352,9 +426,15 @@ struct Capture {
     data: CaptureData,
     local: u64,
 }
+struct DropPublication {
+    drag_id: u64,
+    target_revision: u64,
+    contents: Vec<Payload>,
+}
 struct ReadRequest {
     revision: u64,
     which: Selection,
+    drag_id: Option<u64>,
     mime: String,
     file: File,
 }
@@ -368,6 +448,7 @@ enum Operation {
     Types(Selection),
     Clear(Selection, u64),
     Set(Selection, Rc<Vec<String>>, u64),
+    FinishDrop,
     Read(ReadRequest),
 }
 struct State {
@@ -389,6 +470,7 @@ struct State {
     capture: [Option<Capture>; 2],
     waiting: VecDeque<(Selection, SourceRef, Vec<String>)>,
     publish: VecDeque<Publication>,
+    drop_publish: VecDeque<DropPublication>,
     reads: VecDeque<ReadRequest>,
     writes: VecDeque<Transfer>,
 }
@@ -409,6 +491,7 @@ impl State {
         self.capture = [None, None];
         self.waiting.clear();
         self.publish.clear();
+        self.drop_publish.clear();
         self.reads.clear();
         self.writes.clear();
         self.refresh = [true; 2];
@@ -523,7 +606,7 @@ impl State {
         }
         if let Some(meta) = &mut self.metadata {
             match meta.tick(now) {
-                Ok(Some(begun)) => {
+                Ok(Some(metadata::Event::Capture(begun))) => {
                     let at = index(begun.which);
                     if self.changing[at] == Some(begun.local) {
                         self.epochs[at] = Some((begun.local, begun.epoch));
@@ -531,6 +614,7 @@ impl State {
                         meta.abort(begun.which, begun.epoch);
                     }
                 }
+                Ok(Some(metadata::Event::Drag)) => {}
                 Ok(None) => {}
                 Err(()) => {
                     self.disable();
@@ -567,6 +651,7 @@ impl State {
                     self.selected(which, None);
                     self.release_local(which, local, false);
                 }
+                (Some(Operation::FinishDrop), Reply::Set(_)) => {}
                 (Some(Operation::Read(read)), Reply::Data(bytes)) => {
                     let allocated: usize = self.writes.iter().map(|w| w.bytes.allocated()).sum();
                     if allocated.saturating_add(bytes.allocated()) <= LIMIT {
@@ -727,6 +812,28 @@ impl State {
                 Rc::new(publish.contents.iter().map(|p| p.mime.clone()).collect()),
                 publish.local,
             ))
+        } else if self.drop_publish.front().is_some() {
+            let publication = self.drop_publish.pop_front().unwrap();
+            let parts: Vec<_> = publication
+                .contents
+                .iter()
+                .map(|p| (p.mime.as_str(), p.bytes.as_slice()))
+                .collect();
+            if client
+                .start(
+                    Selection::Clipboard,
+                    Request::FinishDrop {
+                        drag_id: publication.drag_id,
+                        target_revision: publication.target_revision,
+                        parts: &parts,
+                    },
+                    now,
+                )
+                .is_err()
+            {
+                return;
+            }
+            Some(Operation::FinishDrop)
         } else if let Some(at) = self.refresh.iter().position(|v| *v) {
             self.refresh[at] = false;
             let which = choice(at);
@@ -736,17 +843,19 @@ impl State {
             }
             Some(Operation::Types(which))
         } else if let Some(read) = self.reads.pop_front() {
-            if client
-                .start(
-                    read.which,
-                    Request::Read {
-                        revision: read.revision,
-                        mime: &read.mime,
-                    },
-                    now,
-                )
-                .is_err()
-            {
+            let request = if let Some(drag_id) = read.drag_id {
+                Request::ReadDrop {
+                    drag_id,
+                    drop_revision: read.revision,
+                    mime: &read.mime,
+                }
+            } else {
+                Request::Read {
+                    revision: read.revision,
+                    mime: &read.mime,
+                }
+            };
+            if client.start(read.which, request, now).is_err() {
                 return;
             }
             Some(Operation::Read(read))
@@ -777,6 +886,7 @@ fn receive(snapshot: &Snapshot, mime: &str, fd: &Rc<OwnedFd>) {
             s.reads.push_back(ReadRequest {
                 revision: snapshot.revision,
                 which: snapshot.which,
+                drag_id: None,
                 mime: mime.to_owned(),
                 file: File::from(fd),
             });
@@ -878,6 +988,7 @@ mod tests {
             capture: [None, None],
             waiting: VecDeque::new(),
             publish: VecDeque::new(),
+            drop_publish: VecDeque::new(),
             reads: VecDeque::new(),
             writes: VecDeque::new(),
         }
@@ -930,14 +1041,14 @@ mod tests {
 
         tick(timeout);
         tick(timeout);
-        answer(&mut metadata, &[9, 0], &[0, 3]);
+        answer(&mut metadata, &[9, 0], &[0, 7]);
         answer(&mut data, &[1, 0], &[0, 0]);
         tick(timeout + Duration::from_millis(1));
         STATE.with(|s| {
             let state = s.borrow();
             let state = state.as_ref().unwrap();
             assert!(!state.refresh[0]);
-            assert_eq!(state.metadata.as_ref().unwrap().caps, Some(3));
+            assert_eq!(state.metadata.as_ref().unwrap().caps, Some(7));
         });
     }
 
@@ -969,10 +1080,10 @@ mod tests {
         );
         state.tick(now);
         state.tick(now);
-        answer(&mut metadata, &[9, 0], &[0, 3]);
+        answer(&mut metadata, &[9, 0], &[0, 7]);
         answer(&mut data, &[1, 0], &[0, 0]);
         state.tick(now + Duration::from_millis(1));
         assert!(!state.refresh[0]);
-        assert_eq!(state.metadata.as_ref().unwrap().caps, Some(3));
+        assert_eq!(state.metadata.as_ref().unwrap().caps, Some(7));
     }
 }

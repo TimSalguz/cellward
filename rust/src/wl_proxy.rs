@@ -405,6 +405,17 @@ const TYPE_CONTROL: u8 = b'G';
 const CLIP: u8 = b'h';
 const SMART_PASTE: u8 = b'B';
 const SMART_RESULT: u8 = b'D';
+const SMART_DROP: u8 = b'2';
+const SMART_DROP_RESULT: u8 = b'3';
+
+fn smart_request_size(kind: u8) -> Option<usize> {
+    match kind {
+        SMART_PASTE => Some(17),
+        SMART_DROP => Some(25),
+        _ => None,
+    }
+}
+
 /// Proxy → supervisor: replace both disconnected same-scope broker sockets.
 const CLIPBOARD_RECONNECT: u8 = b'C';
 /// Supervisor → proxy: data, change and metadata descriptors for that scope.
@@ -1115,11 +1126,7 @@ pub(crate) fn start_private(
         let code = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // The instance's mark for what its programs copy (`crate::clip`):
             // the proxy reads no file of it, it is given.
-            crate::clip::set_mark(if private.is_some() {
-                None
-            } else {
-                clip.as_deref()
-            });
+            crate::clip::set_mark(clip.as_deref());
             if let Some(bound) = private {
                 if let Err(e) = crate::wl_frame::private_clipboard::initialize(
                     bound,
@@ -1521,11 +1528,15 @@ impl Proxy {
     fn answer(&mut self) -> bool {
         if let Some(fd) = self.channel.as_ref().map(AsRawFd::as_raw_fd) {
             let mut first = [0u8; 1];
-            if !self.smart_partial.is_empty()
-                || matches!(recv_peek(fd, &mut first), Ok(1)) && first[0] == SMART_PASTE
-            {
-                let mut bytes = [0u8; 17];
-                let left = 17 - self.smart_partial.len();
+            let smart = self.smart_partial.first().copied().or_else(|| {
+                matches!(recv_peek(fd, &mut first), Ok(1))
+                    .then_some(first[0])
+                    .filter(|kind| smart_request_size(*kind).is_some())
+            });
+            if let Some(kind) = smart {
+                let size = smart_request_size(kind).unwrap();
+                let mut bytes = [0u8; 26];
+                let left = size - self.smart_partial.len();
                 match sys::recv_into_with_fds(fd, &mut bytes[..left], 0) {
                     Ok((0, _, _)) => return false,
                     Ok((n, _, _)) => self.smart_partial.extend_from_slice(&bytes[..n]),
@@ -1536,12 +1547,20 @@ impl Proxy {
                         )
                     }
                 }
-                if self.smart_partial.len() == 17 {
+                if self.smart_partial.len() == size {
                     let ticket = u64::from_le_bytes(self.smart_partial[1..9].try_into().unwrap());
-                    let revision =
-                        u64::from_le_bytes(self.smart_partial[9..17].try_into().unwrap());
+                    if kind == SMART_PASTE {
+                        let revision =
+                            u64::from_le_bytes(self.smart_partial[9..17].try_into().unwrap());
+                        self.smart_paste(ticket, revision);
+                    } else {
+                        let drag_id =
+                            u64::from_le_bytes(self.smart_partial[9..17].try_into().unwrap());
+                        let revision =
+                            u64::from_le_bytes(self.smart_partial[17..25].try_into().unwrap());
+                        self.smart_drop(ticket, drag_id, revision);
+                    }
                     self.smart_partial.clear();
-                    self.smart_paste(ticket, revision);
                 }
                 return true;
             }
@@ -1706,6 +1725,19 @@ impl Proxy {
                     && !of_this_launch(stream.as_raw_fd())
                     && self.channel.as_ref().is_some_and(|c| {
                         let mut message = vec![SMART_RESULT];
+                        message.extend_from_slice(payload);
+                        sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_ok()
+                    });
+                self.asking
+                    .say(&stream, if sent { ASK_YES } else { ASK_NOWHERE });
+                continue;
+            }
+            if let Some(payload) = asked_of(&buf).and_then(|p| p.strip_prefix(b"\0smart-drop")) {
+                let sent = payload.len() == 17
+                    && payload[0] <= 1
+                    && !of_this_launch(stream.as_raw_fd())
+                    && self.channel.as_ref().is_some_and(|c| {
+                        let mut message = vec![SMART_DROP_RESULT];
                         message.extend_from_slice(payload);
                         sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_ok()
                     });
@@ -2085,6 +2117,26 @@ impl Proxy {
                     "smart-paste".into(),
                     std::process::id().to_string().into(),
                     ticket.to_string().into(),
+                    revision.to_string().into(),
+                ],
+            )
+        });
+    }
+
+    fn smart_drop(&self, ticket: u64, drag_id: u64, revision: u64) {
+        self.start_unit(&self.paste_menu, "drop preview", |tools, manifest| {
+            user_unit_argv(
+                &tools.systemd_run,
+                &tools.core,
+                manifest,
+                self.display.as_deref(),
+                &format!("cellward-drop-{}-{ticket}", std::process::id()),
+                &["--wait"],
+                vec![
+                    "smart-drop".into(),
+                    std::process::id().to_string().into(),
+                    ticket.to_string().into(),
+                    drag_id.to_string().into(),
                     revision.to_string().into(),
                 ],
             )
@@ -3260,6 +3312,7 @@ fn serve(
         let first_conn = fds.len();
         fds.extend(conns.iter().map(|c| pollfd(c.state.poll_fd().as_raw_fd())));
         fds.extend(crate::wl_frame::private_clipboard::pollfds());
+        fds.extend(crate::wl_frame::smart_drop::pollfds());
         let mut timeout = if conns.iter().any(|c| c.stopped) {
             RECHECK_MS
         } else {
@@ -3271,6 +3324,7 @@ fn serve(
             .filter_map(|c| c.frames.as_ref().and_then(|f| f.wake_at()))
             .chain(crate::wl_frame::typing::wake_at())
             .chain(crate::wl_frame::smart_paste::wake_at())
+            .chain(crate::wl_frame::smart_drop::wake_at())
             .chain(crate::wl_frame::screenshot::wake_at())
             .chain(crate::wl_frame::private_clipboard::wake_at())
             .min();
@@ -3340,6 +3394,9 @@ fn serve(
                     Answer::Paste => crate::wl_frame::paste_now(),
                     Answer::SmartResult(ticket, revision) => {
                         crate::wl_frame::smart_paste::finish(ticket, revision)
+                    }
+                    Answer::SmartDropResult(ticket, revision) => {
+                        crate::wl_frame::smart_drop::finish(ticket, revision)
                     }
                     Answer::Clipboard(bound) => {
                         crate::wl_frame::private_clipboard::reconnect(bound, Instant::now())
@@ -3446,6 +3503,7 @@ fn serve(
         }
         crate::wl_frame::typing::tick(Instant::now());
         crate::wl_frame::smart_paste::tick(Instant::now());
+        crate::wl_frame::smart_drop::tick(Instant::now());
         for conn in &conns {
             if let Some(frames) = &conn.frames {
                 crate::wl_frame::screenshot::tick(frames, Instant::now());
@@ -3458,6 +3516,17 @@ fn serve(
                 message.extend_from_slice(&revision.to_le_bytes());
                 if sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_err() {
                     crate::wl_frame::smart_paste::finish(ticket, None);
+                }
+            }
+        }
+        if let Some((ticket, drag_id, revision)) = crate::wl_frame::smart_drop::request() {
+            if let Some(c) = &channel {
+                let mut message = vec![SMART_DROP];
+                message.extend_from_slice(&ticket.to_le_bytes());
+                message.extend_from_slice(&drag_id.to_le_bytes());
+                message.extend_from_slice(&revision.to_le_bytes());
+                if sys::send_with_fds(c.as_raw_fd(), &message, &[]).is_err() {
+                    crate::wl_frame::smart_drop::finish(ticket, None);
                 }
             }
         }
@@ -3533,6 +3602,7 @@ enum Answer {
     Retract(u64),
     Paste,
     SmartResult(u64, Option<u64>),
+    SmartDropResult(u64, Option<u64>),
     Clipboard(crate::clipboard_endpoint::Bound),
     ClipboardFailed,
     TypeControl(u64, crate::type_input::Request, Option<OwnedFd>),
@@ -3558,14 +3628,19 @@ fn answer(channel: &UnixStream) -> Answer {
         },
         Ok((1, _, _)) if byte[0] == REFUSED => Answer::Refused,
         Ok((1, _, _)) if byte[0] == PASTE => Answer::Paste,
-        Ok((1, _, _)) if byte[0] == SMART_RESULT => {
+        Ok((1, _, _)) if byte[0] == SMART_RESULT || byte[0] == SMART_DROP_RESULT => {
             let mut body = [0u8; 17];
             if !recv_exact(channel.as_raw_fd(), &mut body) {
                 return Answer::Closed;
             }
             let ticket = u64::from_le_bytes(body[1..9].try_into().unwrap());
             let revision = u64::from_le_bytes(body[9..17].try_into().unwrap());
-            Answer::SmartResult(ticket, (body[0] == 1).then_some(revision))
+            let result = (body[0] == 1).then_some(revision);
+            if byte[0] == SMART_RESULT {
+                Answer::SmartResult(ticket, result)
+            } else {
+                Answer::SmartDropResult(ticket, result)
+            }
         }
         Ok((1, mut fds, false)) if byte[0] == CLIPBOARD_REBOUND && fds.len() == 3 => {
             let captures = UnixStream::from(fds.pop().unwrap());
@@ -6728,6 +6803,14 @@ mod tests {
     }
 
     #[test]
+    fn smart_paste_and_drop_have_distinct_exact_request_frames() {
+        assert_eq!(smart_request_size(SMART_PASTE), Some(17));
+        assert_eq!(smart_request_size(SMART_DROP), Some(25));
+        assert_eq!(smart_request_size(SMART_RESULT), None);
+        assert_eq!(smart_request_size(SMART_DROP_RESULT), None);
+    }
+
+    #[test]
     fn the_asks_have_bytes_of_their_own() {
         // Distinct from every other byte of the channel, either way.
         let others = [
@@ -6738,6 +6821,8 @@ mod tests {
             REFUSED,
             SMART_PASTE,
             SMART_RESULT,
+            SMART_DROP,
+            SMART_DROP_RESULT,
             TYPE_CONTROL,
             RECORD_ATTACH,
             QUESTION,

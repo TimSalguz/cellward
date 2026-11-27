@@ -43,6 +43,22 @@ pub enum Request<'a> {
     AbortCapture {
         epoch: u64,
     },
+    BeginDrag {
+        drag_id: u64,
+    },
+    AbortDrag {
+        drag_id: u64,
+    },
+    FinishDrop {
+        drag_id: u64,
+        target_revision: u64,
+        parts: &'a [(&'a str, &'a [u8])],
+    },
+    ReadDrop {
+        drag_id: u64,
+        drop_revision: u64,
+        mime: &'a str,
+    },
     Capabilities,
 }
 
@@ -208,15 +224,30 @@ impl Client {
             Request::FinishCapture { .. } => 7,
             Request::AbortCapture { .. } => 8,
             Request::Capabilities => 9,
+            Request::BeginDrag { .. } => 10,
+            Request::AbortDrag { .. } => 11,
+            Request::FinishDrop { .. } => 12,
+            Request::ReadDrop { .. } => 13,
         };
         let mut length = 2usize;
         match &request {
-            Request::Set(parts) | Request::FinishCapture { parts, .. } => {
-                if let Request::FinishCapture { epoch, .. } = &request {
-                    if *epoch == 0 {
-                        return Err(invalid());
+            Request::Set(parts)
+            | Request::FinishCapture { parts, .. }
+            | Request::FinishDrop { parts, .. } => {
+                match &request {
+                    Request::FinishCapture { epoch, .. } => {
+                        if *epoch == 0 {
+                            return Err(invalid());
+                        }
+                        length += 8;
                     }
-                    length += 8;
+                    Request::FinishDrop { drag_id, .. } => {
+                        if *drag_id == 0 || !matches!(selection, Selection::Clipboard) {
+                            return Err(invalid());
+                        }
+                        length += 16;
+                    }
+                    _ => {}
                 }
                 if !(1..=64).contains(&parts.len()) {
                     return Err(invalid());
@@ -255,6 +286,26 @@ impl Client {
                 }
                 length += 10 + mime.len();
             }
+            Request::BeginDrag { drag_id } | Request::AbortDrag { drag_id } => {
+                if *drag_id == 0 || !matches!(selection, Selection::Clipboard) {
+                    return Err(invalid());
+                }
+                length += 8;
+            }
+            Request::ReadDrop {
+                drag_id,
+                drop_revision,
+                mime,
+            } => {
+                if *drag_id == 0
+                    || *drop_revision == 0
+                    || !valid_mime(mime)
+                    || !matches!(selection, Selection::Clipboard)
+                {
+                    return Err(invalid());
+                }
+                length += 18 + mime.len();
+            }
             _ => {}
         }
         if length > FRAME {
@@ -282,9 +333,22 @@ impl Client {
             b.extend_from_slice(s.as_bytes());
         };
         match request {
-            Request::Set(parts) | Request::FinishCapture { parts, .. } => {
-                if let Request::FinishCapture { epoch, .. } = request {
-                    b.extend_from_slice(&epoch.to_le_bytes());
+            Request::Set(parts)
+            | Request::FinishCapture { parts, .. }
+            | Request::FinishDrop { parts, .. } => {
+                match request {
+                    Request::FinishCapture { epoch, .. } => {
+                        b.extend_from_slice(&epoch.to_le_bytes());
+                    }
+                    Request::FinishDrop {
+                        drag_id,
+                        target_revision,
+                        ..
+                    } => {
+                        b.extend_from_slice(&drag_id.to_le_bytes());
+                        b.extend_from_slice(&target_revision.to_le_bytes());
+                    }
+                    _ => {}
                 }
                 b.extend_from_slice(&(parts.len() as u16).to_le_bytes());
                 for (m, data) in parts {
@@ -299,6 +363,18 @@ impl Client {
             }
             Request::BeginCapture { user_copy } => b.push(u8::from(user_copy)),
             Request::AbortCapture { epoch } => b.extend_from_slice(&epoch.to_le_bytes()),
+            Request::BeginDrag { drag_id } | Request::AbortDrag { drag_id } => {
+                b.extend_from_slice(&drag_id.to_le_bytes())
+            }
+            Request::ReadDrop {
+                drag_id,
+                drop_revision,
+                mime: m,
+            } => {
+                b.extend_from_slice(&drag_id.to_le_bytes());
+                b.extend_from_slice(&drop_revision.to_le_bytes());
+                mime(b, m);
+            }
             _ => {}
         }
         self.opcode = opcode;
@@ -488,11 +564,11 @@ fn decode(opcode: u8, bytes: &[u8]) -> io::Result<Reply> {
                 }
                 _ => return Err(invalid()),
             },
-            2 | 7 => Reply::Set(d.revision()?),
-            6 => Reply::Begun(d.revision()?),
-            8 => Reply::Cleared,
+            2 | 7 | 12 => Reply::Set(d.revision()?),
+            6 | 10 => Reply::Begun(d.revision()?),
+            8 | 11 => Reply::Cleared,
             9 => Reply::Capabilities(d.byte()?),
-            3 => {
+            3 | 13 => {
                 let n = u32::from_le_bytes(d.take(4)?.try_into().unwrap()) as usize;
                 if n > CONTENT {
                     return Err(invalid());

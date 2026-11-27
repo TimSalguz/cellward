@@ -31,11 +31,14 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The type a launch's copy is marked with, before its instance's secret.
 pub const MARK_PREFIX: &str = "application/x-cellward-clip-";
+const DRAG_PREFIX: &str = "application/x-cellward-clip-drag-";
+const DRAG_OWN_PREFIX: &str = "application/x-cellward-clip-drag-own-";
 
 /// How long after a paste of the person's a foreign selection may be read.
 pub const PASTE_WINDOW: Duration = Duration::from_secs(2);
@@ -116,6 +119,31 @@ pub fn is_mark(mime_type: &str) -> bool {
 /// Whether a type is this launch's instance's mark.
 pub fn is_own(mime_type: &str) -> bool {
     STATE.with(|s| s.mark.borrow().as_deref() == Some(mime_type))
+}
+
+pub fn drag_mark(drag_id: u64) -> String {
+    format!("{DRAG_PREFIX}{drag_id}")
+}
+
+pub fn drag_own_mark() -> Option<String> {
+    STATE.with(|s| {
+        s.mark
+            .borrow()
+            .as_ref()
+            .map(|mark| format!("{DRAG_OWN_PREFIX}{}", &mark[MARK_PREFIX.len()..]))
+    })
+}
+
+pub fn dragged_id(mime_type: &str) -> Option<u64> {
+    mime_type
+        .strip_prefix(DRAG_PREFIX)?
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+}
+
+pub fn is_own_drag(mime_type: &str) -> bool {
+    drag_own_mark().as_deref() == Some(mime_type)
 }
 
 /// The keys a paste is on, as evdev codes: those that give `v` or `V` in
@@ -450,6 +478,17 @@ pub fn token_for(runtime: &Path, key: &str, history: &str) -> Option<String> {
         .recursive(true)
         .mode(0o700)
         .create(&dir);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dir.join(format!(".{key}.lock")))
+        .ok()?;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return None;
+    }
     let path = dir.join(key);
     let valid = |t: &str| t.len() == 32 && t.bytes().all(|b| b.is_ascii_hexdigit());
     let mut text = String::new();
@@ -519,6 +558,21 @@ mod tests {
         ] {
             assert!(!is_simple_paste(&keys, key, mods));
         }
+    }
+
+    #[test]
+    fn drag_identity_is_dnd_only_and_uses_the_scope_token() {
+        set_mark(Some("00ff"));
+        let marked = drag_mark(73);
+        let own = drag_own_mark().unwrap();
+        assert_eq!(dragged_id(&marked), Some(73));
+        assert_eq!(dragged_id(&own), None);
+        assert!(is_own_drag(&own));
+        assert!(!is_own(&marked));
+        assert!(!is_own(&own));
+        assert!(is_mark(&marked) && is_mark(&own));
+        assert_eq!(dragged_id("application/x-cellward-clip-drag-0"), None);
+        assert_eq!(dragged_id("text/plain"), None);
     }
 
     #[test]
@@ -622,6 +676,21 @@ xkb_symbols "pc+us+ru" {
         assert_ne!(token_for(&base, "i-2", "work").unwrap(), one);
         assert_eq!(token_for(&base, "../x", "work"), None);
         assert_eq!(token_for(&base, "i-4", "../x"), None);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut launches = Vec::new();
+        for _ in 0..8 {
+            let base = base.clone();
+            let barrier = barrier.clone();
+            launches.push(std::thread::spawn(move || {
+                barrier.wait();
+                token_for(&base, "concurrent", "work")
+            }));
+        }
+        let tokens: Vec<_> = launches
+            .into_iter()
+            .map(|launch| launch.join().unwrap().unwrap())
+            .collect();
+        assert!(tokens.iter().all(|token| *token == tokens[0]));
         // Its history said beside it, for the daemon; the secret kept.
         assert_eq!(
             fs::read_to_string(base.join(DIR).join("i-1")).unwrap(),

@@ -66,8 +66,18 @@ also drops the transport and removes the control socket.
 pipes asynchronously, announces only accepted revisions, and supplies scoped
 synthetic offers to all launches of the instance. Reads are pinned to the
 offer revision. Ordinary upstream clipboard/primary offers are hidden; explicit
-drag-and-drop offers remain separate. Captured copies survive the application's
-source disappearing, until replacement, explicit clear or holder shutdown.
+drag-and-drop offers remain separate. A drag between private instances captures
+its MIME offers only on the actual drop, never on enter or hover. The target
+replays all formats, including text, links, `text/uri-list`, PNG and arbitrary
+binary data, from a bounded frozen `DropCandidate` after the trusted preview.
+The snapshot has its own source/target instances and revisions; it does not
+change CLIPBOARD, PRIMARY, paste history or the latest user copy. Same-instance
+launches use their shared unguessable token and drop directly without a dialog.
+Secret hints require separate consent. Expiry, cancellation, source completion
+and dead registrations wipe the candidate. Unproxied host endpoints are outside
+this private-instance smart-drop path; host↔container confirmation is not
+claimed here. Captured copies survive the application's source disappearing,
+until replacement, explicit clear or holder shutdown.
 A lost data or metadata socket is replaced through the launch supervisor with
 fresh sockets for the same immutable scope; in-flight operations and old offers
 are fail-closed while disconnected. Proxy/broker failure never falls back to the
@@ -98,6 +108,11 @@ owner through Satellite, including PRIMARY with `--primary` and a host
 PRIMARY data-control observer. `vm-window.nix --arg clipboardOnly true` covers
 default `cellward run` launches, the user service, actual instance namespaces
 and preserving selections across a live network switch.
+`clipboard-drop-smoke.py` drives real raw-Wayland sources and targets through
+`wl-sandbox` on an isolated Sway. It verifies no read on hover, direct same-scope
+transfer of five complete MIME payloads, Escape before target receive, confirmed
+foreign replay and a fresh drag after source completion. Its direct-fixture mode
+checks the raw protocol independently of Cellward.
 
 Validation completed: 1113 core tests, 56 clipboard-library tests (one large
 benchmark ignored), 4 clipboard-command tests and 73 GUI tests. Production

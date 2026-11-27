@@ -126,6 +126,12 @@ def main():
                         '--frame', 'ff00ff:4:always', '--', args.foot, '--app-id', 'paste-target',
                         sys.executable, '-c', script, str(output)], 'target')
         node = wire.wait_for(lambda: next((w for w in windows() if w['app_id'] == 'paste-target'), None))
+        target_control = root / 'target-copy.json'
+        target_control.write_text(json.dumps({'epoch': 1, 'types': {'text/plain': 'OLD Firefox buffer'}}))
+        start([args.core, 'wl-sandbox', 'paste-target-owner', *scope('paste-target', target_holder), '--',
+               sys.executable, str(tests / 'private-clipboard-smoke.py'), 'fault-owner', str(target_control)],
+              'target-owner')
+        time.sleep(.3)
         control = root / 'copy.json'
         control.write_text(json.dumps({'epoch': 1, 'types': {'text/plain': 'FIRST synthetic link'}}))
         start([args.core, 'wl-sandbox', 'paste-source', *scope('paste-source', source_holder), '--',
@@ -156,13 +162,23 @@ def main():
         key(47, 5)
         wire.wait_for(menu)
         time.sleep(.7)
-        copied('THIRD synthetic link', 3)
+        target_control.write_text(json.dumps({'epoch': 2, 'types': {'text/plain': 'OLD Firefox changed again'}}))
         key(28)
         wire.wait_for(lambda: not menu())
         time.sleep(.5)
-        assert output.read_bytes() == b'FIRST synthetic link' * 2, 'confirmation substituted a newer clipboard'
+        assert output.read_bytes() == b'FIRST synthetic link' * 2, 'target race substituted the old Firefox clipboard'
+        print('a changed target clipboard invalidates confirmation instead of pasting the old value', flush=True)
+        copied('THIRD synthetic link', 3)
+        key(47, 5)
+        wire.wait_for(menu)
+        time.sleep(.7)
+        copied('FOURTH synthetic link', 4)
+        key(28)
+        wire.wait_for(lambda: not menu())
+        time.sleep(.5)
+        assert output.read_bytes() == b'FIRST synthetic link' * 2, 'confirmation substituted a newer source clipboard'
         print('repeat paste stays local; changed source invalidates frozen confirmation', flush=True)
-        control.write_text(json.dumps({'epoch': 4, 'types': {'TEXT': 'stall', 'text/plain': 'SLOW synthetic link'}}))
+        control.write_text(json.dumps({'epoch': 5, 'types': {'TEXT': 'stall', 'text/plain': 'SLOW synthetic link'}}))
         time.sleep(.15)
         msg(f"[con_id={node['id']}]", 'focus')
         key(47, 5)
@@ -174,7 +190,7 @@ def main():
         assert output.read_bytes() == b'FIRST synthetic link' * 2 + b'SLOW synthetic link'
         print('fast paste waits for new capture despite a stalled legacy MIME', flush=True)
         before = output.read_bytes()
-        control.write_text(json.dumps({'epoch': 5, 'types': {'image/png': 'png'}}))
+        control.write_text(json.dumps({'epoch': 6, 'types': {'image/png': 'png'}}))
         time.sleep(.2)
         key(47, 5)
         wire.wait_for(menu)
@@ -205,7 +221,7 @@ def main():
         assert output.read_bytes() == before, 'automation text reached the target'
         print('automation selections remain local instead of becoming the user copy', flush=True)
         before = output.read_bytes()
-        control.write_text(json.dumps({'epoch': 6, 'types': {'text/plain': 'SYNTHETIC password', 'x-kde-passwordManagerHint': 'secret'}}))
+        control.write_text(json.dumps({'epoch': 7, 'types': {'text/plain': 'SYNTHETIC password', 'x-kde-passwordManagerHint': 'secret'}}))
         time.sleep(.2)
         key(47, 5)
         wire.wait_for(menu)

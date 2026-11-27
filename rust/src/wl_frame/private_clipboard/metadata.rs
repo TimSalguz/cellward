@@ -1,5 +1,5 @@
-//! Small copy-epoch messages on a separate pre-bound socket. A large content
-//! transfer must not make the next paste mistake an old copy for a new one.
+//! Small copy-epoch and drag-registration messages on a separate pre-bound
+//! socket. Large payloads cannot delay the identity of the next operation.
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -12,6 +12,8 @@ enum Operation {
     Probe,
     Begin(Note),
     Abort(Selection, u64),
+    BeginDrag(u64),
+    AbortDrag(u64),
 }
 
 pub(super) struct Metadata {
@@ -24,6 +26,11 @@ pub(super) struct Begun {
     pub which: Selection,
     pub local: u64,
     pub epoch: u64,
+}
+
+pub(super) enum Event {
+    Capture(Begun),
+    Drag,
 }
 
 impl Metadata {
@@ -82,26 +89,41 @@ impl Metadata {
             self.pending.push_back(Operation::Abort(which, epoch));
         }
     }
-    pub fn tick(&mut self, now: Instant) -> Result<Option<Begun>, ()> {
+    pub fn begin_drag(&mut self, drag_id: u64) {
+        if self.pending.len() < 16 {
+            self.pending.push_back(Operation::BeginDrag(drag_id));
+        }
+    }
+    pub fn abort_drag(&mut self, drag_id: u64) {
+        if self.pending.len() < 16 {
+            self.pending.push_back(Operation::AbortDrag(drag_id));
+        }
+    }
+    pub fn tick(&mut self, now: Instant) -> Result<Option<Event>, ()> {
         if crate::sys::poll_events_now(self.fd(), libc::POLLIN)
             .is_ok_and(|events| events & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0)
         {
             return Err(());
         }
-        let mut begun = None;
+        let mut event = None;
         if let Some(reply) = self.client.tick(now) {
             match (self.operation.take(), reply.map_err(|_| ())?) {
                 (Some(Operation::Probe), Reply::Capabilities(caps)) if caps & 1 != 0 => {
                     self.caps = Some(caps)
                 }
                 (Some(Operation::Begin(n)), Reply::Begun(epoch)) => {
-                    begun = Some(Begun {
+                    event = Some(Event::Capture(Begun {
                         which: n.which,
                         local: n.local,
                         epoch,
-                    })
+                    }))
                 }
-                (Some(Operation::Abort(_, _)), Reply::Cleared) => {}
+                (Some(Operation::BeginDrag(expected)), Reply::Begun(drag_id))
+                    if expected == drag_id =>
+                {
+                    event = Some(Event::Drag);
+                }
+                (Some(Operation::Abort(_, _) | Operation::AbortDrag(_)), Reply::Cleared) => {}
                 _ => return Err(()),
             }
         }
@@ -118,11 +140,19 @@ impl Metadata {
                     Operation::Abort(which, epoch) => {
                         (*which, Request::AbortCapture { epoch: *epoch })
                     }
+                    Operation::BeginDrag(drag_id) => (
+                        Selection::Clipboard,
+                        Request::BeginDrag { drag_id: *drag_id },
+                    ),
+                    Operation::AbortDrag(drag_id) => (
+                        Selection::Clipboard,
+                        Request::AbortDrag { drag_id: *drag_id },
+                    ),
                 };
                 self.client.start(which, request, now).map_err(|_| ())?;
                 self.operation = Some(operation);
             }
         }
-        Ok(begun)
+        Ok(event)
     }
 }

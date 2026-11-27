@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Content;
 
+mod drop;
 mod paste;
 pub use paste::{PasteCandidate, PasteDecision};
 
@@ -103,6 +104,7 @@ pub struct Broker {
     bytes: usize,
     instances: HashMap<Instance, [Option<Offer>; 2]>,
     paste: paste::PasteState,
+    drops: drop::DropState,
 }
 
 impl Default for Broker {
@@ -119,6 +121,7 @@ impl Broker {
             bytes: 0,
             instances: HashMap::new(),
             paste: Default::default(),
+            drops: Default::default(),
         }
     }
 
@@ -145,6 +148,7 @@ impl Broker {
             .ok_or(Error::UnknownInstance)?;
         self.bytes -= offers.iter().flatten().map(|o| o.bytes).sum::<usize>();
         self.paste.remove(instance);
+        self.drops.remove_instance(instance);
         Ok(())
     }
 

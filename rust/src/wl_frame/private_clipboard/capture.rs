@@ -1,4 +1,4 @@
-//! Bounded, best-effort capture of one selection, independent of Wayland objects.
+//! Bounded, best-effort capture of one offered payload, independent of Wayland objects.
 //! Only EOF completes a format. A stalled or oversized format never publishes
 //! its prefix and never discards other completed formats.
 use crate::clipboard_client::{erase_slice, Bytes};
@@ -19,7 +19,7 @@ const HISTORY_HINTS: [&str; 2] = [
     "application/x-cellward-restored",
 ];
 
-pub(super) struct Payload {
+pub(crate) struct Payload {
     pub mime: String,
     pub bytes: Bytes,
 }
@@ -36,9 +36,9 @@ struct Pending {
     idle: Instant,
 }
 
-pub(super) struct CaptureData {
+pub(crate) struct CaptureData {
     types: VecDeque<String>,
-    pub contents: Vec<Payload>,
+    pub(crate) contents: Vec<Payload>,
     hints: Vec<String>,
     pipe: Option<Pending>,
     deadline: Instant,
@@ -62,7 +62,7 @@ fn priority(mime: &str) -> u8 {
 }
 
 impl CaptureData {
-    pub fn new(mut types: Vec<String>, now: Instant) -> Self {
+    pub(crate) fn new(mut types: Vec<String>, now: Instant) -> Self {
         let mut failures = 0;
         let mut reasons = Vec::new();
         // The source handler already bounds length/count and removes private
@@ -93,11 +93,11 @@ impl CaptureData {
         }
     }
 
-    pub fn fd(&self) -> Option<RawFd> {
+    pub(crate) fn fd(&self) -> Option<RawFd> {
         self.pipe.as_ref().map(|p| p.file.as_raw_fd())
     }
 
-    pub fn wake_at(&self) -> Instant {
+    pub(crate) fn wake_at(&self) -> Instant {
         self.pipe
             .as_ref()
             .map_or(self.deadline, |p| p.idle.min(self.deadline))
@@ -145,7 +145,7 @@ impl CaptureData {
         true
     }
 
-    pub fn tick(
+    pub(crate) fn tick(
         &mut self,
         now: Instant,
         alive: bool,

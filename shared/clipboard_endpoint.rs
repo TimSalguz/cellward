@@ -197,7 +197,27 @@ pub fn prepare_paste(runtime: &Path, target: &str, revision: u64) -> io::Result<
     let mut body = vec![b'P', 1];
     put_string(&mut body, target);
     body.extend_from_slice(&revision.to_le_bytes());
-    let (_, answer, image) = exchange(runtime, &body, None)?;
+    prepare(runtime, &body)
+}
+
+pub fn prepare_drop(
+    runtime: &Path,
+    target: &str,
+    drag_id: u64,
+    target_revision: u64,
+) -> io::Result<PastePlan> {
+    if !valid_label(target) || drag_id == 0 {
+        return Err(invalid());
+    }
+    let mut body = vec![b'Q', 1];
+    put_string(&mut body, target);
+    body.extend_from_slice(&drag_id.to_le_bytes());
+    body.extend_from_slice(&target_revision.to_le_bytes());
+    prepare(runtime, &body)
+}
+
+fn prepare(runtime: &Path, body: &[u8]) -> io::Result<PastePlan> {
+    let (_, answer, image) = exchange(runtime, body, None)?;
     if answer.len() < 2 || (answer[1] != 2 && image.is_some()) {
         return Err(invalid());
     }
@@ -281,6 +301,32 @@ pub fn commit_paste(
     }
     Ok(u64::from_le_bytes(answer[1..].try_into().unwrap()))
 }
+pub fn commit_drop(
+    runtime: &Path,
+    target: &str,
+    candidate: &PastePreview,
+    allow_secret: bool,
+) -> io::Result<u64> {
+    if !valid_label(target) {
+        return Err(invalid());
+    }
+    let mut body = vec![b'K', 1];
+    put_string(&mut body, target);
+    for n in [
+        candidate.epoch,
+        candidate.source_revision,
+        candidate.target_revision,
+    ] {
+        body.extend_from_slice(&n.to_le_bytes());
+    }
+    body.push(u8::from(allow_secret));
+    let (_, answer, fd) = exchange(runtime, &body, None)?;
+    if fd.is_some() || answer.len() != 9 {
+        return Err(invalid());
+    }
+    Ok(u64::from_le_bytes(answer[1..].try_into().unwrap()))
+}
+
 pub fn list(runtime: &Path) -> io::Result<Vec<(String, String)>> {
     let (_, answer, changed) = exchange(runtime, b"E", None)?;
     if changed.is_some() {

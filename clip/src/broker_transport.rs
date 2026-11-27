@@ -5,17 +5,14 @@
 //! path, application-selected instance name, or cross-instance operation.
 //! The controller, not an application, controls instance lifetime.
 //!
-//! Frames are u32 little-endian length + body. Requests start with opcode
-//! (1 types, 2 set, 3 read, 4 clear), then selection (0 CLIPBOARD, 1 PRIMARY).
-//! Set adds u16 count then repeated (u16 MIME length, MIME, u32 data length,
-//! data). Read adds u64 revision and a length-prefixed MIME. Types/clear
-//! have no remaining bytes. Trailing bytes are rejected. Responses start
-//! with status (0 success, 1 error + code); success carries a present byte
-//! and revision/types for types, a revision for set, u32 length/data for
-//! read, or nothing for clear. No request can enumerate or select scopes.
+//! Frames are u32 little-endian length + body. Every request is bound to the
+//! endpoint's instance and carries one of the two clipboard selections. DnD
+//! registration, frozen snapshots and approved drop reads use separate opcodes;
+//! they never name a third selection or another instance. Payloads are bounded,
+//! trailing bytes are rejected, and no request can enumerate or select scopes.
 //!
-//! The FD adapter to Wayland/X11, recorder and explicit host UI transfer is
-//! still pending. This module does not change the desktop's active clipboard.
+//! Cross-scope clipboard commit remains a trusted host operation, not an
+//! application wire request. Drop replay reads only its own approved snapshot.
 
 use crate::broker::{Broker, Error, Instance, Limits, Revision, Selection};
 use crate::Content;
@@ -101,7 +98,11 @@ impl Transport {
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.peers.iter().filter_map(|peer| peer.deadline).min()
+        self.peers
+            .iter()
+            .filter_map(|peer| peer.deadline)
+            .chain(self.broker.next_drop_deadline())
+            .min()
     }
 
     pub fn contains_peer(&self, fd: std::os::fd::RawFd) -> bool {
@@ -154,9 +155,39 @@ impl Transport {
             .commit_paste(to, epoch, from_revision, to_revision, allow_secret, now)
     }
 
+    pub fn prepare_drop(
+        &self,
+        to: Instance,
+        drag_id: u64,
+        expected: u64,
+        now: Instant,
+    ) -> Result<crate::broker::PasteDecision, Error> {
+        self.broker.prepare_drop(to, drag_id, expected, now)
+    }
+
+    pub fn commit_drop(
+        &mut self,
+        to: Instance,
+        drag_id: u64,
+        drop_revision: Revision,
+        target_revision: u64,
+        allow_secret: bool,
+        now: Instant,
+    ) -> Result<Revision, Error> {
+        self.broker.commit_drop(
+            to,
+            drag_id,
+            drop_revision,
+            target_revision,
+            allow_secret,
+            now,
+        )
+    }
+
     /// One fair, nonblocking turn, at most QUANTUM bytes in/out per peer.
     /// A slow or malformed peer is closed without stalling other instances.
     pub fn tick(&mut self, now: Instant) {
+        self.broker.expire_drops(now);
         let mut scoped = HashMap::<Instance, usize>::new();
         for peer in &self.peers {
             *scoped.entry(peer.instance).or_default() += peer.buffered();
@@ -403,11 +434,19 @@ fn dispatch(broker: &mut Broker, instance: Instance, bytes: &[u8], limit: usize)
                 }
                 Ok(response(&answer, limit))
             }
-            2 | 7 => {
+            2 | 7 | 12 => {
                 if limit < 13 {
                     return Err(Error::Limit);
                 }
                 let epoch = if opcode == 7 { Some(d.number()?) } else { None };
+                let drop = if opcode == 12 {
+                    if selection != Selection::Clipboard {
+                        return Err(Error::InvalidTypes);
+                    }
+                    Some((d.number()?, d.number()?))
+                } else {
+                    None
+                };
                 let count = d.short()?;
                 if !(1..=64).contains(&count) {
                     return Err(Error::InvalidTypes);
@@ -426,7 +465,15 @@ fn dispatch(broker: &mut Broker, instance: Instance, bytes: &[u8], limit: usize)
                         data: data.to_vec(),
                     })
                     .collect();
-                let revision = if let Some(epoch) = epoch {
+                let revision = if let Some((drag_id, target_revision)) = drop {
+                    broker.finish_drop(
+                        instance,
+                        drag_id,
+                        target_revision,
+                        contents,
+                        Instant::now(),
+                    )?
+                } else if let Some(epoch) = epoch {
                     broker.finish_capture(instance, selection, epoch, contents, Instant::now())?
                 } else {
                     broker.set(instance, selection, contents)?
@@ -478,7 +525,47 @@ fn dispatch(broker: &mut Broker, instance: Instance, bytes: &[u8], limit: usize)
             }
             9 => {
                 d.done()?;
-                Ok(response(&[0, 3], limit))
+                Ok(response(&[0, 7], limit))
+            }
+            10 => {
+                if selection != Selection::Clipboard {
+                    return Err(Error::InvalidTypes);
+                }
+                let drag_id = d.number()?;
+                d.done()?;
+                broker.begin_drag(instance, drag_id)?;
+                let mut answer = vec![0];
+                answer.extend_from_slice(&drag_id.to_le_bytes());
+                Ok(response(&answer, limit))
+            }
+            11 => {
+                if selection != Selection::Clipboard {
+                    return Err(Error::InvalidTypes);
+                }
+                let drag_id = d.number()?;
+                d.done()?;
+                broker.abort_drag(instance, drag_id);
+                Ok(response(&[0], limit))
+            }
+            13 => {
+                if selection != Selection::Clipboard {
+                    return Err(Error::InvalidTypes);
+                }
+                let drag_id = d.number()?;
+                let drop_revision = Revision::from_wire(d.number()?);
+                let mime = d.mime()?;
+                d.done()?;
+                let data =
+                    broker.read_drop(instance, drag_id, drop_revision, mime, Instant::now())?;
+                if data.len().saturating_add(9) > limit {
+                    return Err(Error::Limit);
+                }
+                let mut answer = Bytes(vec![0]);
+                answer
+                    .0
+                    .extend_from_slice(&(data.len() as u32).to_le_bytes());
+                answer.0.extend_from_slice(data);
+                Ok(response(&answer.0, limit))
             }
             _ => Err(Error::InvalidTypes),
         }
@@ -983,5 +1070,166 @@ mod tests {
             server.broker.types(attacker, Selection::Clipboard).unwrap(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use crate::clipboard_client::{Client, Reply, Request, Selection as Which};
+
+    fn run(server: &mut Transport, client: &mut Client, request: Request<'_>) -> Reply {
+        client
+            .start(Which::Clipboard, request, Instant::now())
+            .unwrap();
+        for _ in 0..2000 {
+            server.tick(Instant::now());
+            if let Some(reply) = client.tick(Instant::now()) {
+                return reply.unwrap();
+            }
+        }
+        panic!("smart-drop exchange stalled")
+    }
+
+    #[test]
+    fn ordinary_scoped_capture_still_previews_the_latest_copy() {
+        let now = Instant::now();
+        let mut server = Transport::default();
+        let source = server.register().unwrap();
+        let target = server.register().unwrap();
+        let mut client = Client::new(server.connect(source).unwrap()).unwrap();
+        let Reply::Begun(epoch) = run(
+            &mut server,
+            &mut client,
+            Request::BeginCapture { user_copy: true },
+        ) else {
+            panic!()
+        };
+        let Reply::Set(source_revision) = run(
+            &mut server,
+            &mut client,
+            Request::FinishCapture {
+                epoch,
+                parts: &[("text/plain", b"ordinary copy")],
+            },
+        ) else {
+            panic!()
+        };
+        let crate::broker::PasteDecision::Transfer(candidate) =
+            server.prepare_paste(target, 0, now).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(candidate.preview, "ordinary copy");
+        assert_eq!(candidate.revision.wire(), source_revision);
+    }
+
+    #[test]
+    fn scoped_sockets_capture_approve_and_read_only_the_frozen_drop() {
+        let now = Instant::now();
+        let mut server = Transport::default();
+        let source = server.register().unwrap();
+        let target = server.register().unwrap();
+        let mut source_client = Client::new(server.connect(source).unwrap()).unwrap();
+        let mut target_client = Client::new(server.connect(target).unwrap()).unwrap();
+        assert!(matches!(
+            run(&mut server, &mut source_client, Request::Capabilities),
+            Reply::Capabilities(7)
+        ));
+        assert!(matches!(
+            run(
+                &mut server,
+                &mut source_client,
+                Request::BeginDrag { drag_id: 71 }
+            ),
+            Reply::Begun(71)
+        ));
+        let Reply::Set(target_revision) = run(
+            &mut server,
+            &mut target_client,
+            Request::Set(&[("text/plain", b"clipboard stays")]),
+        ) else {
+            panic!()
+        };
+        assert!(matches!(
+            server
+                .prepare_drop(target, 71, target_revision, now)
+                .unwrap(),
+            crate::broker::PasteDecision::Pending(71)
+        ));
+        let binary = b"\x00\xff\x10frozen\x00";
+        let Reply::Set(drop_revision) = run(
+            &mut server,
+            &mut target_client,
+            Request::FinishDrop {
+                drag_id: 71,
+                target_revision,
+                parts: &[
+                    ("text/uri-list", b"https://example.test/\r\n"),
+                    ("application/x-synthetic", binary),
+                ],
+            },
+        ) else {
+            panic!()
+        };
+        server
+            .commit_drop(
+                target,
+                71,
+                Revision::from_wire(drop_revision),
+                target_revision,
+                false,
+                now,
+            )
+            .unwrap();
+        let Reply::Data(data) = run(
+            &mut server,
+            &mut target_client,
+            Request::ReadDrop {
+                drag_id: 71,
+                drop_revision,
+                mime: "application/x-synthetic",
+            },
+        ) else {
+            panic!()
+        };
+        assert_eq!(data.as_slice(), binary);
+        assert!(matches!(
+            run(
+                &mut server,
+                &mut source_client,
+                Request::ReadDrop {
+                    drag_id: 71,
+                    drop_revision,
+                    mime: "application/x-synthetic",
+                }
+            ),
+            Reply::Rejected(2)
+        ));
+        let Reply::Types(Some((current, _))) = run(&mut server, &mut target_client, Request::Types)
+        else {
+            panic!()
+        };
+        assert_eq!(current, target_revision);
+        assert!(matches!(
+            run(
+                &mut server,
+                &mut source_client,
+                Request::AbortDrag { drag_id: 71 }
+            ),
+            Reply::Cleared
+        ));
+        assert!(matches!(
+            run(
+                &mut server,
+                &mut target_client,
+                Request::ReadDrop {
+                    drag_id: 71,
+                    drop_revision,
+                    mime: "application/x-synthetic",
+                }
+            ),
+            Reply::Rejected(2)
+        ));
     }
 }

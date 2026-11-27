@@ -223,6 +223,7 @@ use wl_proxy::protocols::wayland::wl_keyboard::{
     WlKeyboard, WlKeyboardHandler, WlKeyboardKeyState, WlKeyboardKeymapFormat,
 };
 pub(crate) mod screenshot;
+pub(crate) mod smart_drop;
 pub(crate) mod smart_paste;
 pub(crate) mod typing;
 use wl_proxy::protocols::wayland::wl_output::{WlOutput, WlOutputTransform};
@@ -7275,19 +7276,48 @@ impl WlDataDeviceManagerHandler for DataDeviceManager {
 /// A drag over a strip is not over the program: its enter, motion, leave and
 /// drop are dropped. (The offer announced before the enter has already gone
 /// to the program; unused, it is harmless.)
+struct ActiveDrag {
+    offer: Rc<WlDataOffer>,
+    offer_id: u64,
+    surface: Weak<WlSurface>,
+    drag_id: Option<u64>,
+    own_drag: bool,
+    drag_invalid: bool,
+}
+
 #[derive(Default)]
 struct DataDevice {
     away: bool,
-    dragged: Option<u64>,
-}
-
-impl DataDevice {
-    fn take_drag(&mut self) -> Option<u64> {
-        self.dragged.take()
-    }
+    active: Option<ActiveDrag>,
 }
 
 impl WlDataDeviceHandler for DataDevice {
+    fn handle_start_drag(
+        &mut self,
+        slf: &Rc<WlDataDevice>,
+        source: Option<&Rc<WlDataSource>>,
+        origin: &Rc<WlSurface>,
+        icon: Option<&Rc<WlSurface>>,
+        serial: u32,
+    ) {
+        if private_clipboard::enabled() {
+            if let Some(source) = source {
+                if let Ok(mut handler) = source.try_get_handler_mut::<Source>() {
+                    if handler.drag.is_none() {
+                        if let Some(drag_id) = private_clipboard::begin_drag() {
+                            handler.drag = Some(drag_id);
+                            source.send_offer(&crate::clip::drag_mark(drag_id));
+                            if let Some(mark) = crate::clip::drag_own_mark() {
+                                source.send_offer(&mark);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        slf.send_start_drag(source, origin, icon, serial);
+    }
+
     fn handle_set_selection(
         &mut self,
         slf: &Rc<WlDataDevice>,
@@ -7347,9 +7377,10 @@ impl WlDataDeviceHandler for DataDevice {
         id: Option<&Rc<WlDataOffer>>,
     ) {
         self.away = !programs(surface);
+        self.active = None;
         if !self.away {
-            // A drag is the person's own act: what it carries is theirs to
-            // drop, whoever's it is.
+            // Announcing formats on enter does not authorize a foreign receive.
+            // Only a real drop can start the separate confirmation path.
             if let Some(offer) = id {
                 if let Ok(mut info) = offer.try_get_handler_mut::<Offer>() {
                     if private_clipboard::enabled() && !info.announced {
@@ -7365,7 +7396,14 @@ impl WlDataDeviceHandler for DataDevice {
                         }
                         info.announced = true;
                     }
-                    self.dragged = Some(info.id);
+                    self.active = Some(ActiveDrag {
+                        offer: offer.clone(),
+                        offer_id: info.id,
+                        surface: Rc::downgrade(surface),
+                        drag_id: info.drag_id,
+                        own_drag: info.own_drag,
+                        drag_invalid: info.drag_invalid,
+                    });
                 }
             }
             slf.send_enter(serial, surface, x, y, id);
@@ -7373,7 +7411,7 @@ impl WlDataDeviceHandler for DataDevice {
     }
 
     fn handle_leave(&mut self, slf: &Rc<WlDataDevice>) {
-        self.dragged = None;
+        self.active = None;
         if !std::mem::take(&mut self.away) {
             slf.send_leave();
         }
@@ -7386,12 +7424,34 @@ impl WlDataDeviceHandler for DataDevice {
     }
 
     fn handle_drop(&mut self, slf: &Rc<WlDataDevice>) {
-        if let Some(offer) = self.take_drag() {
-            crate::clip::dragged(offer);
+        if std::mem::take(&mut self.away) {
+            self.active = None;
+            return;
         }
-        if !std::mem::take(&mut self.away) {
-            slf.send_drop();
+        let Some(active) = self.active.take() else {
+            return;
+        };
+        if private_clipboard::enabled() {
+            smart_drop::cancel();
+            if active.own_drag && active.drag_id.is_some() && !active.drag_invalid {
+                slf.send_drop();
+                return;
+            }
+            let Some(surface) = active.surface.upgrade() else {
+                return;
+            };
+            let started = active.drag_id.is_some_and(|drag_id| {
+                private_clipboard::revision().is_some_and(|revision| {
+                    smart_drop::begin(slf, &surface, &active.offer, drag_id, revision)
+                })
+            });
+            if started {
+                self.away = true;
+            }
+            return;
         }
+        crate::clip::dragged(active.offer_id);
+        slf.send_drop();
     }
 
     fn handle_data_offer(&mut self, slf: &Rc<WlDataDevice>, id: &Rc<WlDataOffer>) {
@@ -7425,6 +7485,7 @@ struct Source {
     types: Vec<String>,
     relay_overflow: bool,
     alive: Rc<Cell<bool>>,
+    drag: Option<u64>,
 }
 
 impl Default for Source {
@@ -7433,6 +7494,7 @@ impl Default for Source {
             types: Vec::new(),
             relay_overflow: false,
             alive: Rc::new(Cell::new(true)),
+            drag: None,
         }
     }
 }
@@ -7440,6 +7502,9 @@ impl Default for Source {
 impl WlDataSourceHandler for Source {
     fn handle_cancelled(&mut self, slf: &Rc<WlDataSource>) {
         self.alive.set(false);
+        if let Some(drag_id) = self.drag.take() {
+            private_clipboard::abort_drag(drag_id);
+        }
         clipboard_relay::source_destroyed(slf);
         slf.send_cancelled();
     }
@@ -7455,8 +7520,18 @@ impl WlDataSourceHandler for Source {
         }
     }
 
+    fn handle_dnd_finished(&mut self, slf: &Rc<WlDataSource>) {
+        if let Some(drag_id) = self.drag.take() {
+            private_clipboard::abort_drag(drag_id);
+        }
+        slf.send_dnd_finished();
+    }
+
     fn handle_destroy(&mut self, slf: &Rc<WlDataSource>) {
         self.alive.set(false);
+        if let Some(drag_id) = self.drag.take() {
+            private_clipboard::abort_drag(drag_id);
+        }
         clipboard_relay::source_destroyed(slf);
         slf.send_destroy();
     }
@@ -7474,6 +7549,10 @@ impl WlDataSourceHandler for Source {
 struct Offer {
     id: u64,
     own: bool,
+    drag_id: Option<u64>,
+    own_drag: bool,
+    drag_invalid: bool,
+    approved: Option<(u64, u64)>,
     types: Vec<String>,
     relay_overflow: bool,
     announced: bool,
@@ -7488,6 +7567,10 @@ impl Default for Offer {
         Self {
             id: crate::clip::fresh_offer_id(),
             own: false,
+            drag_id: None,
+            own_drag: false,
+            drag_invalid: false,
+            approved: None,
             types: Vec::new(),
             relay_overflow: false,
             announced: !private_clipboard::enabled(),
@@ -7519,6 +7602,16 @@ impl WlDataOfferHandler for Offer {
         }
     }
     fn handle_offer(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str) {
+        if let Some(drag_id) = crate::clip::dragged_id(mime_type) {
+            if self.drag_id.replace(drag_id).is_some() {
+                self.drag_invalid = true;
+            }
+            return;
+        }
+        if crate::clip::is_own_drag(mime_type) {
+            self.own_drag = true;
+            return;
+        }
         if crate::clip::is_mark(mime_type) {
             self.own |= crate::clip::is_own(mime_type);
             if mime_type == crate::clip::HISTORY_MARK {
@@ -7533,6 +7626,16 @@ impl WlDataOfferHandler for Offer {
     }
 
     fn handle_receive(&mut self, slf: &Rc<WlDataOffer>, mime_type: &str, fd: &Rc<OwnedFd>) {
+        if private_clipboard::enabled() {
+            if self.own_drag && self.drag_id.is_some() && !self.drag_invalid {
+                slf.send_receive(mime_type, fd);
+            } else if let Some((drag_id, drop_revision)) = self.approved {
+                if self.drag_id == Some(drag_id) {
+                    private_clipboard::read_drop(drag_id, drop_revision, mime_type, fd);
+                }
+            }
+            return;
+        }
         if crate::clip::may_read(self.own, crate::clip::Which::Clipboard, mime_type, self.id) {
             slf.send_receive(mime_type, fd);
         }
@@ -8952,19 +9055,15 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_drag_is_readable_only_on_drop_and_only_once() {
+    fn legacy_drag_authorization_does_not_cover_another_offer() {
         let id = crate::clip::fresh_offer_id();
-        let mut device = DataDevice {
-            dragged: Some(id),
-            ..DataDevice::default()
-        };
+        let other = crate::clip::fresh_offer_id();
         assert!(!crate::clip::may_read(
             false,
             crate::clip::Which::Clipboard,
             "image/png",
             id
         ));
-        assert_eq!(device.take_drag(), Some(id));
         crate::clip::dragged(id);
         assert!(crate::clip::may_read(
             false,
@@ -8972,6 +9071,11 @@ mod tests {
             "image/png",
             id
         ));
-        assert_eq!(device.take_drag(), None);
+        assert!(!crate::clip::may_read(
+            false,
+            crate::clip::Which::Clipboard,
+            "image/png",
+            other
+        ));
     }
 }
