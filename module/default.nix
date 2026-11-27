@@ -166,10 +166,11 @@ let
   # в этом файле от неё четыре двухстрочные обёртки, которые назначают
   # VPN_ZONE_TOOLS и делают exec.
   #
-  # Пять бинарей: vpn-zone-seccomp (фильтр отдельной командой — он же selftest),
+  # Бинари ядра: vpn-zone-seccomp (фильтр отдельной командой — он же selftest),
   # vpn-zone-core (подкоманды zone-holder, profile-run, sync, wl-sandbox и
-  # fs-sandbox), vpn-zone (сам CLI), vpn-zone-pick (пикер) и vpn-zone-gui
-  # (шесть ярлыков одной подкомандой каждый). ДВА ПЕРВЫХ ИМЕНЕМ СТАЛКИВАЮТСЯ с
+  # fs-sandbox), vpn-zone (сам CLI), vpn-zone-pick (пикер) и vpn-zone-gui;
+  # opt-in FileChooser backend — отдельный cellward-file-chooser;
+  # vpn-zone-gui (шесть ярлыков одной подкомандой каждый). ДВА ПЕРВЫХ ИМЕНЕМ СТАЛКИВАЮТСЯ с
   # обёртками из home.packages, поэтому крейт целиком туда не кладётся — в
   # профиль уходит symlink-набор vpn-zone-helpers (см. часть 3).
   # Сама деривация — в ../package.nix: её же собирает NixOS-модуль системного
@@ -874,6 +875,7 @@ let
     "audioManager"
     "pipewirePolicy"
     "capturePortal.enable"
+    "fileChooser.enable"
     "hostFilesWritable"
     "microphone"
     "screencast"
@@ -1135,6 +1137,10 @@ in
 
     capturePortal = {
       enable = lib.mkEnableOption "the Cellward ScreenCast backend. Registers org.freedesktop.impl.portal.desktop.cellward for org.freedesktop.impl.portal.ScreenCast only; the public portal is not replaced. Start a root-surface source from the frame before casting. Disabled by default";
+    };
+
+    fileChooser = {
+      enable = lib.mkEnableOption "the Cellward FileChooser backend. Registers only org.freedesktop.impl.portal.FileChooser under a separate D-Bus name; AppChooser and the public portal are not replaced. Explicitly selected foreign-scope files are exported through the Document Portal. Disabled by default";
     };
 
     pipewirePolicy = lib.mkOption {
@@ -1817,6 +1823,18 @@ in
         [D-BUS Service]
         Name=org.freedesktop.impl.portal.desktop.cellward
         Exec=${cellward-clip}/bin/cellward-capture-portal --impl --pw-dump ${pkgs.pipewire}/bin/pw-dump --kdialog ${pkgs.kdePackages.kdialog}/bin/kdialog --cellward ${cellward}/bin/cellward
+      '';
+    })
+    (lib.mkIf cfg.fileChooser.enable {
+      "xdg-desktop-portal/portals/cellward-filechooser.portal".text = ''
+        [portal]
+        DBusName=org.freedesktop.impl.portal.desktop.cellward.filechooser
+        Interfaces=org.freedesktop.impl.portal.FileChooser;
+      '';
+      "dbus-1/services/org.freedesktop.impl.portal.desktop.cellward.filechooser.service".text = ''
+        [D-BUS Service]
+        Name=org.freedesktop.impl.portal.desktop.cellward.filechooser
+        Exec=env VPN_ZONE_TOOLS=${vpn-zone-tools} ${vpn-zone-rust}/bin/cellward-file-chooser
       '';
     })
   ];

@@ -160,6 +160,7 @@ let
     ];
     pipewirePolicy = true;
     capturePortal.enable = true;
+    fileChooser.enable = true;
     desktop = {
       windowMenu.key = "Mod+Shift+Z";
       niri = {
@@ -399,6 +400,28 @@ in
       ))
       (expect "capture portal is opt-in" (
         !(hm.config.xdg.dataFile ? "xdg-desktop-portal/portals/cellward.portal")
+      ))
+    ];
+
+  fileChooserFiles =
+    let
+      portal = hmDeclared.config.xdg.dataFile."xdg-desktop-portal/portals/cellward-filechooser.portal".text;
+      service = hmDeclared.config.xdg.dataFile."dbus-1/services/org.freedesktop.impl.portal.desktop.cellward.filechooser.service".text;
+    in
+    lib.all lib.id [
+      (expect "only the impl FileChooser interface is registered, not AppChooser" (
+        lib.hasInfix "Interfaces=org.freedesktop.impl.portal.FileChooser;" portal
+        && !lib.hasInfix "AppChooser" portal
+        && !lib.hasInfix "org.freedesktop.portal.FileChooser" portal
+      ))
+      (expect "FileChooser has its own backend name and pinned binary" (
+        lib.hasInfix "Name=org.freedesktop.impl.portal.desktop.cellward.filechooser" service
+        && lib.hasInfix "/bin/cellward-file-chooser" service
+        && lib.hasInfix "VPN_ZONE_TOOLS=/nix/store/" service
+      ))
+      (expect "FileChooser is opt-in and does not replace the capture backend" (
+        !(hm.config.xdg.dataFile ? "xdg-desktop-portal/portals/cellward-filechooser.portal")
+        && lib.hasInfix "DBusName=org.freedesktop.impl.portal.desktop.cellward.filechooser" portal
       ))
     ];
 
@@ -743,7 +766,10 @@ in
       libseccomp
       # cellward-oc-auth links it (rust/build.rs).
       openconnect
+      # Isolated D-Bus integration tests (FileChooser, fake Document Portal).
+      dbus
     ];
+    env.CELLWARD_TEST_DBUS_CONFIG = "${pkgs.dbus}/share/dbus-1/session.conf";
     # The font of the window title (rust/src/wl_title.rs), as package.nix
     # builds it in: the tests draw the text with it.
     VPN_ZONE_FRAME_FONT = "${pkgs.dejavu_fonts.minimal}/share/fonts/truetype/DejaVuSans.ttf";

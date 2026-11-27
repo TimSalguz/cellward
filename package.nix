@@ -1,5 +1,6 @@
-# Rust-крейт cellward (прежнее имя — vpn-zones): пять бинарей (vpn-zone-seccomp,
-# vpn-zone-core, vpn-zone, vpn-zone-pick, vpn-zone-gui) — имена бинарей
+# Rust-крейт cellward (прежнее имя — vpn-zones): бинари ядра (vpn-zone-seccomp,
+# vpn-zone-core, vpn-zone, vpn-zone-pick, vpn-zone-gui) и отдельный
+# cellward-file-chooser — имена бинарей
 # внутренние и прежние, команды cellward, cw и cellward-gui делает из них
 # module/default.nix. Общий для обоих модулей — home-manager
 # (module/default.nix) и NixOS (module/nixos.nix, системный уровень M10).

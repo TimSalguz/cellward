@@ -15,6 +15,8 @@
 //! * [`gui`] — `vpn-zone-gui`, the six launcher entries (add and remove a zone,
 //!   create and remove a container, the settings, reset the pins), kdialog over
 //!   the CLI;
+//! * [`file_chooser`] — the opt-in host FileChooser backend, scoped Document
+//!   Portal grants and the request lifecycle;
 //! * [`dialog`] — the shapes of `kdialog` and `notify-send` call those two make,
 //!   and the traps of each;
 //! * [`launch`] — `vpn-zone run`, from the delegation of a launch that comes
@@ -97,10 +99,11 @@
 //! C program there, `fs_sandbox` a two-hundred-line shell script, `cli` the
 //! seven-hundred-line `vpn-zone` one, and `picker` and `gui` the last shell in
 //! the project: there is no Python, no C and no logic in shell left anywhere.
-//! Five binaries drive all of it: `vpn-zone` (the CLI), `vpn-zone-pick` (the
-//! picker), `vpn-zone-gui` (the launcher entries), `vpn-zone-core` (what the CLI
-//! and the systemd unit delegate to) and `vpn-zone-seccomp` (the filter, and its
-//! own selftest).
+//! Five core binaries drive all of it: `vpn-zone` (the CLI), `vpn-zone-pick`
+//! (the picker), `vpn-zone-gui` (the launcher entries), `vpn-zone-core` (what
+//! the CLI and the systemd unit delegate to) and `vpn-zone-seccomp` (the filter,
+//! and its own selftest). The opt-in FileChooser backend is a separate
+//! `cellward-file-chooser` binary.
 
 pub mod adapter_process;
 pub mod bridge;
@@ -136,6 +139,7 @@ pub mod egress;
 pub mod enter;
 pub mod epoch;
 pub mod explain;
+pub mod file_chooser;
 pub mod flows;
 pub mod focus;
 pub mod folder_rules;

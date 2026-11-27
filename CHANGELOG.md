@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Added
+- Add an opt-in `org.freedesktop.impl.portal.FileChooser` backend with OpenFile,
+  SaveFile and SaveFiles, filters/choices, cancellation and caller lifecycle.
+  Explicitly selected foreign-scope files travel through persistent Document
+  Portal grants with minimal read or read/write permissions; same-container
+  paths stay direct. Registration uses a separate backend name and leaves the
+  public portal and AppChooser unchanged. The host GUI currently uses kdialog;
+  Wayland parenting and multiple-directory selection remain follow-up work.
 - Launches and containers can be marked as automation: their selections stay
   local instead of replacing the latest user-copy candidate for cross-container paste.
 - Cross-container paste confirmation renders a bounded PNG preview from an
