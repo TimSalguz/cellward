@@ -36,6 +36,10 @@ pub(crate) fn initialize(shade: OwnedFd) {
 pub(crate) fn keep_fds() -> Vec<RawFd> {
     STATE.with_borrow(|s| s.shade.iter().map(|fd| fd.as_raw_fd()).collect())
 }
+
+pub(super) fn shade() -> Option<Rc<OwnedFd>> {
+    STATE.with_borrow(|s| s.shade.clone())
+}
 pub(super) fn arm(root: Weak<WlSurface>) {
     STATE.with_borrow_mut(|s| {
         s.active = None;

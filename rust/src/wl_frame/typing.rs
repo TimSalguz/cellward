@@ -66,6 +66,7 @@ impl Drop for Overlay {
 #[derive(Clone)]
 struct Target {
     token: u64,
+    frames: Rc<Frames>,
     window: Weak<RefCell<Window>>,
     root: Weak<WlSurface>,
     area: Rect,
@@ -81,6 +82,7 @@ struct Target {
 
 struct Run {
     seq: u64,
+    shade: Option<Overlay>,
     target: Target,
     plan: Plan,
     keymap: Option<Rc<OwnedFd>>,
@@ -111,7 +113,7 @@ pub(super) fn register_keyboard(
     state
 }
 
-fn overlay(window: &Rc<RefCell<Window>>, f: &Rc<Frames>, white: &Rc<OwnedFd>) -> Option<Overlay> {
+fn overlay(window: &Rc<RefCell<Window>>, f: &Rc<Frames>, image: &Rc<OwnedFd>) -> Option<Overlay> {
     let mut w = window.try_borrow_mut().ok()?;
     let area = w.area()?;
     if area.w <= 0 || area.h <= 0 {
@@ -142,7 +144,7 @@ fn overlay(window: &Rc<RefCell<Window>>, f: &Rc<Frames>, white: &Rc<OwnedFd>) ->
         area.w.saturating_add(area.x.max(0)),
         area.h.saturating_add(area.y.max(0)),
     );
-    let pool = shm.new_send_create_pool(white, 4);
+    let pool = shm.new_send_create_pool(image, 4);
     quiet(&*pool);
     let buffer = pool.new_send_create_buffer(0, 1, 1, 4, WlShmFormat::ARGB8888);
     quiet(&*buffer);
@@ -165,6 +167,12 @@ fn overlay(window: &Rc<RefCell<Window>>, f: &Rc<Frames>, white: &Rc<OwnedFd>) ->
         area,
         pressed: false,
     })
+}
+
+fn blocking_overlay(target: &Target) -> Option<Overlay> {
+    let window = target.window.upgrade()?;
+    let shade = screenshot::shade()?;
+    overlay(&window, &target.frames, &shade)
 }
 
 pub(crate) fn select(seq: u64, token: u64, white: OwnedFd, frames: &[Rc<Frames>]) {
@@ -254,6 +262,7 @@ pub(super) fn choose(
         };
         t.target = Some(Target {
             token: selection.token,
+            frames: f.clone(),
             window: Rc::downgrade(window),
             root: Rc::downgrade(&root),
             area: overlay.area,
@@ -294,8 +303,13 @@ pub(crate) fn start(
             (Some(target), Ok(plan))
                 if timing.valid() && (plan.keymap.is_some() == keymap.is_some()) =>
             {
+                let Some(shade) = blocking_overlay(&target) else {
+                    t.replies.push_back(Reply::Nowhere(seq));
+                    return;
+                };
                 t.run = Some(Run {
                     seq,
+                    shade: Some(shade),
                     target,
                     plan,
                     keymap: keymap.map(Rc::new),
@@ -418,6 +432,7 @@ impl Run {
         }
         let (d, l, locked, g) = state.mods;
         kb.send_modifiers(state.serial, d, l, locked, g);
+        self.shade.take();
         self.began = false;
     }
 }

@@ -394,9 +394,12 @@ another container's window.
 The proxy retains the target window and local coordinates, sends a left
 click, then key presses and releases only into that launch's connection.
 Changing compositor focus cannot redirect the events to another application.
-No clipboard selection is set. The original keymap and modifiers are restored
-on completion or cancellation. The Stop button or Escape in the manager
-cancels input; Escape during target selection removes the white overlay.
+During a run the target is dimmed and its pointer input is blocked; real
+keyboard input is swallowed only there, while Cellward's synthetic events
+continue directly to the application. No clipboard selection is set. The
+original keymap and modifiers are restored on completion or cancellation.
+The Stop button or Escape in the manager cancels input; Escape during target
+selection removes the white overlay.
 Closing or resizing the window invalidates the target. A point can be reused
 for other entries for five minutes; choosing another replaces it.
 

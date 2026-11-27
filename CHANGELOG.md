@@ -22,6 +22,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   without granting capture to apps.
 
 ### Fixed
+- Dim the target and block its pointer/keyboard input during character typing,
+  while Cellward's synthetic events continue and the original keymap is restored.
 - Keep the Nix daemon's resolver bound on `/etc/resolv.conf` itself rather than at
   the end of its symlink chain. Atomic resolved-stub replacement no longer exposes
   the host loopback stub inside the daemon; plain-zone resolver changes reach the

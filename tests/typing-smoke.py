@@ -269,7 +269,7 @@ def main():
             daemon.settimeout(0.2)
             stop = threading.Event()
             requests = []
-            text = "Manager Я🙂\n"
+            text = "Manager Я🙂" + " x" * 120 + "\n"
             copy_request = "copy-to\thost\t1\tsynthetic-gui" if args.frame_history else "copy\thost\t1"
             def serve():
                 while not stop.is_set():
@@ -354,6 +354,13 @@ def main():
                 for down in [1, 0]:
                     packet(vk, 6, 1, struct.pack("=III", int(time.monotonic() * 1000) & 0xFFFFFFFF, key, down))
                     time.sleep(0.05)
+            if args.grim:
+                screenshot("manager-typing-shade")
+                shaded = background()
+                assert all(shaded[i] < (30, 30, 46)[i] for i in range(3)), (
+                    "target window is not dimmed during host typing",
+                    shaded,
+                )
             wait_for(lambda: not any(w["app_id"] == "vpn-zone-window" for w in windows()), timeout=3)
             wait_for(lambda: output.exists() and output.stat().st_size)
             wait_for(lambda: any(w["app_id"] == "vpn-zone-window" for w in windows()))
